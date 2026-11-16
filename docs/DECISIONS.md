@@ -211,6 +211,22 @@ are listed at the end, not guessed.
   A0 is larger than the original — accepted, because a schema without a
   collector cannot prove bounded ingestion.
 
+- **D-024 — The drill's comparison runs on a multi-service workflow, and
+  every run includes a lost publish response (amends D-017 before any
+  counted run).** The first dry run of the kit on the reference host
+  (`perf/results/drill/20261116T223335Z-baseline.md`, seeder-aware) needed
+  a median of one search action per ticket with logs alone: the host writes
+  one clean log with the request ID on every line, so `grep <request id>`
+  answers most tickets. A 30% reduction from one action is impossible, so
+  the reference host cannot decide the ship gate; it proves the kit and the
+  mechanism. The deciding comparison runs on the Durable Runner-hosted
+  workflow (A2), where the evidence is split across the runner, its
+  handlers and the publisher. The same dry run drew no
+  `publish_lost_response` (draws were with repetition), the class the
+  guide's first release is about, so every run now includes at least one.
+  Trade-off: the gate moves later, behind A2 — accepted; a gate that the
+  baseline already passes measures nothing.
+
 ## Open questions
 
 All six questions the guide left open are answered above (2026-11-16):

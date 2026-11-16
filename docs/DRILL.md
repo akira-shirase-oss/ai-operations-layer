@@ -31,11 +31,13 @@ the class and the one correct recovery choice.
 
 ## A run
 
-`scripts/drill.sh` (A1) does the following, from a seed the performer does not see:
+`scripts/drill.py seed --mode baseline|layer` (A1) does the following, from a seed the
+performer does not see:
 
 1. Starts the stack and the reference host (layer on or off by mode).
 2. Sends background traffic (200 normal requests by default) and six
-   incidents drawn from the catalog (with repetition) at random positions.
+   incidents at random positions: at least one `publish_lost_response`, the
+   other five drawn from the catalog with repetition (D-024).
 3. Writes `tickets.md` — for each incident only the request ID and the
    customer-visible symptom ("my article did not appear", "it took very
    long") — and `answer-key.json`, whose SHA-256 is printed in
@@ -60,8 +62,10 @@ Two modes:
   `publish_lost_response` (anything but `reconcile_first`) is a failed
   ticket regardless of the class.
 
-Answers go in `answers.json`; `scripts/drill-score` compares them with the
-key and writes the result file under `perf/results/drill/`.
+Answers go in `answers.json`; `scripts/drill.py score` checks the key's hash
+against the tickets, compares, and writes the result file under
+`perf/results/drill/`. Background traffic also carries unticketed noise (about
+5% of requests retry the model once and succeed), as real logs do.
 
 ## What counts
 
@@ -76,3 +80,10 @@ key and writes the result file under `perf/results/drill/`.
   passing or failing, is committed with its seed, machine and commit.
 - **Order.** The baseline is run before the layer is used for diagnosis
   (A1); the layer run is A4.
+- **Which workflow counts (D-024).** The comparison that decides the ship
+  gate runs on a workflow whose evidence is split across at least two
+  services' logs — the Durable Runner-hosted workflow (A2). The reference
+  host keeps one clean, request-scoped log, so its logs-only baseline
+  already needs about one search action per ticket (dry run
+  `perf/results/drill/20261116T223335Z-baseline.md`); no tool can be 30%
+  better than that, and reference-host runs are dry runs of the kit only.
