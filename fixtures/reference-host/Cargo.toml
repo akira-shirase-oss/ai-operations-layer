@@ -1,0 +1,33 @@
+[package]
+name = "aiops-reference-host"
+description = "The AI Operations Layer's in-repo pilot host (D-012): a content workflow with fake model, tool and publisher, injectable faults and an authoritative publication record."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "reference-host"
+path = "src/main.rs"
+
+[dependencies]
+aiops-sdk.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+aiops-domain.workspace = true
+aiops-server = { path = "../../crates/aiops-server" }
+aiops-store.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+sqlx.workspace = true
+
+[lints]
+workspace = true

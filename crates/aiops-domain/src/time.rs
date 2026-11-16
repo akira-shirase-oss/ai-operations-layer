@@ -38,13 +38,21 @@ impl Timestamp {
             .map_err(|_| TimeError::Range)
     }
 
-    /// RFC 3339 in UTC with microsecond precision.
+    /// RFC 3339 in UTC with exactly six fractional digits, so the text sorts in time
+    /// order (a trimmed `.75838Z` would sort after `.758384Z`).
     pub fn to_rfc3339(self) -> String {
         let nanos = i128::from(self.0) * 1_000;
         match OffsetDateTime::from_unix_timestamp_nanos(nanos) {
-            Ok(t) => t
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| format!("@{}us", self.0)),
+            Ok(t) => format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+                t.year(),
+                u8::from(t.month()),
+                t.day(),
+                t.hour(),
+                t.minute(),
+                t.second(),
+                t.microsecond()
+            ),
             Err(_) => format!("@{}us", self.0),
         }
     }
@@ -91,6 +99,18 @@ mod tests {
         let b = Timestamp::parse_rfc3339("2026-11-16T15:30:00.123456+05:30").unwrap();
         assert_eq!(a, b);
         assert_eq!(a.to_rfc3339(), "2026-11-16T10:00:00.123456Z");
+    }
+
+    #[test]
+    fn renders_fixed_width_so_text_order_is_time_order() {
+        let a = Timestamp::from_unix_micros(1_763_287_325_758_380);
+        let b = Timestamp::from_unix_micros(1_763_287_325_758_384);
+        assert_eq!(a.to_rfc3339(), "2025-11-16T10:02:05.758380Z");
+        assert!(a.to_rfc3339() < b.to_rfc3339());
+        assert_eq!(
+            Timestamp::from_unix_micros(0).to_rfc3339(),
+            "1970-01-01T00:00:00.000000Z"
+        );
     }
 
     #[test]
