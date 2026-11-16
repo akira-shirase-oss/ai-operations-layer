@@ -9,9 +9,10 @@
 2. **PostgreSQL is the layer's only authority** for what it stores: operation
    and event metadata, control records (retry/reconcile intents, approvals,
    outcomes) and the audit log. One schema, migrations in the store crate.
-3. **Object storage holds bounded blobs only** (e.g. over-threshold payloads),
-   written under an explicit size bound and referenced from Postgres metadata.
-   Losing a blob degrades detail, never the operation's recorded history.
+3. **No object storage in the first release** (D-014). Events are metadata
+   under hard caps. If a measured need brings blobs back, they hold
+   over-threshold detail only, referenced from Postgres; losing one degrades
+   detail, never the recorded history.
 4. **SDK-side queues are disposable buffers.** They exist to keep the host
    working when the collector is down; every drop is counted and surfaced.
    They are never a durability claim.
@@ -22,30 +23,40 @@
 
 | Piece | Role |
 |---|---|
-| `sdk/typescript` | Host-side instrumentation: emits operation IDs, propagates OpenTelemetry-compatible context, enqueues events to a bounded buffer, batches to the ingest API, counts drops. Never blocks the host request path beyond its bound. |
+| `aiops-sdk` | The first SDK, in Rust (D-013): emits operation IDs, propagates W3C `traceparent` context, enqueues events to a bounded queue without blocking, batches to the ingest API, counts drops, reports gaps (D-021). The wire format is `docs/INGEST_CONTRACT.md`, so other languages can post without it. Server-side only. |
 | `aiops-domain` | Pure model: the versioned event schema, operation/step identities, outcome classification (transport / validation / uncertain-external-effect), cardinality limits, redaction rules, control-state machine. No I/O — enforced. |
 | `aiops-store` | PostgreSQL access: idempotent event upserts (dedup by event ID), operation metadata, control records, audit log, retention/rollup jobs, drop counters. |
 | `aiops-server` | Axum API: the ingest path, the query path and the control path as separately bounded, separately authenticated surfaces; health endpoints reporting ingestion and storage state honestly. |
-| `aiops-adapter-*` | Execution adapters (first: workflow runner or hosted jobs — see open questions). An adapter is the only component allowed to effect an external action, and only inside its ownership contract. |
+| `aiops-adapter-*` | Execution adapters (A3; first the reference host's publisher, then Durable Runner through its public API — D-012). An adapter is the only component allowed to effect an external action, and only inside its ownership contract. |
 | `apps/console` | SvelteKit investigation console: operation timeline, filtering, release comparison, missing-data states, control actions through the API only. |
-| `fixtures/` | The instrumented pilot workflow (if not hosted in an existing workspace app) and fault fixtures: hung model, lost publish response, duplicate/lated event emitters, high-cardinality generators. |
+| `fixtures/reference-host` | The in-repo pilot host (D-012): request → generation → validation → fact-check → publish with fake model/tool/publisher, injectable faults, cost estimates and an authoritative publication record. Also the drill's incident generator (`docs/DRILL.md`). |
 | `perf/` | k6 scenarios + `results/` (machine + commit on every run). |
 
-Names are provisional until the workspace exists; the roles are not.
+The collector serves the built console at `/console/` with a strict
+Content Security Policy (D-022). The local stack (`deploy/compose.yaml`,
+project `ai-operations-layer`) binds Postgres to `127.0.0.1:57432`; the
+collector listens on `127.0.0.1:57400` and the reference host on
+`127.0.0.1:57401`.
 
 ## Paths
 
 **Emit:** host app starts an operation (SDK assigns/propagates operation ID +
 OTel-compatible trace context) → each model/tool/job step records an event
-(kind, status, event time, IDs, bounded metadata) → bounded SDK queue →
-batched `POST /ingest` with auth → ack returns accepted/dropped counts →
-queue drains or drops, counting either way.
+(kind, status, event time, IDs, `seq`/`op_seq`, bounded metadata) → bounded
+SDK queue (non-blocking enqueue; full → drop newest, counted) → batched
+`POST /v1/ingest` with the host's ingest key → ack returns accepted /
+duplicate / refused counts → queue drains or drops, counting either way;
+pending gap reports are sent when the collector answers again.
 
-**Ingest:** authenticate (project-scoped credential) → validate against the
-schema version → enforce body/cardinality bounds → apply the metadata
-allowlist (default-deny: no prompts, content, tokens, secrets) → idempotent
-upsert (dedup on event ID; store event time *and* receive time) → count drops
-and rejects. Nothing in this path touches a control record or a host system.
+**Ingest:** shed if too many requests are in flight → authenticate (the
+ingest key's hash names one project) → per-key token bucket → bounded body
+→ validate against the schema version (each bad event refused by name, the
+rest accepted) → enforce caps → withhold non-allowlisted attributes and
+redact secret shapes, counted (default-deny: no prompts, content, tokens,
+secrets) → one transaction: idempotent multi-row upsert (dedup on
+`(project, event_id)`; store event time *and* receive time and the key the
+event arrived under), operation summaries, source-instance counters →
+answer. Nothing in this path touches a control record or a host system.
 
 **Investigate:** console → query API (same auth, project scope) → timeline
 assembled ordered by event time with receive time displayed → explicit gap
@@ -93,10 +104,13 @@ cross-project query) plus the degraded path above.
 ## Layout
 
 ```
-crates/        aiops-domain, aiops-store, aiops-server, aiops-adapter-*
-sdk/typescript/  host instrumentation SDK (the first SDK per the guide)
-apps/console/    SvelteKit investigation console
-docs/            END_GOAL, ARCHITECTURE, ROADMAP, DECISIONS, modules/
-fixtures/        pilot workflow and/or fault fixtures
-perf/            k6 scenarios + results/
+crates/          aiops-domain (pure), aiops-store, aiops-server, aiops-sdk,
+                 aiops-adapter-* (A3)
+fixtures/        reference-host (pilot workflow + drill incident generator)
+apps/console/    SvelteKit investigation console (served at /console/)
+deploy/          compose.yaml — the local stack
+docs/            END_GOAL, ARCHITECTURE, ROADMAP, DECISIONS, DRILL,
+                 INGEST_CONTRACT
+perf/            k6 scenarios + results/ (machine + commit on every run)
+scripts/         check.sh and the gates it runs
 ```

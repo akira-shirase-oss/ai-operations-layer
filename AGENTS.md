@@ -15,9 +15,12 @@ authoritative).
 2. `docs/ARCHITECTURE.md` — sources of truth, emit/ingest/investigate/
    control paths, consistency story.
 3. `docs/DECISIONS.md` — seeded directions (evidence not authority, add-on
-   not migration, two clocks, default-deny metadata, no generic rerun) and
-   the open questions — never silently resolve an open question.
+   not migration, two clocks, default-deny metadata, no generic rerun), the
+   answers to OQ1–OQ6 (D-012–D-017) and any new open question — never
+   silently resolve an open question.
 4. `docs/ROADMAP.md` — A0–A4 milestone order and each milestone's proof gate.
+5. `docs/INGEST_CONTRACT.md` — the versioned wire contract; `docs/DRILL.md`
+   — the pre-registered diagnosis drill.
 
 ## Non-negotiables
 
@@ -56,13 +59,18 @@ authoritative).
 - `aiops-domain` carries no I/O — enforced like the other projects' domain
   crates.
 
-## TypeScript SDK rules
+## SDK rules (Rust `aiops-sdk` now; TypeScript later, same rules — D-013)
 
 - The SDK must never block the host request path beyond its bound; the
-  queue, batch and flush all have limits.
+  queue, batch and flush all have limits. Emitting is a non-blocking
+  enqueue; a full queue drops and counts (D-021).
 - Every drop is counted and every counter is exposable to the host.
+- The SDK returns errors and never panics; it keeps working (and its host
+  keeps working) when the collector is down.
 - Context propagation follows OTel-compatible formats; event payloads
-  conform to the versioned schema — no schema drift without a version bump.
+  conform to the versioned schema in `docs/INGEST_CONTRACT.md` — no schema
+  drift without a version bump.
+- Server-side only: an ingest key in a browser is a published key.
 
 ## Frontend rules
 
@@ -70,6 +78,8 @@ authoritative).
   permissioned API everything else uses; it holds no authority.
 - `unknown`, `uncertain`, gap and drop states are first-class renders —
   never interpolated into a clean timeline.
+- Event text is attacker-influenced: render it as text, never as HTML
+  (no `{@html}`), under the CSP the build emits.
 
 ## Testing rule
 

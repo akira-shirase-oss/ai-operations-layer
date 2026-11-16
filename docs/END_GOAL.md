@@ -21,23 +21,30 @@ guide wins. Deliberate deviations are recorded in `docs/DECISIONS.md`.
 - A versioned event schema correlating operation, trace, request, job, step,
   model, prompt/config version and deployment — idempotent events with bounded
   cardinality.
-- A TypeScript SDK for existing applications: emits operation IDs, propagates
-  OpenTelemetry-compatible context, buffers under a bounded drop policy when
-  the collector is unreachable, and counts every drop.
+- A Rust SDK (`aiops-sdk`) plus a language-neutral HTTP/JSON ingestion
+  contract (`docs/INGEST_CONTRACT.md`) for existing applications — the
+  portfolio's hosts are Rust services (D-013; a TypeScript SDK is later).
+  The SDK emits operation IDs, propagates OpenTelemetry-compatible context,
+  buffers under a bounded drop policy when the collector is unreachable, and
+  counts every drop. Server-side only.
 - A Rust + Axum collector/API: bounded, authenticated ingestion and query
   paths, isolated from the control path.
-- PostgreSQL for operation metadata and explicit control records; bounded
-  blobs in object storage only when a defined threshold requires it.
+- PostgreSQL for operation metadata and explicit control records. No object
+  storage in the first release: events are metadata only, under hard caps
+  (D-014).
 - A SvelteKit investigation console: one timeline per operation — event time
   and receive time shown separately — with filtering, release comparison and
   explicit missing-data states.
-- One execution adapter (workflow runner or hosted jobs) with safe control:
+- One execution adapter — the reference host's publisher first, then
+  Durable Runner through its public API (D-012) — with safe control:
   retry/reconcile endpoints requiring actor scope, expected execution state
   and a stable business key; reconcile before rerunning when an external
   outcome is unknown. Controls exist only where the adapter owns execution.
 - The pilot: one authorized, noncritical content workflow, observable from
   request → generation → validation → publishing in a single timeline, and
-  recoverable through the controlled path.
+  recoverable through the controlled path. It runs first in the in-repo
+  reference host (`fixtures/reference-host`), then on Durable Runner as the
+  first real host (D-012).
 - Provider usage/cost tracking with estimated cost labeled separately from
   reconciled billing; capped retention; drop counters everywhere loss occurs.
 
@@ -91,17 +98,31 @@ The guide's four cases are contract, not options:
 | Collector unavailable | Application work continues under a bounded telemetry policy; dropped/gap counts remain visible |
 | Duplicate or late events | Merge without false chronology; event time and receive time both shown |
 | Model/publishing timeout | Differentiate transport error, validation failure and uncertain external effect |
-| Unauthorized retry or cross-project query | Deny and audit; AI-generated investigation text cannot widen access |
+| Unauthorized retry or cross-project query | Deny and audit; AI-generated investigation text cannot widen access (vacuous until AI summaries exist; tested when they arrive, never claimed before) |
 
 ## Ship gate
 
 From the guide: **ship when one failed AI workflow can be diagnosed and
 safely resolved with measurably less searching than the existing setup.**
 
-"Measurably" is owed a method, not a vibe: a timed diagnosis drill on an
-independent second workflow (find the failure, state the recovery choice)
-against the pre-layer baseline, recorded in `perf/results/`. The drill
-protocol is defined in milestone A4; see open questions in `docs/DECISIONS.md`.
+"Measurably" is owed a method, not a vibe. The protocol is pre-registered
+in `docs/DRILL.md` (D-017): seeded incidents, tickets with only a request ID
+and a symptom, a sealed answer key, search actions and wall time per
+ticket. The logs-only baseline is measured in A1, *before* the layer is
+used for diagnosis; the layer run is A4, by a performer who did not seed
+the incidents, and its result is committed under `perf/results/`.
+
+## Security notes the design must keep
+
+- Event text (error messages, names, attribute values) is
+  attacker-influenced: the console renders it as text only, under a strict
+  Content Security Policy (D-022).
+- Anyone holding an ingest key can send misleading events. Telemetry
+  authorizes nothing (invariant 1), and every event shows the key and
+  source instance it arrived under, so provenance is visible (D-015).
+- Error strings are the usual privacy leak: secret-shape redaction runs on
+  every string field, error messages included, in the SDK and again in the
+  collector (D-014).
 
 ## Evidence plan
 
