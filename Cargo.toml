@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aiops-domain", "crates/aiops-store", "crates/aiops-server"]
+members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]

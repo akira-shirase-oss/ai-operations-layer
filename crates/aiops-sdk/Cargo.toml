@@ -1,0 +1,27 @@
+[package]
+name = "aiops-sdk"
+description = "Rust SDK for the AI Operations Layer: emits operation/step events without ever blocking or failing its host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Hosts link this crate, so it stays small: the domain (schema + validation rules), Tokio,
+# one HTTP client with rustls. Never the store or the server (architecture check).
+[dependencies]
+aiops-domain.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true
