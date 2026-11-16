@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aiops_domain::names::NameRegistry;
 use aiops_domain::{Limits, Timestamp};
-use aiops_store::{IngestKey, Store, Token};
+use aiops_store::{IngestKey, Project, Store, Token};
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::routing::{get, post};
@@ -112,7 +112,13 @@ pub struct AppState {
     pub names: Mutex<HashMap<Uuid, NameRegistry>>,
     pub metrics: Metrics,
     pub console_csp: Option<HeaderValue>,
+    /// Slug → project. Projects are never renamed or deleted, so entries never go stale;
+    /// unknown slugs are not cached (they are denied and audited every time).
+    pub projects: Mutex<HashMap<String, Project>>,
 }
+
+/// Distinct projects held in the cache at most.
+const PROJECT_CACHE_CAP: usize = 1_000;
 
 pub type SharedState = Arc<AppState>;
 
@@ -137,6 +143,7 @@ impl AppState {
             query_buckets: Buckets::new(config.query_requests_per_sec, config.query_burst),
             names: Mutex::new(HashMap::new()),
             metrics: Metrics::default(),
+            projects: Mutex::new(HashMap::new()),
             limits: Limits::default(),
             store,
             config,
@@ -147,6 +154,19 @@ impl AppState {
 
     pub fn now(&self) -> Timestamp {
         (self.clock)()
+    }
+
+    pub fn project_cache(&self, slug: &str) -> Option<Project> {
+        self.projects.lock().ok()?.get(slug).cloned()
+    }
+
+    pub fn remember_project(&self, project: &Project) {
+        if let Ok(mut map) = self.projects.lock() {
+            if map.len() >= PROJECT_CACHE_CAP {
+                map.clear();
+            }
+            map.insert(project.slug.clone(), project.clone());
+        }
     }
 }
 

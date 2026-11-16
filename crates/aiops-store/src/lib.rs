@@ -89,7 +89,7 @@ impl StoreConfig {
         Self {
             url: url.into(),
             ingest_connections: 16,
-            query_connections: 4,
+            query_connections: 8,
             control_connections: 2,
             acquire_timeout: Duration::from_secs(2),
             ingest_statement_timeout: Duration::from_secs(5),

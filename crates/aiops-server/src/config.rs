@@ -48,7 +48,7 @@ impl Config {
             store_deadline: Duration::from_secs(5),
             audit_deadline: Duration::from_secs(2),
             ingest_connections: 16,
-            query_connections: 4,
+            query_connections: 8,
             control_connections: 2,
             timeline_max_events: 5_000,
             retention_sweep_every: Some(Duration::from_secs(3_600)),

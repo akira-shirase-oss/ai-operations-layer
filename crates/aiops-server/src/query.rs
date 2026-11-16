@@ -85,7 +85,15 @@ async fn authorize(
     if !actor.token.scopes.iter().any(|s| s == SCOPE_READ) {
         return Err(deny(app, actor, action, Some(slug), target, "scope_missing").await);
     }
-    let project = app.store.project_by_slug(slug).await?;
+    let project = if let Some(p) = app.project_cache(slug) {
+        Some(p)
+    } else {
+        let found = app.store.project_by_slug(slug).await?;
+        if let Some(p) = &found {
+            app.remember_project(p);
+        }
+        found
+    };
     match project {
         Some(p) if actor.token.project_ids.contains(&p.id) => Ok(p),
         // An unknown project and a project outside the token are the same answer, so the
