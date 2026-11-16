@@ -1,0 +1,416 @@
+//! The collector in-process against real PostgreSQL (needs `DATABASE_URL`): bounded,
+//! authenticated ingest with named refusals; idempotent and out-of-order delivery; a
+//! flooding host limited without affecting others; the timeline's honest states; and
+//! denials that are audited.
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration tests: a failed setup step is a test failure"
+)]
+
+mod common;
+
+use aiops_domain::wire::WireEvent;
+use axum::body::Body;
+use axum::http::Request;
+use common::{batch, batch_from, env, env_with, get, journey, op_hex, post_ingest, send};
+use serde_json::json;
+use sqlx::PgPool;
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn ingest_needs_a_valid_ingest_key(pool: PgPool) {
+    let e = env(pool).await;
+    let body = batch(&journey(1, 0));
+    for key in [
+        "",
+        "aiops_ik_short",
+        e.reader.as_str(),
+        "aiops_ik_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ] {
+        let r = send(&e.app, post_ingest(key, body.clone())).await;
+        assert_eq!(r.status, 401, "key {key:?}");
+        assert_eq!(r.body["error"]["code"], "unauthenticated");
+        assert!(
+            r.body["error"]["request_id"].is_string(),
+            "the envelope carries the request id"
+        );
+    }
+    let r = send(&e.app, post_ingest(&e.ingest_key, body)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_revoked_key_stops_working(pool: PgPool) {
+    let e = env(pool).await;
+    e.store
+        .revoke_ingest_key("pilot", "reference-host")
+        .await
+        .unwrap();
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    assert_eq!(r.status, 401);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn each_bad_event_is_refused_by_name_and_the_rest_is_stored(pool: PgPool) {
+    let e = env(pool).await;
+    let mut events = journey(1, 0);
+    events[1].kind = Some("llm".into()); // invalid_value (kind)
+    events[2].failure_class = None; // invalid_outcome
+    let mut extra = events[0].clone();
+    extra.event_id = "nothex".into(); // invalid_id
+    events.push(extra);
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body["accepted"], 6);
+    let codes: Vec<(u64, &str)> = r.body["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["index"].as_u64().unwrap(), x["code"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        codes,
+        vec![
+            (1, "invalid_value"),
+            (2, "invalid_outcome"),
+            (8, "invalid_id")
+        ]
+    );
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn envelopes_and_caps_are_enforced_before_storing(pool: PgPool) {
+    let e = env(pool).await;
+    let r = send(&e.app, post_ingest(&e.ingest_key, "{not json")).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (400, Some("malformed_batch"))
+    );
+
+    let v2 = batch(&journey(1, 0)).replace("\"schema_version\":1", "\"schema_version\":2");
+    let r = send(&e.app, post_ingest(&e.ingest_key, v2)).await;
+    assert_eq!(r.body["error"]["code"], "unsupported_schema_version");
+
+    let bad_source = batch_from("not-an-instance", &journey(1, 0));
+    let r = send(&e.app, post_ingest(&e.ingest_key, bad_source)).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (400, Some("invalid_source"))
+    );
+
+    let many: Vec<WireEvent> = (0..501u64)
+        .map(|i| {
+            let mut w = journey(1, i * 10)[0].clone();
+            w.event_id = format!("{i:032x}");
+            w
+        })
+        .collect();
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&many))).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (413, Some("too_many_events"))
+    );
+
+    let huge = format!("{{\"pad\":\"{}\"}}", "x".repeat(1_100_000));
+    let r = send(&e.app, post_ingest(&e.ingest_key, huge)).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (413, Some("payload_too_large"))
+    );
+    let list = send(&e.app, get("/v1/projects/pilot/operations", &e.reader)).await;
+    assert_eq!(
+        list.body["operations"],
+        json!([]),
+        "nothing refused at the envelope was stored"
+    );
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn duplicate_and_out_of_order_delivery_merge_without_false_chronology(pool: PgPool) {
+    let e = env(pool).await;
+    let mut events = journey(1, 0);
+    let late_half = events.split_off(4);
+    // The second half arrives first, then the first half, then everything again.
+    let r1 = send(&e.app, post_ingest(&e.ingest_key, batch(&late_half))).await;
+    let r2 = send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    let mut all = events.clone();
+    all.extend(late_half);
+    let r3 = send(&e.app, post_ingest(&e.ingest_key, batch(&all))).await;
+    assert_eq!(
+        (r1.body["accepted"].as_u64(), r2.body["accepted"].as_u64()),
+        (Some(4), Some(4))
+    );
+    assert_eq!(
+        (r3.body["accepted"].as_u64(), r3.body["duplicates"].as_u64()),
+        (Some(0), Some(8))
+    );
+
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(t.status, 200, "{}", t.body);
+    let seqs: Vec<u64> = t.body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["seq"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        seqs,
+        (1..=8).collect::<Vec<_>>(),
+        "event-time order, not arrival order"
+    );
+    let first = &t.body["entries"][0];
+    assert!(
+        first["event_time"].is_string() && first["received_at"].is_string(),
+        "both clocks"
+    );
+    assert_eq!(t.body["coverage"]["events_received"], 8);
+    assert_eq!(t.body["coverage"]["missing_known"], 0);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn an_uncertain_publish_is_shown_as_uncertain_with_retries_and_estimated_cost(pool: PgPool) {
+    let e = env(pool).await;
+    send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    let b = &t.body;
+    assert_eq!(b["status"]["state"], "uncertain");
+    assert_eq!(b["status"]["reason"], "timeout_after_send");
+    assert_eq!(b["flags"]["external_effect_unknown"], true);
+    assert_eq!(b["flags"]["retried_steps"], 1);
+    assert_eq!(b["steps"][0]["attempts"][0]["class"], "transport");
+    assert_eq!(b["steps"][1]["attempts"][0]["state"], "uncertain");
+    assert_eq!(b["cost"]["label"], "estimate");
+    assert_eq!(b["cost"]["estimate_micros"], 2_500);
+    assert_eq!(
+        b["entries"][0]["ingest_key"], "reference-host",
+        "provenance per event"
+    );
+
+    let list = send(
+        &e.app,
+        get("/v1/projects/pilot/operations?request_id=req-1", &e.reader),
+    )
+    .await;
+    assert_eq!(list.body["operations"][0]["status"]["state"], "uncertain");
+    assert_eq!(list.body["operations"][0]["events_missing"], 0);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn missing_events_are_counted_not_hidden(pool: PgPool) {
+    let e = env(pool).await;
+    let mut events = journey(1, 0);
+    events.remove(3); // lose op_seq 4
+    events.truncate(6); // and both finishes
+    send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(t.body["status"]["state"], "no_finish_observed");
+    assert_eq!(t.body["coverage"]["missing_known"], 1);
+    assert_eq!(t.body["coverage"]["missing_unknown"], true);
+    let kinds: Vec<&str> = t.body["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["op_seq_hole", "unknown_tail"]);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_flooding_host_is_limited_and_another_host_is_not(pool: PgPool) {
+    let e = env_with(pool, |s| {
+        s.ingest_buckets = aiops_server::auth::Buckets::new(10, 10);
+    })
+    .await;
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    assert_eq!(r.status, 200);
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(2, 100)))).await;
+    assert_eq!(r.status, 429);
+    assert_eq!(r.body["error"]["code"], "rate_limited");
+    assert!(r.headers.get("retry-after").is_some());
+    // A different host (key) has its own bucket.
+    let other = batch_from("22222222222222222222222222222222", &journey(3, 0));
+    let r = send(&e.app, post_ingest(&e.other_ingest_key, other)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let stats = send(&e.app, get("/v1/collector/stats", &e.reader)).await;
+    assert_eq!(stats.body["rate_limited"], 1);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_host_inventing_names_hits_the_cardinality_cap(pool: PgPool) {
+    let e = env_with(pool, |s| s.limits.max_names_per_project = 7).await;
+    // journey() introduces op, release, two steps, model, error code and cost basis: 7 names.
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    assert_eq!(r.body["accepted"], 8);
+    let mut fresh = journey(2, 100);
+    fresh[1].name = Some("step-0001".into());
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&fresh))).await;
+    let refused = r.body["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0]["code"], "cardinality_exceeded");
+    assert_eq!(r.body["accepted"], 7, "known names still flow");
+    // Another project's cap is its own: its first operation is not affected.
+    let other = batch_from("22222222222222222222222222222222", &journey(3, 0));
+    let r = send(&e.app, post_ingest(&e.other_ingest_key, other)).await;
+    assert_eq!(r.body["accepted"], 8);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn the_collector_sheds_when_in_flight_is_full(pool: PgPool) {
+    let e = env_with(pool, |s| {
+        s.ingest_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    })
+    .await;
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (503, Some("overloaded"))
+    );
+    assert_eq!(r.headers.get("retry-after").unwrap(), "1");
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn queries_without_scope_or_project_are_denied_and_audited(pool: PgPool) {
+    let e = env(pool).await;
+    send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    let path = format!("/v1/projects/pilot/operations/{}", op_hex(1));
+
+    let r = send(&e.app, Request::get(&path).body(Body::empty()).unwrap()).await;
+    assert_eq!(r.status, 401);
+    let r = send(&e.app, get(&path, &e.ingest_key)).await;
+    assert_eq!(r.status, 401, "an ingest key cannot read");
+
+    let r = send(&e.app, get(&path, &e.no_read)).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (403, Some("forbidden"))
+    );
+    let r = send(&e.app, get(&path, &e.other_reader)).await;
+    assert_eq!(
+        r.status, 403,
+        "a token for another project cannot read this one"
+    );
+    let r = send(&e.app, get("/v1/projects/nope/operations", &e.other_reader)).await;
+    assert_eq!(
+        r.status, 403,
+        "an unknown project answers like a forbidden one"
+    );
+
+    let audit = e.store.recent_audit(10).await.unwrap();
+    let seen: Vec<(&str, &str, &str)> = audit
+        .iter()
+        .map(|a| (a.actor.as_str(), a.decision.as_str(), a.reason.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("eve", "denied", "project_not_in_scope"),
+            ("eve", "denied", "project_not_in_scope"),
+            ("bob", "denied", "scope_missing"),
+        ]
+    );
+    assert_eq!(audit[1].target.as_deref(), Some(op_hex(1).as_str()));
+    let ok = send(&e.app, get(&path, &e.reader)).await;
+    assert_eq!(ok.status, 200);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn an_expired_token_is_unauthenticated(pool: PgPool) {
+    let e = env(pool).await;
+    let t = aiops_server::auth::generate(aiops_server::auth::TOKEN_PREFIX).unwrap();
+    let past = common::now().plus_micros(-1);
+    e.store
+        .create_token(
+            "old",
+            &["read".into()],
+            &["pilot".into()],
+            &aiops_server::auth::hash(&t),
+            past,
+        )
+        .await
+        .unwrap();
+    let r = send(&e.app, get("/v1/projects", &t)).await;
+    assert_eq!(r.status, 401);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn attributes_outside_the_allowlist_are_withheld_and_counted(pool: PgPool) {
+    let e = env(pool).await;
+    let mut events = journey(1, 0);
+    let mut attrs = serde_json::Map::new();
+    attrs.insert("http.route".into(), "/articles".into());
+    attrs.insert("prompt".into(), "write about cats".into());
+    events[0].attributes = Some(attrs);
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    assert_eq!(r.body["withheld_attributes"], 1);
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    let first = &t.body["entries"][0];
+    assert_eq!(first["withheld_attributes"], 1);
+    assert_eq!(first["attributes"][0]["key"], "http.route");
+    assert!(!t.body.to_string().contains("cats"));
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn lists_are_project_scoped_and_paged(pool: PgPool) {
+    let e = env(pool).await;
+    for n in 1..=3u8 {
+        send(
+            &e.app,
+            post_ingest(&e.ingest_key, batch(&journey(n, u64::from(n) * 100))),
+        )
+        .await;
+    }
+    let page = send(
+        &e.app,
+        get("/v1/projects/pilot/operations?limit=2", &e.reader),
+    )
+    .await;
+    assert_eq!(page.body["operations"].as_array().unwrap().len(), 2);
+    let next = &page.body["next"];
+    let path = format!(
+        "/v1/projects/pilot/operations?limit=2&before_time={}&before_id={}",
+        next[0].as_str().unwrap().replace('+', "%2B"),
+        next[1].as_str().unwrap()
+    );
+    let page2 = send(&e.app, get(&path, &e.reader)).await;
+    assert_eq!(
+        page2.body["operations"].as_array().unwrap().len(),
+        1,
+        "{}",
+        page2.body
+    );
+    let other = send(
+        &e.app,
+        get("/v1/projects/other/operations", &e.other_reader),
+    )
+    .await;
+    assert_eq!(other.body["operations"], json!([]));
+    let projects = send(&e.app, get("/v1/projects", &e.reader)).await;
+    assert_eq!(projects.body["projects"], json!([{"slug": "pilot"}]));
+}
