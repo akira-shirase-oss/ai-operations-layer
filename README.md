@@ -1,12 +1,14 @@
 # AI Operations Layer
 
-> **Status — A0 (the spine) built; A1 in progress.** Decisions D-012–D-023
-> answer OQ1–OQ6; the diagnosis drill is pre-registered (`docs/DRILL.md`).
-> Built and tested: the pure domain crate (schema v1, refusals, policy,
-> timeline assembly), the PostgreSQL store, the bounded collector and query
-> API, the Rust SDK and a minimal investigation console. Evidence per
-> milestone is in `docs/ROADMAP.md`. This is development software: no
-> production claim, no load evidence yet. Contract:
+> **Status — A0 built; A1 partly (2026-11-16).** Decisions D-012–D-024
+> answer OQ1–OQ6 and amend the drill before any counted run. Built and
+> tested: the pure domain crate, the PostgreSQL store, the bounded collector
+> and query API, the Rust SDK, the investigation console (checked in
+> Chromium), and the in-repo reference host with the contract failure cases
+> as end-to-end tests. Load evidence so far is two short smokes on a heavily
+> loaded laptop (no loss; ingest latency target missed); the 1,000,000-event
+> run is owed. Evidence per milestone: `docs/ROADMAP.md`. Development
+> software, no production claim. Contract:
 > `../../docs/Project_Guides/08_AI_Operations_Layer.docx` (extract with
 > `textutil -convert txt -stdout`).
 
@@ -57,7 +59,10 @@ AIOPS_CONSOLE_DIR=apps/console/build cargo run -p aiops-server -- serve
 | `crates/aiops-store` | PostgreSQL: idempotent ingest, summaries, keys, tokens, audit, retention |
 | `crates/aiops-server` | the collector and API (`serve`, `migrate`, `admin`) |
 | `crates/aiops-sdk` | the Rust SDK for hosts |
-| `apps/console` | the SvelteKit investigation console |
+| `apps/console` | the SvelteKit investigation console (`scripts/console-e2e.sh` runs it in Chromium) |
+| `fixtures/reference-host` | the in-repo pilot host and its end-to-end failure-case tests |
+| `perf/` | k6 scenarios, `run-ingest.sh`, committed results |
+| `scripts/drill.py` | the diagnosis drill kit (`docs/DRILL.md`) |
 | `deploy/compose.yaml` | the local stack (project `ai-operations-layer`) |
 
 **What counts as done (the ship gate):** one failed AI workflow can be
