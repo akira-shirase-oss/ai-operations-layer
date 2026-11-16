@@ -1,0 +1,188 @@
+/* A plain, legible investigation surface. Missing-data states get their own colors and
+   are never drawn as success. */
+:root {
+	--bg: #fbfbfa;
+	--fg: #1c1c1a;
+	--muted: #6b6a65;
+	--line: #e3e2dd;
+	--panel: #ffffff;
+	--ok: #1f7a4d;
+	--fail: #b42318;
+	--uncertain: #b54708;
+	--unknown: #5b5bd6;
+	--gap-bg: #f2f0ff;
+	--warn-bg: #fff6ea;
+	--fail-bg: #fdeceb;
+	--mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+	color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #141413;
+		--fg: #ecebe6;
+		--muted: #9c9a92;
+		--line: #2c2b28;
+		--panel: #1c1b19;
+		--ok: #4cc38a;
+		--fail: #ff7a6b;
+		--uncertain: #f5a35c;
+		--unknown: #9e9cff;
+		--gap-bg: #24223a;
+		--warn-bg: #2e2416;
+		--fail-bg: #331b19;
+	}
+}
+* {
+	box-sizing: border-box;
+}
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+a {
+	color: inherit;
+}
+header.top {
+	border-bottom: 1px solid var(--line);
+	padding: 0 24px;
+	height: 52px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+header.top a.brand {
+	font-weight: 600;
+	text-decoration: none;
+}
+main {
+	max-width: 1180px;
+	margin: 0 auto;
+	padding: 24px;
+}
+h1 {
+	font-size: 22px;
+	margin: 0 0 4px;
+}
+h2 {
+	font-size: 16px;
+	margin: 28px 0 10px;
+}
+.muted {
+	color: var(--muted);
+}
+.mono {
+	font-family: var(--mono);
+	font-size: 13px;
+}
+.panel {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 14px 16px;
+}
+.notice {
+	border-radius: 8px;
+	padding: 12px 14px;
+	margin: 10px 0;
+	border: 1px solid var(--line);
+}
+.notice.uncertain {
+	background: var(--warn-bg);
+	border-color: var(--uncertain);
+}
+.notice.unknown {
+	background: var(--gap-bg);
+	border-color: var(--unknown);
+}
+.notice.fail {
+	background: var(--fail-bg);
+	border-color: var(--fail);
+}
+table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 14px;
+}
+th,
+td {
+	text-align: left;
+	padding: 7px 8px;
+	border-bottom: 1px solid var(--line);
+	vertical-align: top;
+}
+th {
+	font-weight: 600;
+	color: var(--muted);
+	font-size: 12px;
+}
+tr.gap td {
+	background: var(--gap-bg);
+}
+.badge {
+	display: inline-block;
+	border-radius: 999px;
+	padding: 1px 9px;
+	font-size: 12px;
+	font-weight: 600;
+	border: 1px solid currentColor;
+	white-space: nowrap;
+}
+.badge.succeeded {
+	color: var(--ok);
+}
+.badge.failed {
+	color: var(--fail);
+}
+.badge.uncertain {
+	color: var(--uncertain);
+}
+.badge.no_finish_observed {
+	color: var(--unknown);
+	border-style: dashed;
+}
+.flag {
+	display: inline-block;
+	font-size: 11px;
+	padding: 0 6px;
+	border-radius: 4px;
+	background: var(--warn-bg);
+	color: var(--uncertain);
+	margin-right: 4px;
+}
+.grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+	gap: 12px;
+}
+.kv dt {
+	font-size: 12px;
+	color: var(--muted);
+}
+.kv dd {
+	margin: 0 0 8px;
+}
+form.inline {
+	display: flex;
+	gap: 8px;
+	margin: 12px 0;
+}
+input {
+	font: inherit;
+	padding: 6px 10px;
+	border: 1px solid var(--line);
+	border-radius: 6px;
+	background: var(--panel);
+	color: var(--fg);
+	min-width: 280px;
+}
+button {
+	font: inherit;
+	padding: 6px 14px;
+	border-radius: 6px;
+	border: 1px solid var(--line);
+	background: var(--panel);
+	color: var(--fg);
+	cursor: pointer;
+}

@@ -414,3 +414,45 @@ async fn lists_are_project_scoped_and_paged(pool: PgPool) {
     let projects = send(&e.app, get("/v1/projects", &e.reader)).await;
     assert_eq!(projects.body["projects"], json!([{"slug": "pilot"}]));
 }
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn the_console_is_served_under_a_hash_based_csp_with_an_spa_fallback(pool: PgPool) {
+    let dir = std::env::temp_dir().join(format!("aiops-console-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("index.html"),
+        "<html><body><script>start()</script><script src=\"/console/_app/x.js\"></script></body></html>",
+    )
+    .unwrap();
+    let csp = aiops_server::console::content_security_policy(&dir).unwrap();
+    let csp_text = csp.to_str().unwrap().to_owned();
+    let dir_for_state = dir.clone();
+    let e = env_with(pool, move |s| {
+        s.config.console_dir = Some(dir_for_state);
+        s.console_csp = Some(csp);
+    })
+    .await;
+    // sha256("start()") in base64, computed outside the server's code.
+    assert!(
+        csp_text.contains("'sha256-DIm7WJS6ZKDYe5qFLPy+h4JFI9Bol5QmYC57mt3Fb00='"),
+        "{csp_text}"
+    );
+    assert!(csp_text.contains("default-src 'none'") && csp_text.contains("frame-ancestors 'none'"));
+    assert!(!csp_text.contains("script-src 'self' 'unsafe-inline'"));
+    for path in ["/console/", "/console/p/pilot/op/0123"] {
+        let res = tower::ServiceExt::oneshot(
+            e.app.clone(),
+            Request::get(path).body(Body::empty()).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), 200, "{path}");
+        assert_eq!(
+            res.headers()["content-security-policy"],
+            csp_text.as_str(),
+            "{path}"
+        );
+        assert_eq!(res.headers()["x-frame-options"], "DENY");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

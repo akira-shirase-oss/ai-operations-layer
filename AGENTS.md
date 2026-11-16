@@ -91,8 +91,10 @@ and recorded. Every fixed bug gets a test that fails without the fix.
 
 ## Verification
 
-`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --
--D warnings`, `cargo test --workspace`, the architecture check, and the
-SDK/console checks — before every commit, plus the failure-case drills when
+`scripts/check.sh` runs all of it: the toolchain pin, `cargo fmt --all
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo
+test --workspace` (against real PostgreSQL: `scripts/stack.sh up`), the
+architecture check, and the console's type-check and build — before every
+commit, plus the failure-case drills when
 ingest, store or control code changed. Report exactly what ran and what
 passed.

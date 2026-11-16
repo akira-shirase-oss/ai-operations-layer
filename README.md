@@ -1,9 +1,12 @@
 # AI Operations Layer
 
-> **Status — decisions recorded, A0 starting.** OQ1–OQ6 are answered
-> (`docs/DECISIONS.md`, D-012–D-023) and the diagnosis drill is
-> pre-registered (`docs/DRILL.md`). No code yet. Milestones are in
-> `docs/ROADMAP.md`. Contract:
+> **Status — A0 (the spine) built; A1 in progress.** Decisions D-012–D-023
+> answer OQ1–OQ6; the diagnosis drill is pre-registered (`docs/DRILL.md`).
+> Built and tested: the pure domain crate (schema v1, refusals, policy,
+> timeline assembly), the PostgreSQL store, the bounded collector and query
+> API, the Rust SDK and a minimal investigation console. Evidence per
+> milestone is in `docs/ROADMAP.md`. This is development software: no
+> production claim, no load evidence yet. Contract:
 > `../../docs/Project_Guides/08_AI_Operations_Layer.docx` (extract with
 > `textutil -convert txt -stdout`).
 
@@ -31,6 +34,31 @@ through public APIs (D-012).
   real host → A3 controlled recovery → A4 quality/adoption
 - `docs/DECISIONS.md` — D-001..D-023 and any open question
 - `docs/DRILL.md` — the pre-registered diagnosis drill behind the ship gate
+- `docs/INGEST_CONTRACT.md` — the language-neutral wire contract (schema v1)
+
+## Run it locally
+
+```sh
+export PATH="$(brew --prefix rustup)/bin:$PATH"   # the pinned toolchain (1.99.1)
+scripts/stack.sh up                                # PostgreSQL on 127.0.0.1:57432
+eval "$(scripts/stack.sh env)"
+scripts/check.sh                                   # everything CI runs
+npm run build --workspace @aiops/console
+cargo run -p aiops-server -- admin create-project pilot
+cargo run -p aiops-server -- admin create-ingest-key --project pilot --name my-host
+cargo run -p aiops-server -- admin create-token --actor me --project pilot
+AIOPS_CONSOLE_DIR=apps/console/build cargo run -p aiops-server -- serve
+# console: http://127.0.0.1:57400/console/   ingest: POST http://127.0.0.1:57400/v1/ingest
+```
+
+| Path | What |
+|---|---|
+| `crates/aiops-domain` | schema v1, refusals, policy, timeline assembly — pure, no I/O |
+| `crates/aiops-store` | PostgreSQL: idempotent ingest, summaries, keys, tokens, audit, retention |
+| `crates/aiops-server` | the collector and API (`serve`, `migrate`, `admin`) |
+| `crates/aiops-sdk` | the Rust SDK for hosts |
+| `apps/console` | the SvelteKit investigation console |
+| `deploy/compose.yaml` | the local stack (project `ai-operations-layer`) |
 
 **What counts as done (the ship gate):** one failed AI workflow can be
 diagnosed and safely resolved with measurably less searching than the
