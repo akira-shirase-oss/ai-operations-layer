@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/aiops-domain"]
+members = ["crates/aiops-domain", "crates/aiops-store"]
 resolver = "3"
 
 [workspace.package]
@@ -68,3 +68,10 @@ bare_urls = "deny"
 
 [profile.release]
 debug = "line-tables-only"
+
+# SCRAM authentication (PBKDF2 over SHA-256) and key hashing are slow unoptimized; tests
+# open many connections, so these few crates build optimized even in the dev profile.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3

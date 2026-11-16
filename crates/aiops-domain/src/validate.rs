@@ -599,3 +599,33 @@ fn opt_ident(
     }
     Ok(Some(text.to_owned()))
 }
+
+/// A batch's validated source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub instance_id: crate::ids::InstanceId,
+    pub service: String,
+    pub sdk: String,
+}
+
+/// Validates the batch envelope's source; a bad source refuses the whole batch.
+pub fn validate_source(
+    source: &crate::wire::WireSource,
+    limits: &Limits,
+) -> Result<Source, Refusal> {
+    let instance_id = crate::ids::InstanceId::parse(&source.instance_id)
+        .map_err(|_| Refusal::on(RefusalCode::InvalidId, "source.instance_id"))?;
+    let service = opt_ident(
+        Some(&source.service),
+        "source.service",
+        limits.max_name_bytes,
+    )?
+    .unwrap_or_default();
+    let sdk =
+        opt_ident(Some(&source.sdk), "source.sdk", limits.max_name_bytes)?.unwrap_or_default();
+    Ok(Source {
+        instance_id,
+        service,
+        sdk,
+    })
+}
