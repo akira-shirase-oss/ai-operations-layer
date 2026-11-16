@@ -10,10 +10,17 @@ port=57420
 host_port=57421
 db="aiops_e2e_$(date -u +%Y%m%d%H%M%S)"
 work="$(mktemp -d)"
-export PATH="$(brew --prefix rustup)/bin:$PATH"
+command -v brew >/dev/null && export PATH="$(brew --prefix rustup)/bin:$PATH"
 unset CARGO_TARGET_DIR
-scripts/stack.sh up >/dev/null
-psql_admin() { docker compose -f deploy/compose.yaml exec -T postgres psql -U aiops -d aiops -v ON_ERROR_STOP=1 -qtA "$@"; }
+# CI provides a PostgreSQL service through DATABASE_URL; locally the compose stack is used.
+if [ -n "${DATABASE_URL:-}" ]; then
+  psql_admin() { psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qtA "$@"; }
+  db_base="${DATABASE_URL%/*}"
+else
+  scripts/stack.sh up >/dev/null
+  psql_admin() { docker compose -f deploy/compose.yaml exec -T postgres psql -U aiops -d aiops -v ON_ERROR_STOP=1 -qtA "$@"; }
+  db_base="postgres://aiops:aiops-dev@127.0.0.1:${AIOPS_PG_PORT:-57432}"
+fi
 psql_admin -c "CREATE DATABASE $db" >/dev/null
 cleanup() {
   [ -n "${host_pid:-}" ] && kill "$host_pid" 2>/dev/null
@@ -24,9 +31,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cargo build --release --locked -p aiops-server -p aiops-reference-host >/dev/null 2>&1
+cargo build --release --locked -p aiops-server -p aiops-reference-host --quiet
 npm run build --workspace @aiops/console >/dev/null
-export AIOPS_DATABASE_URL="postgres://aiops:aiops-dev@127.0.0.1:${AIOPS_PG_PORT:-57432}/$db"
+export AIOPS_DATABASE_URL="$db_base/$db"
 bin=target/release/aiops-server
 "$bin" admin create-project pilot >/dev/null
 "$bin" admin create-project other >/dev/null
