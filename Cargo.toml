@@ -1,0 +1,70 @@
+[workspace]
+members = ["crates/aiops-domain"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/akira-shirase-oss/ai-operations-layer"
+publish = false
+
+[workspace.dependencies]
+# Internal crates.
+aiops-domain = { path = "crates/aiops-domain" }
+aiops-store = { path = "crates/aiops-store" }
+aiops-sdk = { path = "crates/aiops-sdk" }
+
+# External crates: versions live here only (rust-mastery chapter 15). Minimal features;
+# one async runtime (Tokio); rustls is the one TLS stack (SDK only).
+anyhow = "1.0.104"
+axum = "0.8.9"
+base64 = "0.22"
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
+getrandom = "0.3.4"
+http-body-util = "0.1.5"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+# `raw_value`: the collector slices a batch into per-event raw JSON once, so one bad event
+# is refused by name without failing the batch, and each event's size is known exactly.
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+sha2 = "0.10.9"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "time"] }
+thiserror = "2.0.21"
+time = { version = "0.3.55", default-features = false, features = ["std", "formatting", "parsing"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.7.1", features = ["request-id", "trace", "timeout", "limit", "catch-panic", "fs", "set-header"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "warn"
+expect_used = "warn"
+allow_attributes_without_reason = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+bare_urls = "deny"
+
+[profile.release]
+debug = "line-tables-only"

@@ -1,0 +1,7 @@
+/target
+node_modules/
+/apps/console/build/
+/apps/console/.svelte-kit/
+/perf/out/
+/drill-runs/
+.DS_Store
