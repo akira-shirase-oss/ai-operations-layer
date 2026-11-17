@@ -14,6 +14,8 @@ Group=aiops
 EnvironmentFile=/etc/aiops/aiops-dr-adapter.env
 ExecStart=/opt/aiops/bin/aiops-dr-adapter
 KillSignal=SIGTERM
+# The adapter bounds its own stop at 12 s (8 s for calls in flight, then the flush);
+# crates/aiops-durable-runner/tests/binary.rs checks it exits before this.
 TimeoutStopSec=15
 Restart=on-failure
 RestartSec=1

@@ -76,27 +76,43 @@ async fn main() -> anyhow::Result<()> {
         stop.cancel();
     });
     tracker.close();
-    serve(adapter, listener, cancel.clone()).await?;
-    cancel.cancel();
-    // Calls in flight finish (and are reported) within the adapter's own upstream deadline.
-    calls.close();
-    if tokio::time::timeout(Duration::from_secs(5), calls.wait())
-        .await
-        .is_err()
-    {
-        tracing::warn!("calls still in flight after 5 s are reported as unfinished");
+    // The stop is bounded inside the unit's TimeoutStopSec (15 s), whatever the step
+    // timeout (review R4): calls in flight get DRAIN to finish and be reported; then they
+    // are cut, which the runner reads as a lost reply and reconciles, and the SDK flushes
+    // what it holds. Worst case DRAIN + 1 + 1 + 2 = 12 s.
+    let served = serve(adapter, listener, cancel.clone());
+    tokio::pin!(served);
+    tokio::select! {
+        r = &mut served => r?,
+        () = async {
+            cancel.cancelled().await;
+            tokio::time::sleep(DRAIN).await;
+        } => {
+            tracing::warn!("calls still in flight after {DRAIN:?} are cut; the runner reconciles them");
+        }
     }
-    if tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+    cancel.cancel();
+    calls.close();
+    if tokio::time::timeout(Duration::from_secs(1), calls.wait())
         .await
         .is_err()
     {
-        tracing::warn!("background tasks did not stop within 5 s");
+        tracing::warn!("calls still in flight are reported as unfinished (an unknown tail)");
+    }
+    if tokio::time::timeout(Duration::from_secs(1), tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!("background tasks did not stop within 1 s");
     }
     // What could not be sent is counted, never claimed as delivered.
     let stats = sdk.shutdown(Duration::from_secs(2)).await;
     tracing::info!(dropped = stats.dropped(), "telemetry flushed");
     Ok(())
 }
+
+/// How long calls in flight may run on after a stop signal (see `main`).
+const DRAIN: Duration = Duration::from_secs(8);
 
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();

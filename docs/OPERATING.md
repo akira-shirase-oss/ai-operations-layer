@@ -99,7 +99,9 @@ Migrations are forward-only and run on start. To upgrade:
 
 The SDK keeps working while the collector restarts: it queues, then drops and
 counts, and the gap shows in the console. Upgrade the adapter by restarting it.
-Runs it was observing get an unknown tail, never a false finish.
+A stop gives calls in flight 8 s to finish, then cuts them (the runner reads a
+lost reply and reconciles) and flushes telemetry: at most 12 s, inside the unit's
+`TimeoutStopSec=15`. Runs it was observing get an unknown tail, never a false finish.
 
 ## Back up and restore
 
