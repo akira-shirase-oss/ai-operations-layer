@@ -134,6 +134,9 @@ pub struct StoreConfig {
     pub auth_connections: u32,
     /// The retention sweep's own connection (never an ingest, query or audit one).
     pub maintenance_connections: u32,
+    /// Audit writes and reads: their own pool, so a burst of audited denials never takes
+    /// the control connections an operator needs to revoke a key or a token.
+    pub audit_connections: u32,
     pub acquire_timeout: Duration,
     pub ingest_statement_timeout: Duration,
     pub query_statement_timeout: Duration,
@@ -149,6 +152,7 @@ impl StoreConfig {
             control_connections: 2,
             auth_connections: 4,
             maintenance_connections: 1,
+            audit_connections: 2,
             acquire_timeout: Duration::from_secs(2),
             ingest_statement_timeout: Duration::from_secs(5),
             query_statement_timeout: Duration::from_secs(3),
@@ -164,6 +168,7 @@ pub struct Store {
     control: PgPool,
     auth: PgPool,
     maintenance: PgPool,
+    audit: PgPool,
 }
 
 /// One validated event ready to store: the event, what policy changed, its stored JSON.
@@ -409,6 +414,13 @@ impl Store {
                 Duration::from_secs(30),
             )
             .await?,
+            audit: pool(
+                cfg,
+                base,
+                cfg.audit_connections,
+                cfg.control_statement_timeout,
+            )
+            .await?,
         })
     }
 
@@ -419,6 +431,7 @@ impl Store {
             query: pool.clone(),
             auth: pool.clone(),
             maintenance: pool.clone(),
+            audit: pool.clone(),
             control: pool,
         }
     }
@@ -777,7 +790,7 @@ impl Store {
 
     // ---- control (audit) --------------------------------------------------------------
 
-    /// Writes one audit row on the control pool. Callers fail closed when this fails.
+    /// Writes one audit row on the audit pool. Callers fail closed when this fails.
     pub async fn audit(&self, entry: &AuditEntry<'_>) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO audit_log (actor, token_id, action, project_slug, target, decision, reason)
@@ -790,7 +803,7 @@ impl Store {
         .bind(entry.target)
         .bind(if entry.allowed { "allowed" } else { "denied" })
         .bind(entry.reason)
-        .execute(&self.control)
+        .execute(&self.audit)
         .await?;
         Ok(())
     }
@@ -800,7 +813,7 @@ impl Store {
             "SELECT actor, action, project_slug, target, decision, reason FROM audit_log ORDER BY id DESC LIMIT $1",
         )
         .bind(limit)
-        .fetch_all(&self.control)
+        .fetch_all(&self.audit)
         .await?;
         Ok(rows
             .into_iter()

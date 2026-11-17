@@ -648,3 +648,65 @@ async fn names_unused_for_the_summary_period_are_swept_and_free_their_budget(poo
         .collect();
     assert_eq!(left, vec!["publish_article".to_owned()]);
 }
+
+// Review finding 20: every denial writes an audit row, so a burst of denials must not take
+// the connections an operator needs to revoke a key or a token.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_saturated_audit_path_does_not_block_revocation(pool: PgPool) {
+    let base = (*pool.connect_options()).clone();
+    let mut cfg = StoreConfig::new("");
+    cfg.control_connections = 1;
+    let store = Store::connect_with(&cfg, &base).await.unwrap();
+    store.create_project("pilot").await.unwrap();
+    let token = store
+        .create_token(
+            "ops",
+            &["read".into()],
+            &["pilot".into()],
+            &[3; 32],
+            now().plus_micros(3_600_000_000),
+        )
+        .await
+        .unwrap();
+
+    // Audit writes stall: another session holds the audit table.
+    let mut locker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE audit_log IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    let stalled: Vec<_> = (0..4)
+        .map(|_| {
+            let s = store.clone();
+            tokio::spawn(async move {
+                s.audit(&AuditEntry {
+                    actor: "flood",
+                    token_id: None,
+                    action: "operations.list",
+                    project_slug: None,
+                    target: None,
+                    allowed: false,
+                    reason: "scope_missing",
+                })
+                .await
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let started = std::time::Instant::now();
+    store
+        .revoke_token(token)
+        .await
+        .expect("revocation waited on the audit path");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+
+    locker.rollback().await.unwrap();
+    for a in stalled {
+        let _ = a.await.unwrap(); // some may time out acquiring; none may hang
+    }
+}

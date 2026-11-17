@@ -193,15 +193,19 @@ are listed at the end, not guessed.
   returns. The SDK returns errors, never panics, and `shutdown` has a
   deadline. Trade-off: telemetry is best-effort — accepted (D-002); every
   loss is counted.
-- **D-022 — Isolation, concretely.** Ingest, query and control/audit use
-  three separate PostgreSQL pools with acquire timeouts and per-pool
-  statement timeouts. Ingest sheds load beyond a fixed number of in-flight
+- **D-022 — Isolation, concretely.** Six separate PostgreSQL pools, each
+  with an acquire timeout and a statement timeout: ingest, query, control
+  (operator commands: projects, keys, tokens, revocation), audit (so a burst
+  of audited denials cannot hold up a revocation), credential lookups (so an
+  unknown-key flood cannot take an ingest or query connection) and
+  maintenance (the retention sweep). Amended 2026-11-17 after an independent
+  review; the first cut had three. Ingest sheds load beyond a fixed number of in-flight
   requests (503 + `Retry-After`) and applies a token bucket per ingest key
   (429 + `Retry-After`); the query path has its own per-token limit and
   caps on page size and events per timeline. The collector serves the
   built console at `/console/` with a strict Content Security Policy, and
   the console renders all event text as text (no raw HTML), because event
-  metadata is attacker-influenced. Trade-off: three pools to size — the
+  metadata is attacker-influenced. Trade-off: six pools to size — the
   defaults are development values until the A4 load runs set them.
 - **D-023 — The roadmap is re-cut so the spine comes first.** A0 now builds
   the whole thin spine — schema, pure domain, bounded collector, store,
