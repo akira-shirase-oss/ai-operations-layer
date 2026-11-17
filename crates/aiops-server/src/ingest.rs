@@ -299,14 +299,17 @@ async fn admit_names(
     prepared: &mut [(usize, PreparedEvent)],
     response: &mut IngestResponse,
 ) -> Result<NameUse, ApiError> {
-    let loaded = app.names.lock().is_ok_and(|m| m.contains_key(&project));
+    let loaded = app
+        .names_lock
+        .lock(&app.names)
+        .is_some_and(|m| m.contains_key(&project));
     if !loaded {
         let (cap, per_key) = (
             app.limits.max_names_per_project,
             app.limits.max_names_per_key,
         );
         let known = app.store.known_names(project, cap).await?;
-        if let Ok(mut map) = app.names.lock() {
+        if let Some(mut map) = app.names_lock.lock(&app.names) {
             map.entry(project)
                 .or_insert_with(|| NameRegistry::new(cap, per_key, known));
         }
@@ -314,7 +317,7 @@ async fn admit_names(
     let mut new_names = Vec::new();
     let mut touched = std::collections::HashSet::new();
     let key_bytes = *key.as_bytes();
-    let Ok(mut map) = app.names.lock() else {
+    let Some(mut map) = app.names_lock.lock(&app.names) else {
         return Err(ApiError::Internal(anyhow::anyhow!(
             "name registry lock poisoned"
         )));

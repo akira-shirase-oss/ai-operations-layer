@@ -11,6 +11,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 
+use crate::locks::LockStats;
+
 pub const INGEST_KEY_PREFIX: &str = "aiops_ik_";
 pub const TOKEN_PREFIX: &str = "aiops_tk_";
 const SECRET_CHARS: usize = 43; // base64url of 32 bytes, no padding
@@ -105,6 +107,8 @@ pub struct CredentialCache<V> {
     stale_for: Duration,
     positive: Mutex<Fifo<V>>,
     negative: Mutex<Fifo<()>>,
+    /// Both maps' wait and hold times (D-026).
+    pub lock_stats: LockStats,
 }
 
 impl<V: Clone> CredentialCache<V> {
@@ -115,11 +119,12 @@ impl<V: Clone> CredentialCache<V> {
             stale_for: Duration::from_secs(300),
             positive: Mutex::new(Fifo::new(capacity)),
             negative: Mutex::new(Fifo::new(capacity)),
+            lock_stats: LockStats::default(),
         }
     }
 
     pub fn get(&self, key: &[u8; 32]) -> Cached<V> {
-        if let Ok(pos) = self.positive.lock()
+        if let Some(pos) = self.lock_stats.lock(&self.positive)
             && let Some((v, at)) = pos.map.get(key)
         {
             let age = at.elapsed();
@@ -130,7 +135,7 @@ impl<V: Clone> CredentialCache<V> {
                 return Cached::Stale(v.clone());
             }
         }
-        if let Ok(neg) = self.negative.lock()
+        if let Some(neg) = self.lock_stats.lock(&self.negative)
             && let Some(((), at)) = neg.map.get(key)
             && at.elapsed() < self.negative_ttl
         {
@@ -141,17 +146,17 @@ impl<V: Clone> CredentialCache<V> {
 
     pub fn put(&self, key: [u8; 32], value: Option<V>) {
         if let Some(v) = value {
-            if let Ok(mut neg) = self.negative.lock() {
+            if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
                 neg.remove(&key);
             }
-            if let Ok(mut pos) = self.positive.lock() {
+            if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
                 pos.insert(key, v);
             }
         } else {
-            if let Ok(mut pos) = self.positive.lock() {
+            if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
                 pos.remove(&key);
             }
-            if let Ok(mut neg) = self.negative.lock() {
+            if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
                 neg.insert(key, ());
             }
         }
@@ -163,6 +168,8 @@ pub struct Buckets<K> {
     rate: u32,
     burst: u32,
     map: Mutex<HashMap<K, aiops_domain::ratelimit::TokenBucket>>,
+    /// The map's wait and hold times (D-026).
+    pub lock_stats: LockStats,
 }
 
 impl<K: Eq + Hash + Copy> Buckets<K> {
@@ -171,12 +178,13 @@ impl<K: Eq + Hash + Copy> Buckets<K> {
             rate,
             burst,
             map: Mutex::new(HashMap::new()),
+            lock_stats: LockStats::default(),
         }
     }
 
     /// Takes `amount` or returns the whole seconds to wait.
     pub fn take(&self, key: K, amount: u32, now_micros: i64) -> Result<(), u64> {
-        let Ok(mut map) = self.map.lock() else {
+        let Some(mut map) = self.lock_stats.lock(&self.map) else {
             return Ok(()); // a poisoned limiter fails open for one request, never panics
         };
         let bucket = map.entry(key).or_insert_with(|| {

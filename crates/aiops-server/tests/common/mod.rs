@@ -274,6 +274,8 @@ pub(crate) fn op_hex(op: u8) -> String {
 /// hour are dropped by the next one.
 pub(crate) struct ScratchDb {
     pub(crate) pool: PgPool,
+    /// The database's URL, for a store built with its own pools.
+    pub(crate) url: String,
     admin: PgPool,
     name: String,
 }
@@ -314,9 +316,15 @@ impl ScratchDb {
             .await
             .unwrap();
         let (prefix, _) = admin_url.rsplit_once('/').unwrap();
-        let pool = PgPool::connect(&format!("{prefix}/{name}")).await.unwrap();
+        let url = format!("{prefix}/{name}");
+        let pool = PgPool::connect(&url).await.unwrap();
         Store::from_pool(pool.clone()).migrate().await.unwrap();
-        Self { pool, admin, name }
+        Self {
+            pool,
+            url,
+            admin,
+            name,
+        }
     }
 
     pub(crate) async fn drop(self) {

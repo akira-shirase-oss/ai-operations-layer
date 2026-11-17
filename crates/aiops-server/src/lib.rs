@@ -14,6 +14,7 @@ pub mod config;
 pub mod console;
 pub mod error;
 pub mod ingest;
+pub mod locks;
 pub mod query;
 pub mod retention;
 pub mod serve;

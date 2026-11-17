@@ -324,5 +324,5 @@ pub async fn stats(
     if !actor.token.scopes.iter().any(|s| s == SCOPE_ADMIN) {
         return Err(deny(&app, &actor, "stats.read", None, None, "scope_missing").await);
     }
-    Ok(Json(app.metrics.view()))
+    Ok(Json(app.metrics_view()))
 }

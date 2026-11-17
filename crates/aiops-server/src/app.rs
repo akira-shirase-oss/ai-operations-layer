@@ -30,6 +30,7 @@ use crate::auth::{Buckets, Cached, CredentialCache};
 use crate::config::Config;
 use crate::error::ApiError;
 use crate::error::{REQUEST_ID_HEADER, error_envelope, sanitize_request_id};
+use crate::locks::{LockStats, LockView};
 use crate::{console, ingest, query};
 
 pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
@@ -77,6 +78,20 @@ pub struct MetricsView {
     pub denied: u64,
     pub store_unavailable: u64,
     pub auth_shed: u64,
+    /// Wait and hold times of the in-process locks (D-026).
+    pub locks: LocksView,
+}
+
+/// The in-process locks: the ingest path's (the global name registry, the ingest-key
+/// cache, the per-key rate limiter) and the query path's.
+#[derive(Serialize)]
+pub struct LocksView {
+    pub names: LockView,
+    pub ingest_key_cache: LockView,
+    pub ingest_rate_limit: LockView,
+    pub token_cache: LockView,
+    pub query_rate_limit: LockView,
+    pub project_cache: LockView,
 }
 
 impl Metrics {
@@ -84,7 +99,7 @@ impl Metrics {
         counter.fetch_add(n, Ordering::Relaxed);
     }
 
-    pub fn view(&self) -> MetricsView {
+    pub fn view(&self, locks: LocksView) -> MetricsView {
         let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
         MetricsView {
             batches: g(&self.batches),
@@ -100,6 +115,7 @@ impl Metrics {
             denied: g(&self.denied),
             store_unavailable: g(&self.store_unavailable),
             auth_shed: g(&self.auth_shed),
+            locks,
         }
     }
 }
@@ -120,13 +136,16 @@ pub struct AppState {
     pub tokens: CredentialCache<Token>,
     pub ingest_buckets: Buckets<Uuid>,
     pub query_buckets: Buckets<Uuid>,
-    /// Per project, loaded lazily from `known_names`.
+    /// Per project, loaded lazily from `known_names`. One lock for every project, held
+    /// while a batch's names are admitted; its cost is measured (D-026).
     pub names: Mutex<HashMap<Uuid, NameRegistry>>,
+    pub names_lock: LockStats,
     pub metrics: Metrics,
     pub console_csp: Option<HeaderValue>,
     /// Slug → project. Projects are never renamed or deleted, so entries never go stale;
     /// unknown slugs are not cached (they are denied and audited every time).
     pub projects: Mutex<HashMap<String, Project>>,
+    pub projects_lock: LockStats,
 }
 
 /// Distinct projects held in the cache at most.
@@ -156,8 +175,10 @@ impl AppState {
             ingest_buckets: Buckets::new(config.ingest_events_per_sec, config.ingest_burst_events),
             query_buckets: Buckets::new(config.query_requests_per_sec, config.query_burst),
             names: Mutex::new(HashMap::new()),
+            names_lock: LockStats::default(),
             metrics: Metrics::default(),
             projects: Mutex::new(HashMap::new()),
+            projects_lock: LockStats::default(),
             limits: Limits::default(),
             store,
             config,
@@ -203,11 +224,23 @@ impl AppState {
     }
 
     pub fn project_cache(&self, slug: &str) -> Option<Project> {
-        self.projects.lock().ok()?.get(slug).cloned()
+        self.projects_lock.lock(&self.projects)?.get(slug).cloned()
+    }
+
+    /// Every counter, with the locks' wait and hold times.
+    pub fn metrics_view(&self) -> MetricsView {
+        self.metrics.view(LocksView {
+            names: self.names_lock.view(),
+            ingest_key_cache: self.ingest_keys.lock_stats.view(),
+            ingest_rate_limit: self.ingest_buckets.lock_stats.view(),
+            token_cache: self.tokens.lock_stats.view(),
+            query_rate_limit: self.query_buckets.lock_stats.view(),
+            project_cache: self.projects_lock.view(),
+        })
     }
 
     pub fn remember_project(&self, project: &Project) {
-        if let Ok(mut map) = self.projects.lock() {
+        if let Some(mut map) = self.projects_lock.lock(&self.projects) {
             if map.len() >= PROJECT_CACHE_CAP {
                 map.clear();
             }
