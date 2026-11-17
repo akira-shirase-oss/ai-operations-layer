@@ -558,11 +558,13 @@ async fn duplicated_and_reordered_batches_merge_without_false_chronology() {
         held: Arc::new(Mutex::new(None)),
         http: reqwest::Client::new(),
     };
-    let proxy_addr = free_addr();
     let app = axum::Router::new()
         .route("/v1/ingest", axum::routing::post(chaos_ingest))
         .with_state(chaos.clone());
-    let listener = tokio::net::TcpListener::bind(proxy_addr).await.unwrap();
+    // Bound here, not through free_addr(): a released port can be taken by another process
+    // before it is bound again (it was, once, on a busy machine).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
     let proxy = tokio::spawn(async move { axum::serve(listener, app).await });
     let host = start_host(&format!("http://{proxy_addr}"), &k.ingest).await;
 
