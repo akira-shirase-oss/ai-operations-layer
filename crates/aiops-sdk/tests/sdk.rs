@@ -711,6 +711,9 @@ async fn events_held_while_a_batch_fills_are_counted_when_a_shutdown_is_cut_shor
     }
     tokio::time::sleep(Duration::from_millis(200)).await; // taken off the queue, held
     let s = client.shutdown(Duration::from_millis(100)).await;
-    assert!(all_events(&fake).is_empty(), "nothing was sent before the abort");
+    assert!(
+        all_events(&fake).is_empty(),
+        "nothing was sent before the abort"
+    );
     assert_eq!(s.dropped(), s.emitted, "every held event counted: {s:?}");
 }
