@@ -430,6 +430,7 @@ async fn sdk_stats(State(host): State<Shared>) -> Json<serde_json::Value> {
         "batches_sent": s.batches_sent,
         "batches_failed": s.batches_failed,
         "max_queue_age_us": s.max_queue_age_us,
+        "breaker_opened": s.breaker_opened,
         "log_lines_dropped": host.log.dropped.load(Ordering::Relaxed),
         "requests": host.requests.load(Ordering::Relaxed),
     }))

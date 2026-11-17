@@ -259,32 +259,42 @@ async fn eventually<F: AsyncFnMut() -> bool>(what: &str, mut ok: F) {
     }
 }
 
-/// The timeline of the operation that served `request_id`, once its finish has arrived.
+/// The timeline of the operation that served `request_id`, once its finish has arrived. On
+/// a timeout the panic shows the last list answer, so a missing finish can be told from a
+/// slow one.
 async fn timeline(c: &Collector, token: &str, request_id: &str) -> Value {
     let mut found = Value::Null;
-    eventually(&format!("timeline for {request_id}"), async || {
-        let (_, list) = get_json(
-            &c.base,
-            &format!("/v1/projects/pilot/operations?request_id={request_id}"),
-            token,
-        )
-        .await;
-        let Some(op) = list["operations"].get(0) else {
-            return false;
-        };
-        if op["status"]["state"] == "no_finish_observed" {
-            return false;
-        }
-        let id = op["operation_id"].as_str().unwrap().to_owned();
-        let (status, t) = get_json(
-            &c.base,
-            &format!("/v1/projects/pilot/operations/{id}"),
-            token,
-        )
-        .await;
-        found = t;
-        status == 200
-    })
+    let mut previous = Value::Null;
+    eventually(
+        &format!("timeline for {request_id} (see the last list answer above)"),
+        async || {
+            let (_, list) = get_json(
+                &c.base,
+                &format!("/v1/projects/pilot/operations?request_id={request_id}"),
+                token,
+            )
+            .await;
+            if list != previous {
+                eprintln!("list for {request_id}: {list}");
+                previous = list.clone();
+            }
+            let Some(op) = list["operations"].get(0) else {
+                return false;
+            };
+            if op["status"]["state"] == "no_finish_observed" {
+                return false;
+            }
+            let id = op["operation_id"].as_str().unwrap().to_owned();
+            let (status, t) = get_json(
+                &c.base,
+                &format!("/v1/projects/pilot/operations/{id}"),
+                token,
+            )
+            .await;
+            found = t;
+            status == 200
+        },
+    )
     .await;
     found
 }
@@ -676,6 +686,9 @@ async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected() 
         limited > 0,
         "the flood was limited (ok {ok}, limited {limited})"
     );
+    // Shown only if the test fails: what the pilot's SDK saw during the flood.
+    let (_, sdk) = get_json(&host.base, "/aiops/stats", "").await;
+    eprintln!("pilot SDK after the flood: {sdk} (flood: ok {ok}, limited {limited})");
     for i in 0..15 {
         let t = timeline(&c, &k.reader, &format!("calm-{i}")).await;
         assert_eq!(t["status"]["state"], "succeeded");
