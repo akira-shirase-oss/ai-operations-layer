@@ -8,6 +8,8 @@ export type Status = {
 	state: State;
 	class?: string;
 	reason?: string;
+	/** The host's `error_code` on the declared finish (`cancelled` reads as cancelled). */
+	code?: string;
 	declared: boolean;
 };
 

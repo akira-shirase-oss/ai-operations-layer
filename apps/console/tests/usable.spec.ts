@@ -10,6 +10,7 @@ const DR_INVALID = process.env['AIOPS_E2E_DR_INVALID'] ?? '';
 const DR_RESTART = process.env['AIOPS_E2E_DR_RESTART'] ?? '';
 const DR_LOST = process.env['AIOPS_E2E_DR_LOST'] ?? '';
 const DR_OK = process.env['AIOPS_E2E_DR_OK'] ?? '';
+const DR_CANCEL = process.env['AIOPS_E2E_DR_CANCEL'] ?? '';
 const GAP_OP = process.env['AIOPS_E2E_GAP'] ?? '';
 const SCREENS = process.env['AIOPS_SCREENS_DIR'];
 
@@ -57,7 +58,7 @@ test('the main task by keyboard: find a failed operation, see what happened, see
 	expect(ring, 'the focused link shows where focus is').toBe(true);
 	await page.keyboard.press('Enter');
 	// See what happened: a validation failure, five attempts, the runner's answer.
-	await expect(page.locator('h1 .badge')).toHaveText('failed: validation');
+	await expect(page.locator('h1 .badge')).toHaveText('failed: invalid output');
 	await expect(page.getByTestId('authority')).toContainText('failed at step 2 of 4');
 	// See what is missing: on this operation nothing; on the restarted one, an unknown tail.
 	await expect(page.getByText(/^No gaps/)).toBeVisible();
@@ -113,6 +114,45 @@ for (const width of [360, 1440]) {
 		await allWhole('gap-only operation: gap counts', page.locator('[data-testid="gap-count"]:visible'));
 	});
 }
+
+test('outcomes read in plain words, with the codes one click away', async ({ page }) => {
+	await signIn(page);
+	const codesIn = async (where: string) => {
+		const texts = await page.locator('.badge').allInnerTexts();
+		expect(texts.filter((t) => /[a-z]_[a-z]/.test(t)), `${where}: a badge shows an internal code`).toEqual([]);
+	};
+	// A real failure: plain words in the header and the steps, the code behind a toggle.
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_INVALID)}`);
+	await expect(page.locator('h1 .badge')).toHaveText('failed: invalid output');
+	await expect(page.getByTestId('codes')).toBeHidden();
+	await page.getByText('Codes', { exact: true }).click();
+	await expect(page.getByTestId('codes')).toContainText('failure_class validation');
+	const steps = page.getByRole('rowgroup', { name: 'Steps' });
+	await expect(steps.getByRole('row').first().locator('.badge')).toHaveText('succeeded');
+	expect(await steps.innerText(), 'no raw step IDs in the steps').not.toMatch(/[0-9a-f]{16}/);
+	// Events by name in words, not wire types.
+	const events = page.getByRole('rowgroup', { name: 'Events' });
+	await expect(events.getByText(/^operation started/).first()).toBeVisible();
+	expect(await events.innerText()).not.toContain('operation.started');
+	await codesIn('a validation failure');
+	// A lost reply.
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_LOST)}`);
+	await expect(steps.getByRole('row').filter({ hasText: 'external effect' }).locator('.badge')).toHaveText(
+		'outcome unknown: timed out after sending'
+	);
+	await codesIn('a lost reply');
+	// A cancelled run is cancelled, in the list and on the page, never "failed: internal".
+	await page.goto(`/console/p/pilot?request_id=${encodeURIComponent(DR_CANCEL)}`);
+	await expect(page.getByTestId('operation').locator('.badge')).toHaveText('cancelled');
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_CANCEL)}`);
+	await expect(page.locator('h1 .badge')).toHaveText('cancelled');
+	await expect(page.getByTestId('authority')).toContainText('was cancelled');
+	await codesIn('a cancelled run');
+	// And the list: no badge on the first page shows a code.
+	await page.goto('/console/p/pilot');
+	await expect(page.getByTestId('operation').first()).toBeVisible();
+	await codesIn('the operations list');
+});
 
 for (const scheme of ['light', 'dark'] as const) {
 	test.describe(`${scheme} scheme`, () => {

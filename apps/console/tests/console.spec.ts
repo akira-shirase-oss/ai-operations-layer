@@ -48,7 +48,7 @@ test('a lost publish response reads as an unknown external effect, with the auth
 	await signIn(page);
 	await openByRequest(page, LOST);
 	await expect(page.getByRole('heading', { level: 1 })).toContainText('publish_article');
-	await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: timeout_after_send');
+	await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: timed out after sending');
 	await expect(page.getByText('An external effect may have happened.')).toBeVisible();
 	await expect(page.getByText(/check the system that owns the effect/)).toBeVisible();
 	const publish = page
@@ -56,7 +56,7 @@ test('a lost publish response reads as an unknown external effect, with the auth
 		.getByRole('row')
 		.filter({ hasText: 'publish' })
 		.filter({ hasText: 'external effect' });
-	await expect(publish.locator('.badge')).toHaveText('outcome unknown: timeout_after_send');
+	await expect(publish.locator('.badge')).toHaveText('outcome unknown: timed out after sending');
 	await expect(page.getByText('Cost (estimate, not a bill)')).toBeVisible();
 	await expect(page.getByText(/^Events \(event time · receive time\)$/)).toBeVisible();
 	expect(problems).toEqual([]);
@@ -111,7 +111,7 @@ test('a publish whose start was lost and whose outcome is unknown still warns, t
 	const problems = watch(page);
 	await signIn(page);
 	await openByRequest(page, E3);
-	await expect(page.locator('h1 .badge')).toHaveText('failed: internal');
+	await expect(page.locator('h1 .badge')).toHaveText('failed: host error');
 	await expect(page.locator('.notice.uncertain').first()).toContainText('An external effect may have happened.');
 	expect(problems).toEqual([]);
 });
@@ -142,7 +142,7 @@ test('a 5,000-event timeline renders a window of rows and scrolls to the last on
 	expect(rendered).toBeGreaterThan(5);
 	expect(rendered).toBeLessThan(100); // of 5,000
 	await list.evaluate((el) => (el.scrollTop = el.scrollHeight));
-	await expect(list.getByText('operation.finished')).toBeVisible();
+	await expect(list.getByText('operation finished')).toBeVisible();
 	expect(problems).toEqual([]);
 });
 
@@ -157,9 +157,9 @@ test('a 5,000-event operation lists its 2,499 step attempts as a window and scro
 	const rendered = await steps.getByRole('row').count();
 	expect(rendered).toBeGreaterThan(5);
 	expect(rendered).toBeLessThan(100); // of 2,499
-	await expect(steps.getByText('00000000000009c3')).toHaveCount(0); // the last step is not in the DOM yet
+	await expect(steps.locator('[data-step-id="00000000000009c3"]')).toHaveCount(0); // the last step is not in the DOM yet
 	await steps.evaluate((el) => (el.scrollTop = el.scrollHeight));
-	await expect(steps.getByText('00000000000009c3')).toBeVisible();
+	await expect(steps.locator('[data-step-id="00000000000009c3"]')).toBeVisible();
 	expect(problems).toEqual([]);
 });
 
@@ -170,7 +170,7 @@ test.describe('dark mode', () => {
 		await signIn(page);
 		await expect(page.locator('html')).toHaveClass(/dark/);
 		await openByRequest(page, LOST);
-		await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: timeout_after_send');
+		await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: timed out after sending');
 		expect(problems).toEqual([]);
 	});
 });
@@ -183,7 +183,7 @@ for (const width of [1280, 1920]) {
 		await page.setViewportSize({ width, height: 900 });
 		await signIn(page);
 		await openByRequest(page, LONG);
-		await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: connection_lost_after_send');
+		await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: connection lost after sending');
 		const badges = page.getByRole('rowgroup', { name: 'Events' }).locator('[role="row"] .badge');
 		await expect(badges).toHaveCount(2); // the step's and the operation's finish
 		for (const badge of await badges.all()) {
@@ -243,7 +243,7 @@ test.describe('Durable Runner, the first real host', () => {
 		await expect(page.getByText('An external effect may have happened.')).toBeVisible();
 		const steps = page.getByRole('rowgroup', { name: 'Steps' });
 		const publish = steps.getByRole('row').filter({ hasText: 'external effect' });
-		await expect(publish.locator('.badge')).toHaveText('outcome unknown: timeout_after_send');
+		await expect(publish.locator('.badge')).toHaveText('outcome unknown: timed out after sending');
 		await expect(publish).toContainText('runner_deadline_passed');
 		await expect(steps.getByRole('row').filter({ hasText: 'publish.reconcile' }).locator('.badge')).toHaveText(
 			'succeeded'
@@ -256,11 +256,11 @@ test.describe('Durable Runner, the first real host', () => {
 		const problems = watch(page);
 		await signIn(page);
 		await openByRequest(page, DR_INVALID);
-		await expect(page.locator('h1 .badge')).toHaveText('failed: validation');
+		await expect(page.locator('h1 .badge')).toHaveText('failed: invalid output');
 		await expect(page.getByTestId('authority-state')).toContainText('failed:step:1');
 		const validate = page.getByRole('rowgroup', { name: 'Steps' }).getByRole('row').filter({ hasText: 'validate' });
 		await expect(validate).toHaveCount(5); // the runner's five attempts, numbered by the runner
-		await expect(validate.locator('.badge').first()).toHaveText('failed: validation');
+		await expect(validate.locator('.badge').first()).toHaveText('failed: invalid output');
 		expect(problems).toEqual([]);
 	});
 
@@ -296,7 +296,7 @@ test('releases compare from the same records the filtered list shows', async ({ 
 	const rows = page.locator('tbody tr');
 	await expect(rows).toHaveCount(1);
 	await expect(rows.first()).toContainText('e2e-cmp-4');
-	await expect(rows.first().locator('.badge')).toHaveText('failed: rejected');
+	await expect(rows.first().locator('.badge')).toHaveText('failed: refused');
 	await expect(page.getByLabel('Status')).toHaveValue('failed');
 	expect(problems).toEqual([]);
 });

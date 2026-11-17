@@ -8,7 +8,7 @@
 	import Loading from '#lib/components/Loading.svelte';
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { api, type Result } from '#lib/api.js';
-	import { money, short, time } from '#lib/format.js';
+	import { money, short, stateText, time } from '#lib/format.js';
 	import type { OperationList, OperationSummary } from '#lib/types.js';
 	import { viewport } from '#lib/viewport.svelte.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
@@ -77,7 +77,7 @@
 			<span class="text-muted-foreground">Status</span>
 			<NativeSelect bind:value={status} aria-label="Status">
 				<option value="">any</option>
-				{#each STATUS_CHOICES as s (s)}<option value={s}>{s.replaceAll('_', ' ')}</option>{/each}
+				{#each STATUS_CHOICES as s (s)}<option value={s}>{stateText(s)}</option>{/each}
 			</NativeSelect>
 		</label>
 		<label class="grid gap-1"

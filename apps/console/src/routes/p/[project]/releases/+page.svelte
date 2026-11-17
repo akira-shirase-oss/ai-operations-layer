@@ -5,7 +5,7 @@
 	import { Input } from '@aiops/ui/ui/input';
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { api, type Result } from '#lib/api.js';
-	import { money, time } from '#lib/format.js';
+	import { money, stateText, time } from '#lib/format.js';
 	import type { Comparison } from '#lib/types.js';
 	import Notice from '#lib/components/Notice.svelte';
 	import Failure from '#lib/components/Failure.svelte';
@@ -80,7 +80,7 @@
 			<TableRow>
 				<TableHead>Release</TableHead>
 				<TableHead>Operations</TableHead>
-				{#each STATUS_COLUMNS as s (s)}<TableHead>{s.replaceAll('_', ' ')}</TableHead>{/each}
+				{#each STATUS_COLUMNS as s (s)}<TableHead>{stateText(s)}</TableHead>{/each}
 				<TableHead>Missing events</TableHead>
 				<TableHead>Dropped by SDK</TableHead>
 				<TableHead>Failed / uncertain attempts</TableHead>

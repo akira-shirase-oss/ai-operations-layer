@@ -5,7 +5,7 @@
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@aiops/ui/ui/tooltip';
 	import { api, type Result } from '#lib/api.js';
-	import { micros, money, short, time, value } from '#lib/format.js';
+	import { eventTypeText, micros, money, short, statusCodes, time, value } from '#lib/format.js';
 	import type { AttemptView, Authority, EntryView, GapView, StepView, Timeline } from '#lib/types.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import Notice from '#lib/components/Notice.svelte';
@@ -62,7 +62,16 @@
 		'grid grid-cols-[12rem_4.5rem_23rem_minmax(7rem,1fr)_2.5rem_8rem_minmax(6rem,14rem)] gap-3 px-3';
 	const gapText = (g: GapView) => `${GAP_TEXT[g.kind] ?? g.kind}${g.reason ? ` (${g.reason})` : ''}`;
 	const eventText = (e: EntryView) =>
-		`${e.type}${e.name ? ` · ${e.name}` : ''}${e.attempt ? ` #${e.attempt}` : ''}`;
+		`${eventTypeText(e.type)}${e.name ? ` · ${e.name}` : ''}${e.attempt ? ` · attempt ${e.attempt}` : ''}`;
+	// Step kinds (D-020's model / tool / job / validation) in words.
+	const KIND_TEXT: Record<string, string> = {
+		model: 'model call',
+		tool: 'tool call',
+		job: 'job',
+		validation: 'check'
+	};
+	const kindText = (s: StepView) =>
+		`${s.kind ? (KIND_TEXT[s.kind] ?? s.kind) : 'kind unknown'}${s.external_effect ? ' · external effect' : ''}`;
 	// Every attempt of every step is one row, windowed like the events (a 5,000-event
 	// operation can hold 2,500 attempts). The step's name is repeated, muted, on its later
 	// attempts, so a row scrolled into view on its own still says which step it belongs to.
@@ -102,11 +111,17 @@
 	<h1 class="mt-1 flex flex-wrap items-center gap-3 text-2xl font-semibold tracking-tight">
 		{t.name ?? 'Operation (name not observed)'} <StatusBadge status={t.status} />
 	</h1>
-	<p class="mb-4 font-mono text-xs text-muted-foreground">
+	<p class="font-mono text-xs break-all text-muted-foreground">
 		{t.operation_id}{t.request_id ? ` · request ${t.request_id}` : ''}{t.release ? ` · release ${t.release}` : ''}{t.deployment
 			? ` · ${t.deployment}`
 			: ''}
 	</p>
+	<details class="mb-4 text-xs text-muted-foreground">
+		<summary class="w-fit cursor-pointer">Codes</summary>
+		<p class="font-mono" data-testid="codes">
+			{t.status.declared ? 'declared by the host' : 'not declared'}: {statusCodes(t.status)}
+		</p>
+	</details>
 
 	{#if t.status.state === 'uncertain' || t.flags.external_effect_unknown}
 		<Notice kind="uncertain" title="An external effect may have happened.">
@@ -288,14 +303,14 @@
 					{#snippet row(r: AttemptRow)}
 						{@const a = r.attempt}
 						{#if viewport.narrow}
-							<div class="grid h-full content-center gap-1 px-3 text-sm">
+							<div class="grid h-full content-center gap-1 px-3 text-sm" data-step-id={r.step.step_id}>
 								<span role="cell" data-cell="outcome" class="flex min-w-0 flex-wrap items-center gap-1">
 									<StatusBadge status={a} />
 									{#if !a.start_observed}<Flag>start not received</Flag>{/if}
 								</span>
 								<span role="cell" class="min-w-0 truncate">
 									<span class={r.first ? 'font-semibold' : 'text-muted-foreground'}>{r.step.name ?? 'name not observed'}</span>
-									· attempt {a.attempt}{a.duration_us !== undefined ? ` · ${micros(a.duration_us)}` : ''}
+									· attempt {a.attempt}{r.first ? ` · ${kindText(r.step)}` : ''}{a.duration_us !== undefined ? ` · ${micros(a.duration_us)}` : ''}
 								</span>
 								<span role="cell" class="min-w-0 truncate font-mono text-xs text-muted-foreground" title={errorText(a)}
 									>{[errorText(a).trim(), versionText(a), a.cost_estimate_micros !== undefined
@@ -306,15 +321,12 @@
 								>
 							</div>
 						{:else}
-							<div class="{STEP_COLUMNS} h-full items-center text-sm">
-								<span role="cell" class="min-w-0 leading-tight">
-									<span class="block truncate {r.first ? 'font-semibold' : 'text-muted-foreground'}" title={r.step.name ?? ''}
+							<div class="{STEP_COLUMNS} h-full items-center text-sm" data-step-id={r.step.step_id}>
+								<span role="cell" class="min-w-0 leading-tight" title="step ID {r.step.step_id}">
+									<span class="block truncate {r.first ? 'font-semibold' : 'text-muted-foreground'}"
 										>{r.step.name ?? 'name not observed'}</span
 									>
-									<span class="block truncate text-xs text-muted-foreground">
-										{#if r.first}{r.step.kind ?? 'kind unknown'}{r.step.external_effect ? ' · external effect' : ''} ·
-										{/if}<span class="font-mono">{r.step.step_id}</span>
-									</span>
+									<span class="block truncate text-xs text-muted-foreground">{kindText(r.step)}</span>
 								</span>
 								<span role="cell">{a.attempt}</span>
 								<span role="cell" data-cell="outcome" class="flex min-w-0 flex-col items-start gap-0.5">
@@ -425,7 +437,7 @@
 							>
 								<span role="cell" data-cell="outcome" class="flex min-w-0 flex-wrap items-center gap-1">
 									{#if e.outcome}<StatusBadge status={e.outcome} />{/if}
-									<span class="min-w-0 truncate" title={eventText(e)}>{eventText(e)}</span>
+									<span class="min-w-0 truncate" title="{eventText(e)} ({e.type})">{eventText(e)}</span>
 								</span>
 								<span role="cell" class="min-w-0 truncate font-mono text-xs"
 									>{time(e.event_time)} · <span class="text-muted-foreground"
@@ -451,7 +463,7 @@
 							<span role="cell" data-cell="outcome" class="min-w-0">
 								{#if e.outcome}<StatusBadge status={e.outcome} />{/if}
 							</span>
-							<span role="cell" data-cell="event" class="min-w-0 truncate" title={eventText(e)}>{eventText(e)}</span>
+							<span role="cell" data-cell="event" class="min-w-0 truncate" title="{eventText(e)} ({e.type})">{eventText(e)}</span>
 							<span role="cell" class="font-mono text-xs">{e.op_seq || '—'}</span>
 							<span role="cell" class="min-w-0 truncate font-mono text-xs">
 								<Tooltip>

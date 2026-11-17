@@ -44,5 +44,55 @@ const STATE_TEXT: Record<string, string> = {
 };
 
 export function stateText(state: string): string {
-	return STATE_TEXT[state] ?? state;
+	return STATE_TEXT[state] ?? state.replaceAll('_', ' ');
+}
+
+// The host's declared classes (D-020) in plain words; the codes stay one click away.
+const CLASS_TEXT: Record<string, string> = {
+	transport: 'never delivered',
+	rejected: 'refused',
+	validation: 'invalid output',
+	internal: 'host error'
+};
+const REASON_TEXT: Record<string, string> = {
+	timeout_after_send: 'timed out after sending',
+	connection_lost_after_send: 'connection lost after sending',
+	response_unreadable: 'reply unreadable'
+};
+
+/** A declared outcome in plain words: "failed: invalid output", "outcome unknown: timed out
+ * after sending", "cancelled". A failed finish whose host error code is `cancelled` is a run
+ * stopped on request (the code is the host's declaration; nothing is inferred). */
+export function statusText(s: { state: string; class?: string; reason?: string; code?: string }): string {
+	if (s.state === 'failed' && s.code === 'cancelled') return 'cancelled';
+	const detail = s.class
+		? (CLASS_TEXT[s.class] ?? s.class.replaceAll('_', ' '))
+		: s.reason
+			? (REASON_TEXT[s.reason] ?? s.reason.replaceAll('_', ' '))
+			: '';
+	return detail ? `${stateText(s.state)}: ${detail}` : stateText(s.state);
+}
+
+/** The codes behind a status, for a details toggle or a tooltip. */
+export function statusCodes(s: { state: string; class?: string; reason?: string; code?: string }): string {
+	return [
+		`outcome ${s.state}`,
+		s.class ? `failure_class ${s.class}` : '',
+		s.reason ? `uncertain_reason ${s.reason}` : '',
+		s.code ? `error_code ${s.code}` : ''
+	]
+		.filter(Boolean)
+		.join(' · ');
+}
+
+const EVENT_TEXT: Record<string, string> = {
+	'operation.started': 'operation started',
+	'operation.finished': 'operation finished',
+	'step.started': 'step started',
+	'step.finished': 'step finished',
+	'gap.reported': 'gap reported'
+};
+
+export function eventTypeText(type: string): string {
+	return EVENT_TEXT[type] ?? type;
 }

@@ -81,6 +81,12 @@ Per type, only the listed fields may appear (anything else is
   `uncertain` + `uncertain_reason` — `timeout_after_send`,
   `connection_lost_after_send`, `response_unreadable` (the request left the
   host; the effect may have happened).
+- **A cancelled run** has no outcome of its own in v1: it is declared
+  `failed` (class `internal`) with `error_code: cancelled` on its
+  `operation.finished`. The collector stores that code beside the outcome
+  and returns it as the status's `code`; the console shows the run as
+  *cancelled*, never as a host error. Nothing infers a cancel: only that
+  declared code does (review U2, 2026-11-17).
 - `gap.reported` `reason`: `queue_full`, `send_failed`, `rejected`,
   `shutdown`.
 - `usage`: `{input_tokens, output_tokens}` ≤ 10⁹ each.

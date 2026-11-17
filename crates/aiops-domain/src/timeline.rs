@@ -67,6 +67,10 @@ pub struct Status {
     pub class: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+    /// The host's `error_code` on the declared finish, as sent (schema v1 already carries
+    /// it). The console words a few codes, `cancelled` among them; it never infers one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     /// True when the state is the host's own declaration.
     pub declared: bool,
 }
@@ -82,7 +86,16 @@ impl Status {
             state: outcome.as_str(),
             class,
             reason,
+            code: None,
             declared: true,
+        }
+    }
+
+    /// The declared outcome with the host's `error_code` on that finish.
+    pub fn declared(outcome: Outcome, code: Option<&str>) -> Self {
+        Self {
+            code: code.map(str::to_owned),
+            ..Self::from_outcome(outcome)
         }
     }
 
@@ -92,6 +105,7 @@ impl Status {
             state: "conflicting",
             class: None,
             reason: None,
+            code: None,
             declared: true,
         }
     }
@@ -101,6 +115,7 @@ impl Status {
             state: "no_finish_observed",
             class: None,
             reason: None,
+            code: None,
             declared: false,
         }
     }
@@ -306,13 +321,15 @@ pub struct SourceView {
 
 /// What survives retention for an operation (its summary), and the retention cutoff: raw
 /// events received before `cutoff` may have been deleted (review finding 10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionContext {
     pub cutoff: Timestamp,
     /// When the operation's first event was received (from the summary).
     pub first_received_at: Timestamp,
-    /// The declared finish the summary kept, and whether finishes conflicted.
+    /// The declared finish the summary kept (and its `error_code`), and whether finishes
+    /// conflicted.
     pub finish: Option<Outcome>,
+    pub finish_code: Option<String>,
     pub finish_conflict: bool,
     /// Host events ever stored for the operation (from the summary).
     pub events_received: u32,
@@ -369,7 +386,7 @@ struct AttemptAcc<'a> {
 /// What one pass over the events collects.
 struct Collected<'a> {
     meta: Option<&'a crate::event::OperationMeta>,
-    finishes: Vec<(&'a StoredEvent, Outcome, u32)>,
+    finishes: Vec<(&'a StoredEvent, Outcome, u32, Option<&'a str>)>,
     step_order: Vec<StepId>,
     steps: HashMap<StepId, BTreeMap<u32, AttemptAcc<'a>>>,
     step_start_time: HashMap<StepId, Timestamp>,
@@ -401,7 +418,8 @@ fn collect(events: &[StoredEvent]) -> Collected<'_> {
                 c.starters.insert(stored.instance_id);
             }
             EventBody::OperationFinished(f) => {
-                c.finishes.push((stored, f.outcome, f.events_emitted));
+                c.finishes
+                    .push((stored, f.outcome, f.events_emitted, f.error_code.as_deref()));
             }
             EventBody::StepStarted(s) => {
                 if !c.steps.contains_key(&s.step_id) {
@@ -455,7 +473,7 @@ fn collect(events: &[StoredEvent]) -> Collected<'_> {
                 .insert(e.op_seq);
         }
     }
-    for (stored, _, emitted) in &c.finishes {
+    for (stored, _, emitted, _) in &c.finishes {
         let entry = c.per_instance.entry(stored.instance_id).or_default();
         entry.1 = Some(entry.1.map_or(*emitted, |e| e.max(*emitted)));
     }
@@ -678,12 +696,12 @@ pub fn assemble(
     // The declared status. Finishes that disagree are `conflicting`: never pick one,
     // whatever order they arrived or were stamped in.
     let status = match c.finishes.first() {
-        Some((_, outcome, _)) => {
-            flags.conflicting_finish = c.finishes.iter().any(|(_, o, _)| o != outcome);
+        Some((_, outcome, _, code)) => {
+            flags.conflicting_finish = c.finishes.iter().any(|(_, o, _, _)| o != outcome);
             if flags.conflicting_finish {
                 Status::conflicting()
             } else {
-                Status::from_outcome(*outcome)
+                Status::declared(*outcome, *code)
             }
         }
         None => Status::no_finish_observed(),
@@ -699,7 +717,7 @@ pub fn assemble(
         // The finish may itself have expired: the summary kept the declaration.
         Some(r) if status.state == "no_finish_observed" => match r.finish {
             Some(_) if r.finish_conflict => Status::conflicting(),
-            Some(outcome) => Status::from_outcome(outcome),
+            Some(outcome) => Status::declared(outcome, r.finish_code.as_deref()),
             None => status,
         },
         _ => status,
@@ -949,7 +967,9 @@ fn entry_view(stored: &StoredEvent, delay: i64, flags: Vec<&'static str>) -> Ent
     };
     match &e.body {
         EventBody::OperationStarted(m) => view.name = Some(m.name.clone()),
-        EventBody::OperationFinished(f) => view.outcome = Some(Status::from_outcome(f.outcome)),
+        EventBody::OperationFinished(f) => {
+            view.outcome = Some(Status::declared(f.outcome, f.error_code.as_deref()));
+        }
         EventBody::StepStarted(s) => {
             view.attempt = Some(s.attempt);
             view.kind = Some(s.kind.as_str());
@@ -959,7 +979,7 @@ fn entry_view(stored: &StoredEvent, delay: i64, flags: Vec<&'static str>) -> Ent
             view.attempt = Some(f.attempt);
             view.kind = f.kind.map(StepKind::as_str);
             view.name.clone_from(&f.name);
-            view.outcome = Some(Status::from_outcome(f.outcome));
+            view.outcome = Some(Status::declared(f.outcome, f.error_code.as_deref()));
         }
         EventBody::GapReported(g) => {
             view.dropped = Some(g.dropped);
@@ -970,9 +990,9 @@ fn entry_view(stored: &StoredEvent, delay: i64, flags: Vec<&'static str>) -> Ent
 }
 
 /// For lists: the state of an operation from its summary counters alone.
-pub fn list_state(finish: Option<Outcome>, conflict: bool) -> Status {
+pub fn list_state(finish: Option<Outcome>, code: Option<&str>, conflict: bool) -> Status {
     if conflict {
         return Status::conflicting();
     }
-    finish.map_or_else(Status::no_finish_observed, Status::from_outcome)
+    finish.map_or_else(Status::no_finish_observed, |o| Status::declared(o, code))
 }

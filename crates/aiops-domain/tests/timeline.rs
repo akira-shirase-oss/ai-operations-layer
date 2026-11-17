@@ -588,6 +588,7 @@ fn n10_a_conflict_the_summary_recorded_survives_expiry_of_one_finish() {
         cutoff: first.plus_micros(1),
         first_received_at: first,
         finish: Some(Outcome::Succeeded),
+        finish_code: None,
         finish_conflict: true,
         events_received: 3,
     };
@@ -600,4 +601,51 @@ fn n10_a_conflict_the_summary_recorded_survives_expiry_of_one_finish() {
         Some(&retention),
     );
     assert_eq!(t.status.state, "conflicting");
+}
+
+// Review U2: a cancelled run is declared `failed` with `error_code: cancelled` (schema v1 has
+// no cancelled outcome). The code travels with the status — the timeline's, the finish
+// event's and the list's — so the console can word it as cancelled; nothing is inferred.
+#[test]
+fn u2_the_declared_finish_carries_its_error_code_to_every_status() {
+    let mut b = B::new();
+    let cancelled = EventBody::OperationFinished(OperationFinish {
+        outcome: Outcome::Failed(FailureClass::Internal),
+        events_emitted: 2,
+        error_code: Some("cancelled".into()),
+        error_message: None,
+    });
+    let events = vec![b.ev(0, 5, started()), b.ev(20, 5, cancelled)];
+    let deltas = aiops_domain::summary::summarize(events.iter().map(|s| &s.event));
+    assert_eq!(deltas[0].finish_code.as_deref(), Some("cancelled"));
+    let listed = aiops_domain::timeline::list_state(
+        deltas[0].finish,
+        deltas[0].finish_code.as_deref(),
+        deltas[0].finish_conflict,
+    );
+    assert_eq!(
+        (listed.state, listed.code.as_deref()),
+        ("failed", Some("cancelled"))
+    );
+
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
+    assert_eq!(t.status.state, "failed");
+    assert_eq!(t.status.class, Some("internal"));
+    assert_eq!(t.status.code.as_deref(), Some("cancelled"));
+    let finish = t.entries.iter().find_map(|e| e.outcome.as_ref()).unwrap();
+    assert_eq!(finish.code.as_deref(), Some("cancelled"));
+    // A finish without a code says nothing more.
+    let mut b = B::new();
+    let t = assemble(
+        op(),
+        vec![
+            b.ev(0, 5, started()),
+            b.ev(20, 5, finished(Outcome::Succeeded, 2)),
+        ],
+        &[],
+        &Limits::default(),
+        false,
+        None,
+    );
+    assert_eq!(t.status.code, None);
 }

@@ -271,9 +271,20 @@ kill -9 "$adapter_pid"; wait "$adapter_pid" 2>/dev/null || true
 sleep 0.2
 start_adapter
 settle "$run_restart"
+# A cancelled run: cancelled once its slow generate call is in flight, so the adapter has
+# seen it; the adapter declares the finish from the runner's answer ("cancelled").
+run_cancel="$(submit article/e2e-dr-cancel '"slow_generate"')"
+op_cancel="$(op_of "$run_cancel")"
+for _ in $(seq 1 60); do
+  curl -fsS -o /dev/null "http://127.0.0.1:$port/v1/projects/pilot/operations/$op_cancel" -H "authorization: Bearer $token" \
+    2>/dev/null && break
+  sleep 0.05
+done
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$dr_port/jobs/$run_cancel/cancel" -H "authorization: Bearer $DURABLE_API_KEY"
+settle "$run_cancel"
 
 AIOPS_E2E_DR_OK=article/e2e-dr-ok AIOPS_E2E_DR_LOST=article/e2e-dr-lost AIOPS_E2E_DR_INVALID=article/e2e-dr-invalid \
-AIOPS_E2E_DR_RESTART=article/e2e-dr-restart \
+AIOPS_E2E_DR_RESTART=article/e2e-dr-restart AIOPS_E2E_DR_CANCEL=article/e2e-dr-cancel \
 AIOPS_SCREENS_DIR="${AIOPS_SCREENS_DIR:-}" \
 AIOPS_E2E_BASE="http://127.0.0.1:$port" AIOPS_E2E_TOKEN="$token" AIOPS_E2E_OTHER_TOKEN="$other_token" \
 AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_BIG=e2e-big AIOPS_E2E_LONG=e2e-long AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \

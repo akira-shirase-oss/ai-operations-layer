@@ -29,7 +29,7 @@ macro_rules! operation_columns {
         "SELECT operation_id, name, request_id, release, first_event_time, last_event_time, last_received_at,
                 host_events, gap_reports, reported_dropped, finish_outcome, finish_detail, events_emitted,
                 failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency, finish_conflict,
-                first_received_at, multi_source"
+                first_received_at, multi_source, finish_code"
     };
 }
 
@@ -146,6 +146,7 @@ fn operation_row(r: &sqlx::postgres::PgRow) -> Result<OperationRow, StoreError> 
         finish_conflict: r.get(17),
         first_received_at: from_odt(r.get(18)),
         multi_source: r.get(19),
+        finish_code: r.get(20),
     })
 }
 
@@ -311,6 +312,8 @@ pub struct OperationRow {
     pub reported_dropped: i64,
     pub finish_outcome: Option<String>,
     pub finish_detail: Option<String>,
+    /// The host's `error_code` on the kept finish.
+    pub finish_code: Option<String>,
     /// Hosts declared different outcomes.
     pub finish_conflict: bool,
     /// Events came from more than one source instance.
@@ -1303,6 +1306,7 @@ async fn upsert_summaries(
         .collect();
     let currencies: Vec<Option<&str>> = deltas.iter().map(|d| d.cost_currency.as_deref()).collect();
     let conflicts: Vec<bool> = deltas.iter().map(|d| d.finish_conflict).collect();
+    let finish_codes: Vec<Option<&str>> = deltas.iter().map(|d| d.finish_code.as_deref()).collect();
 
     let counts = sqlx::query(
         "WITH ops AS (
@@ -1310,14 +1314,14 @@ async fn upsert_summaries(
                 first_event_time, last_event_time, first_received_at, last_received_at,
                 host_events, gap_reports, reported_dropped, finish_outcome, finish_detail,
                 events_emitted, failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency,
-                finish_conflict, first_instance_id)
+                finish_conflict, first_instance_id, finish_code)
             SELECT $1, d.op, d.name, d.req, d.rel, d.tmin, d.tmax, $2, $2, d.host, d.gaps, d.dropped,
-                   d.fin, d.detail, d.emitted, d.failed, d.unc, d.cost, d.cur, d.conflict, $19
+                   d.fin, d.detail, d.emitted, d.failed, d.unc, d.cost, d.cur, d.conflict, $19, d.code
             FROM UNNEST($3::uuid[], $4::text[], $5::text[], $6::text[], $7::timestamptz[], $8::timestamptz[],
                         $9::int4[], $10::int4[], $11::int8[], $12::text[], $13::text[], $14::int4[],
-                        $15::int4[], $16::int4[], $17::int8[], $18::text[], $32::bool[])
+                        $15::int4[], $16::int4[], $17::int8[], $18::text[], $32::bool[], $34::text[])
                  AS d(op, name, req, rel, tmin, tmax, host, gaps, dropped, fin, detail, emitted, failed, unc, cost, cur,
-                      conflict)
+                      conflict, code)
             ORDER BY d.op
             ON CONFLICT (project_id, operation_id) DO UPDATE SET
                 name = COALESCE(o.name, EXCLUDED.name),
@@ -1337,6 +1341,7 @@ async fn upsert_summaries(
                     AND (o.finish_outcome, COALESCE(o.finish_detail, ''))
                         <> (EXCLUDED.finish_outcome, COALESCE(EXCLUDED.finish_detail, ''))),
                 finish_detail = CASE WHEN o.finish_outcome IS NULL THEN EXCLUDED.finish_detail ELSE o.finish_detail END,
+                finish_code = CASE WHEN o.finish_outcome IS NULL THEN EXCLUDED.finish_code ELSE o.finish_code END,
                 finish_outcome = COALESCE(o.finish_outcome, EXCLUDED.finish_outcome),
                 events_emitted = GREATEST(o.events_emitted, EXCLUDED.events_emitted),
                 failed_attempts = o.failed_attempts + EXCLUDED.failed_attempts,
@@ -1409,6 +1414,7 @@ async fn upsert_summaries(
     .bind(&batch.new_names)
     .bind(&conflicts)
     .bind(&batch.touched_names)
+    .bind(&finish_codes)
     .fetch_one(&mut *tx)
     .await?;
     let src_rows: i64 = counts.get(1);

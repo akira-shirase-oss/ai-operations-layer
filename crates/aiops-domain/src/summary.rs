@@ -21,6 +21,8 @@ pub struct OperationDelta {
     pub gap_reports: u32,
     pub reported_dropped: u64,
     pub finish: Option<Outcome>,
+    /// The `error_code` on the first finish this batch carried.
+    pub finish_code: Option<String>,
     /// This batch carried finishes with different outcomes.
     pub finish_conflict: bool,
     pub events_emitted: Option<u32>,
@@ -51,6 +53,7 @@ pub fn summarize<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Operati
                 gap_reports: 0,
                 reported_dropped: 0,
                 finish: None,
+                finish_code: None,
                 finish_conflict: false,
                 events_emitted: None,
                 failed_attempts: 0,
@@ -74,6 +77,9 @@ pub fn summarize<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Operati
                 }
             }
             EventBody::OperationFinished(f) => {
+                if d.finish.is_none() {
+                    d.finish_code.clone_from(&f.error_code);
+                }
                 let first = *d.finish.get_or_insert(f.outcome);
                 d.finish_conflict |= first != f.outcome;
                 d.events_emitted = Some(
