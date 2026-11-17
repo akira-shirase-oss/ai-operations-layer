@@ -240,3 +240,31 @@ export type ReleaseView = {
 };
 
 export type Comparison = { from: string; to: string; releases: ReleaseView[] };
+
+/** A controlled recovery (A3, D-030): a plan, and what became of it. */
+export type Recovery = {
+	id: string;
+	status: 'planned' | 'blocked' | 'submitting' | 'submitted';
+	planned_by: string;
+	runner: string;
+	run_id: number;
+	business_key: string;
+	expected_state: string;
+	observed_state: string;
+	effect: 'not_landed' | 'landed' | 'unknown';
+	effect_detail?: string;
+	recovery_number: number;
+	derived_key: string;
+	approved_by?: string;
+	approved_at?: string;
+	new_run?: {
+		run_id: number;
+		operation_id: string;
+		runner_state?: string;
+		unavailable?: string;
+		read_at?: string;
+	};
+	created_at: string;
+};
+
+export type RecoveryList = { configured: boolean; recoveries: Recovery[] };

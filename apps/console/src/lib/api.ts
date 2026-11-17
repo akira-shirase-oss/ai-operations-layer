@@ -60,3 +60,37 @@ export async function api<T>(path: string, fetcher: typeof fetch = fetch): Promi
 			return { state: 'unreachable', message };
 	}
 }
+
+/** A control request's answer: the record, or a refusal the person can read (A3). */
+export type Sent<T> = Result<T> | { state: 'refused'; code: string; message: string };
+
+/** POSTs JSON with the tab's token. A 409 or 503 is a refusal with the collector's words. */
+export async function send<T>(path: string, body: unknown, fetcher: typeof fetch = fetch): Promise<Sent<T>> {
+	const t = token();
+	if (!t) return { state: 'needsAuth' };
+	let response: Response;
+	try {
+		response = await fetcher(path, {
+			method: 'POST',
+			headers: { authorization: `Bearer ${t}`, 'content-type': 'application/json' },
+			body: JSON.stringify(body)
+		});
+	} catch (e) {
+		return { state: 'unreachable', message: e instanceof Error ? e.message : 'network error' };
+	}
+	if (response.ok) return { state: 'ok', data: (await response.json()) as T };
+	let code = `http_${response.status}`;
+	let message = `HTTP ${response.status}`;
+	try {
+		const b = (await response.json()) as { error?: { code?: string; message?: string } };
+		if (b?.error?.code) code = b.error.code;
+		if (b?.error?.message) message = b.error.message;
+	} catch {
+		// keep the status line
+	}
+	if (response.status === 409 || response.status === 503) return { state: 'refused', code, message };
+	if (response.status === 401) return { state: 'needsAuth' };
+	if (response.status === 403) return { state: 'forbidden', message };
+	if (response.status === 404) return { state: 'missing' };
+	return { state: 'unreachable', message };
+}

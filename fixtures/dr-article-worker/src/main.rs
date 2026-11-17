@@ -12,7 +12,9 @@
 //! at-least-once) and answers its reconcile probe, `GET /<step>?idem_key=…`, with 200 once
 //! that call completed. Faults (one per job): `model_retry_ok`, `model_exhausted`,
 //! `slow_generate`, `validation_failed`, `tool_timeout`, `publish_rejected`,
-//! `publish_lost_response`.
+//! `publish_lost_response`, and for controlled recovery (A3) `publish_outage` (refused until
+//! the run is a recovery, `<key>#r<n>`) and `publish_landed_then_refused` (published, the
+//! reply lost, the probe blind to it, later attempts refused: a failed run that published).
 //!
 //! `WORKER_LISTEN` (default 127.0.0.1:53333), `WORKER_HANG_MS` (how long a hanging call
 //! hangs; default 3000, above the runner's step timeout).
@@ -130,11 +132,15 @@ async fn step(
 ) -> Response {
     let job: Job = serde_json::from_slice(&call.input).unwrap_or_default();
     let fault = job.fault.as_deref().unwrap_or("");
-    let business_key = call
+    let op_key = call
         .idem_key
         .rsplit_once('/')
         .map_or(call.idem_key.as_str(), |(k, _)| k)
         .to_owned();
+    // A recovery's run (`<key>#r<n>`, A3) publishes the same article: the publisher keys its
+    // record on the business key, so a recovery that lands is the same publication.
+    let business_key = root_key(&op_key).to_owned();
+    let recovery = business_key != op_key;
     let (n, done) = w.arrive(&call.idem_key);
     if let Some(answer) = done {
         return ok(&answer); // at-least-once: a repeat gets the first answer
@@ -159,6 +165,21 @@ async fn step(
             return (StatusCode::UNPROCESSABLE_ENTITY, r#"{"rule":"length"}"#).into_response();
         }
         ("validate" | "factcheck", _) => json!({"ok": true}),
+        // An outage that is over by the time a person recovers the run.
+        ("publish", "publish_outage") if !recovery => {
+            return (StatusCode::SERVICE_UNAVAILABLE, r#"{"down":"publisher"}"#).into_response();
+        }
+        // Attempt 1 publishes and its reply is lost; this handler's probe cannot see it
+        // (the call is never marked complete), so the runner retries, and every later
+        // attempt is refused as a duplicate: the run fails though the article is published.
+        ("publish", "publish_landed_then_refused") if n == 1 => {
+            w.publish(&business_key);
+            tokio::time::sleep(hang).await;
+            return ok(r#"{"published":true}"#);
+        }
+        ("publish", "publish_landed_then_refused") => {
+            return (StatusCode::CONFLICT, r#"{"refused":"duplicate"}"#).into_response();
+        }
         ("publish", "publish_rejected") => {
             return (StatusCode::CONFLICT, r#"{"refused":"duplicate_title"}"#).into_response();
         }
@@ -229,4 +250,20 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// The business key a run's key stands for: a recovery's key (`<root>#r<n>`) stands for
+/// its root (the same rule as the layer's `aiops_domain::control::root_key`).
+fn root_key(key: &str) -> &str {
+    match key.rsplit_once("#r") {
+        Some((root, n))
+            if !root.is_empty()
+                && (1..=3).contains(&n.len())
+                && n.bytes().all(|b| b.is_ascii_digit())
+                && !n.starts_with('0') =>
+        {
+            root
+        }
+        _ => key,
+    }
 }

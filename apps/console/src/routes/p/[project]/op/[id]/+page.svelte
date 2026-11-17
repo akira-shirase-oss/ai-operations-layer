@@ -14,6 +14,7 @@
 	import Failure from '#lib/components/Failure.svelte';
 	import Loading from '#lib/components/Loading.svelte';
 	import { viewport } from '#lib/viewport.svelte.js';
+	import Recovery from '#lib/components/Recovery.svelte';
 
 	const project = $derived(page.params['project'] ?? '');
 	const id = $derived(page.params['id'] ?? '');
@@ -263,6 +264,9 @@
 				{/if}
 			</CardContent>
 		</Card>
+		{#if a.state === 'answered'}
+			<Recovery {project} operation={id} runnerState={a.answer.state} businessKey={a.answer.key} />
+		{/if}
 	{/if}
 
 	<div class="mt-4 grid gap-4 md:grid-cols-3">
