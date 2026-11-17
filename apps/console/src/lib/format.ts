@@ -73,6 +73,18 @@ export function statusText(s: { state: string; class?: string; reason?: string; 
 	return detail ? `${stateText(s.state)}: ${detail}` : stateText(s.state);
 }
 
+/** The words after the colon in `statusText` ("invalid output"), or "" when there are none. */
+export function outcomeDetail(s: { state: string; class?: string; reason?: string; code?: string }): string {
+	const text = statusText(s);
+	const colon = text.indexOf(': ');
+	return colon < 0 ? '' : text.slice(colon + 2);
+}
+
+/** "1 step", "2 steps". */
+export function count(n: number, one: string, many: string): string {
+	return `${n} ${n === 1 ? one : many}`;
+}
+
 /** The codes behind a status, for a details toggle or a tooltip. */
 export function statusCodes(s: { state: string; class?: string; reason?: string; code?: string }): string {
 	return [

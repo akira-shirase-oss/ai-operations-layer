@@ -5,7 +5,7 @@
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@aiops/ui/ui/tooltip';
 	import { api, type Result } from '#lib/api.js';
-	import { eventTypeText, micros, money, short, statusCodes, time, value } from '#lib/format.js';
+	import { count, eventTypeText, micros, money, outcomeDetail, short, statusCodes, statusText, time, value } from '#lib/format.js';
 	import type { AttemptView, Authority, EntryView, GapView, StepView, Timeline } from '#lib/types.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import Notice from '#lib/components/Notice.svelte';
@@ -60,6 +60,49 @@
 	// details truncate instead, with the full text on hover (review N4).
 	const EVENT_COLUMNS =
 		'grid grid-cols-[12rem_4.5rem_23rem_minmax(7rem,1fr)_2.5rem_8rem_minmax(6rem,14rem)] gap-3 px-3';
+	// One line under the title: what happened, from the steps the timeline holds (review
+	// U3). Evidence, not authority: the runner's card beside it is the record.
+	function whatHappened(t: Timeline): string {
+		const name = (s: StepView) => s.name ?? 'a step whose name was not observed';
+		const times = (n: number) => (n === 1 ? 'once' : n === 2 ? 'twice' : `${n} times`);
+		const attempts = t.steps.reduce((n, s) => n + s.attempts.length, 0);
+		const lastOf = (s: StepView) => s.attempts[s.attempts.length - 1];
+		const failedStep = [...t.steps].reverse().find((s) => lastOf(s)?.state === 'failed');
+		const unknown = t.steps.flatMap((s) => s.attempts.filter((a) => a.state === 'uncertain').map((a) => ({ s, a })))[0];
+		const unfinished = [...t.steps].reverse().find((s) => lastOf(s)?.finish_observed === false);
+		const said: string[] = [];
+		if (statusText(t.status) === 'cancelled') {
+			said.push('Cancelled on request; a cancel never undoes what already happened.');
+		} else if (t.status.state === 'conflicting') {
+			said.push('The hosts declared different outcomes; ask the system that owns the work.');
+		} else if (t.status.state === 'failed' && failedStep) {
+			const fails = failedStep.attempts.filter((a) => a.state === 'failed');
+			const last = fails[fails.length - 1]!;
+			const why = last.error_message ?? last.error_code;
+			said.push(`${name(failedStep)} failed ${times(fails.length)} (${outcomeDetail(last)})${why ? `: ${why}` : ''}.`);
+		} else if (t.status.state === 'failed') {
+			said.push(`The host declared it failed (${outcomeDetail(t.status)}).`);
+		}
+		if (unknown && !(t.status.state === 'failed' && failedStep)) {
+			said.push(
+				`${name(unknown.s)} ended with an unknown outcome (${outcomeDetail(unknown.a)}) on attempt ${unknown.a.attempt}.`
+			);
+		}
+		if (t.status.state === 'no_finish_observed') {
+			said.push(
+				unfinished
+					? `No finish observed; ${name(unfinished)} (attempt ${lastOf(unfinished)!.attempt}) never reported how it ended.`
+					: 'No finish observed.'
+			);
+		}
+		if (said.length === 0 && t.status.state === 'succeeded') {
+			said.push(`Every step succeeded: ${count(t.steps.length, 'step', 'steps')}, ${count(attempts, 'attempt', 'attempts')}.`);
+		} else if (said.length === 0) {
+			said.push(`${statusText(t.status)[0]!.toUpperCase()}${statusText(t.status).slice(1)}.`);
+		}
+		if (t.flags.retried_steps > 0) said.push(`${count(t.flags.retried_steps, 'step was', 'steps were')} retried.`);
+		return said.join(' ');
+	}
 	const gapText = (g: GapView) => `${GAP_TEXT[g.kind] ?? g.kind}${g.reason ? ` (${g.reason})` : ''}`;
 	const eventText = (e: EntryView) =>
 		`${eventTypeText(e.type)}${e.name ? ` · ${e.name}` : ''}${e.attempt ? ` · attempt ${e.attempt}` : ''}`;
@@ -111,6 +154,7 @@
 	<h1 class="mt-1 flex flex-wrap items-center gap-3 text-2xl font-semibold tracking-tight">
 		{t.name ?? 'Operation (name not observed)'} <StatusBadge status={t.status} />
 	</h1>
+	<p class="mt-1 mb-1" data-testid="what-happened"><bdi>{whatHappened(t)}</bdi></p>
 	<p class="font-mono text-xs break-all text-muted-foreground">
 		{t.operation_id}{t.request_id ? ` · request ${t.request_id}` : ''}{t.release ? ` · release ${t.release}` : ''}{t.deployment
 			? ` · ${t.deployment}`
@@ -248,7 +292,11 @@
 		<Card>
 			<CardHeader><CardTitle class="text-sm text-muted-foreground">Attempts</CardTitle></CardHeader>
 			<CardContent class="text-sm">
-				{t.flags.failed_attempts} failed · {t.flags.uncertain_attempts} uncertain · {t.flags.retried_steps} steps retried
+				{t.flags.failed_attempts} failed · {t.flags.uncertain_attempts} uncertain · {count(
+					t.flags.retried_steps,
+					'step',
+					'steps'
+				)} retried
 				<div class="text-muted-foreground">Late events: {t.flags.late_events}</div>
 			</CardContent>
 		</Card>
@@ -357,7 +405,11 @@
 		</p>
 	{:else}
 		{#snippet gapWhere(g: GapView)}
-			{#if g.op_seq_from !== undefined}#{g.op_seq_from}{g.op_seq_to !== undefined ? `–#${g.op_seq_to}` : ' onwards'}{/if}
+			{#if g.op_seq_from !== undefined}#{g.op_seq_from}{g.op_seq_to === undefined
+					? ' onwards'
+					: g.op_seq_to === g.op_seq_from
+						? ''
+						: `–#${g.op_seq_to}`}{/if}
 			{#if g.from}{time(g.from)} – {time(g.to)}{/if}
 		{/snippet}
 		{#if viewport.narrow}

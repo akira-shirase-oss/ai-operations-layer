@@ -154,6 +154,23 @@ test('outcomes read in plain words, with the codes one click away', async ({ pag
 	await codesIn('the operations list');
 });
 
+test('an operation says in one line what happened, in plain English', async ({ page }) => {
+	await signIn(page);
+	const said = page.getByTestId('what-happened');
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_INVALID)}`);
+	await expect(said).toHaveText(/^validate failed 5 times \(invalid output\)/);
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_LOST)}`);
+	await expect(said).toHaveText(/^publish ended with an unknown outcome \(timed out after sending\) on attempt 1/);
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_OK)}`);
+	await expect(said).toHaveText(/^Every step succeeded: 4 steps, 4 attempts\.$/);
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_CANCEL)}`);
+	await expect(said).toHaveText(/^Cancelled on request/);
+	// Copy: counts agree with their nouns, and a one-event gap is one number.
+	await page.goto(`/console/p/pilot/op/${await opIdOf(page, DR_RESTART)}`);
+	await expect(page.locator('main')).not.toContainText(/\b1 steps\b/);
+	await expect(page.locator('main')).not.toContainText(/#(\d+)–#\1\b/);
+});
+
 for (const scheme of ['light', 'dark'] as const) {
 	test.describe(`${scheme} scheme`, () => {
 		test.use({ colorScheme: scheme });
