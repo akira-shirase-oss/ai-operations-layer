@@ -78,6 +78,8 @@ const SECRET_PREFIXES: &[&str] = &[
     "xoxs-",
     "AKIA",
     "ASIA",
+    "hf_",
+    "whsec_",
     "AIza",
 ];
 
@@ -97,6 +99,9 @@ const SECRET_PARTS: &[&str] = &[
     "password",
     "pwd",
     "secret",
+    "sessid",
+    "sig",
+    "signature",
     "token",
 ];
 
@@ -114,18 +119,46 @@ const KEY_QUALIFIERS: &[&str] = &[
     "ssh",
 ];
 
+/// A key name's parts, lowercased: split on `_`, `-`, `.` and at camelCase humps
+/// (`accessToken` → `access`, `token`; review N5).
+fn key_parts(key: &[u8]) -> Vec<Vec<u8>> {
+    let mut parts = vec![Vec::new()];
+    for (n, &b) in key.iter().enumerate() {
+        if matches!(b, b'_' | b'-' | b'.') {
+            parts.push(Vec::new());
+            continue;
+        }
+        let hump = b.is_ascii_uppercase() && n > 0 && key[n - 1].is_ascii_lowercase();
+        if hump {
+            parts.push(Vec::new());
+        }
+        if let Some(last) = parts.last_mut() {
+            last.push(b.to_ascii_lowercase());
+        }
+    }
+    parts
+}
+
 /// Whether a key name (as written in text) names a secret.
 fn is_secret_key(key: &[u8]) -> bool {
-    let lower = key.to_ascii_lowercase();
-    let mut prev: &[u8] = b"";
-    for part in lower.split(|b| matches!(b, b'_' | b'-' | b'.')) {
-        if SECRET_PARTS.iter().any(|s| s.as_bytes() == part) {
+    let mut prev: Vec<u8> = Vec::new();
+    for part in key_parts(key) {
+        let part = part.as_slice();
+        // `jsessionid`, `sessionid`, `PHPSESSID`: a session identifier is a bearer credential.
+        if SECRET_PARTS.iter().any(|s| s.as_bytes() == part)
+            || part.ends_with(b"sessionid")
+            || part.ends_with(b"sessid")
+        {
             return true;
         }
-        if part == b"key" && KEY_QUALIFIERS.iter().any(|q| q.as_bytes() == prev) {
+        if part == b"key"
+            && KEY_QUALIFIERS
+                .iter()
+                .any(|q| q.as_bytes() == prev.as_slice())
+        {
             return true;
         }
-        prev = part;
+        prev = part.to_vec();
     }
     false
 }
@@ -196,6 +229,59 @@ fn url_password(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     (colon + 1 < at).then_some((3 + colon + 1, i + 3 + at))
 }
 
+/// Quote and escape bytes allowed around a key and its value (`"key"`, `\"key\"`).
+fn is_quoting(b: u8) -> bool {
+    matches!(b, b' ' | b'"' | b'\'' | b'\\')
+}
+
+/// After a secret key, the separator and value: `(bytes to keep, end of the value)`, both
+/// relative to `after`. Separators: `=`, `:`, `=>` (Ruby), `%3D` (URL-encoded), each with
+/// optional spaces, quotes and escapes around it. A quoted value runs to its closing quote;
+/// an `Authorization` header's value is the rest of its line (review N5).
+fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
+    let mut j = after.iter().take_while(|b| is_quoting(**b)).count();
+    let sep = if after[j..].starts_with(b"=>") {
+        2
+    } else if after.get(j).is_some_and(|b| *b == b'=' || *b == b':') {
+        1
+    } else if starts_with_ignore_case(&after[j..], "%3d") {
+        3
+    } else {
+        return None;
+    };
+    j += sep;
+    let opening = after[j..].iter().take_while(|b| is_quoting(**b)).count();
+    let quote = after[j..j + opening]
+        .iter()
+        .rev()
+        .find(|b| **b == b'"' || **b == b'\'')
+        .copied();
+    j += opening;
+    let value = &after[j..];
+    let last_part = key_parts(key).pop().unwrap_or_default();
+    let len = if last_part == b"authorization" {
+        value.iter().take_while(|b| !b"\r\n".contains(b)).count()
+    } else if let Some(q) = quote {
+        // To the closing quote (or an escaped one), spaces included.
+        value
+            .iter()
+            .take_while(|b| **b != q && **b != b'\\' && !b"\r\n".contains(b))
+            .count()
+    } else {
+        // `Bearer <token>`: the value is the scheme and its token.
+        let scheme = AUTH_SCHEMES
+            .iter()
+            .find(|s| starts_with_ignore_case(value, s))
+            .map_or(0, |s| s.len());
+        scheme
+            + value[scheme..]
+                .iter()
+                .take_while(|b| !b.is_ascii_whitespace() && !b"&;,\"'\\".contains(b))
+                .count()
+    };
+    (len > 0).then_some((j, j + len))
+}
+
 /// At `i`, returns `(bytes to keep before the redaction, end of the secret)`.
 fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     let rest = &bytes[i..];
@@ -241,36 +327,11 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             .take(64)
             .take_while(|b| is_key_byte(**b))
             .count();
-        if key_len > 0 && is_secret_key(&rest[..key_len]) {
-            let mut j = key_len;
-            while rest
-                .get(j)
-                .is_some_and(|b| *b == b' ' || *b == b'"' || *b == b'\'')
-            {
-                j += 1;
-            }
-            if rest.get(j).is_some_and(|b| *b == b'=' || *b == b':') {
-                j += 1;
-                while rest
-                    .get(j)
-                    .is_some_and(|b| *b == b' ' || *b == b'"' || *b == b'\'')
-                {
-                    j += 1;
-                }
-                // `Authorization: Bearer <token>`: the value is the scheme and its token.
-                let scheme = AUTH_SCHEMES
-                    .iter()
-                    .find(|s| starts_with_ignore_case(&rest[j..], s))
-                    .map_or(0, |s| s.len());
-                let value = scheme
-                    + rest[j + scheme..]
-                        .iter()
-                        .take_while(|b| !b.is_ascii_whitespace() && !b"&;,\"'".contains(b))
-                        .count();
-                if value > 0 {
-                    return Some((j, i + j + value));
-                }
-            }
+        if key_len > 0
+            && is_secret_key(&rest[..key_len])
+            && let Some((keep, len)) = secret_value(&rest[..key_len], &rest[key_len..])
+        {
+            return Some((key_len + keep, i + key_len + len));
         }
     }
     // A long mixed-case alphanumeric run is a credential shape (API keys, signing keys);

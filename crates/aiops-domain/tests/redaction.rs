@@ -41,6 +41,55 @@ fn the_reviewed_shapes_are_all_redacted() {
     }
 }
 
+/// Review N5: shapes the second review found leaking (Ruby inspect, other Authorization
+/// schemes, camelCase keys, escaped JSON, URL-encoded separators, quoted values with spaces,
+/// SAS signatures, session IDs, more token prefixes).
+#[test]
+fn the_second_reviews_shapes_are_all_redacted() {
+    let cases = [
+        (r#"params: {"password"=>"Hunt3r-two"}"#, "Hunt3r-two"),
+        (
+            "Authorization: Token 0123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef01234567",
+        ),
+        ("refresh failed accessToken=ya29Xq81LmZp", "ya29Xq81LmZp"),
+        (r#"config clientSecret: "Zx9-wq.Lm2""#, "Zx9-wq.Lm2"),
+        (r#"body {\"api_key\":\"Kq81Lm2Zp0\"}"#, "Kq81Lm2Zp0"),
+        ("form password%3DHunt3rTwo%26user%3Dbo", "Hunt3rTwo"),
+        (
+            "GET https://acct.blob.core.windows.net/c/b?sv=2022-11-02&sig=Xq81Lm2Zp0aB%2Fcd%3D&se=1",
+            "Xq81Lm2Zp0aB",
+        ),
+        (
+            r#"password="correct horse battery staple" rejected"#,
+            "battery staple",
+        ),
+        (
+            "GET /app;jsessionid=A1B2C3D4E5F6A7B8 302",
+            "A1B2C3D4E5F6A7B8",
+        ),
+        (
+            "webhook whsec_Xq81Lm2Zp0aBcdEf rejected",
+            "Xq81Lm2Zp0aBcdEf",
+        ),
+    ];
+    for (input, secret) in cases {
+        let out = redact(input).unwrap_or_else(|| input.to_owned());
+        assert!(!out.contains(secret), "{input:?} → {out:?}");
+        assert!(out.contains("[redacted]"), "{input:?} → {out:?}");
+    }
+    // A Hugging Face token, assembled at run time so the source holds no token-shaped
+    // literal for secret scanners to flag.
+    let body: String = ('a'..='z')
+        .zip('A'..='Z')
+        .flat_map(|(l, u)| [u, l])
+        .take(34)
+        .collect();
+    let input = format!("hub said {}_{body}", "hf");
+    let out = redact(&input).unwrap_or_else(|| input.clone());
+    assert!(!out.contains(&body), "{input:?} → {out:?}");
+}
+
 #[test]
 fn operational_text_is_left_alone() {
     for text in [
@@ -51,6 +100,8 @@ fn operational_text_is_left_alone() {
         "request 0123e4567-e89b-12d3-a456-426614174000 timed out",
         "GET https://example.com/articles/42 returned 404",
         "cache key=article:42 missed",
+        "signed=true signal: ok sessions=3 tokenizer=bpe",
+        "user Ana said \"hello there\" twice",
     ] {
         assert_eq!(redact(text), None, "{text:?}");
     }
@@ -77,6 +128,14 @@ const KEYS: &[&str] = &[
     "cookie",
     "session_token",
     "aws_secret_access_key",
+    "accessToken",
+    "clientSecret",
+    "apiKey",
+    "refreshToken",
+    "sig",
+    "signature",
+    "jsessionid",
+    "PHPSESSID",
 ];
 
 proptest! {
@@ -87,7 +146,7 @@ proptest! {
     #[test]
     fn a_value_after_a_sensitive_key_never_survives(
         key in prop::sample::select(KEYS),
-        sep in prop::sample::select(&["=", ": ", ":", " = ", "=\"", ": '"][..]),
+        sep in prop::sample::select(&["=", ": ", ":", " = ", "=\"", ": '", "\"=>\"", "\\\":\\\"", "%3D", "%3d"][..]),
         value in "[A-Za-z0-9_\\-./+]{6,40}",
         before in "[a-z ]{0,20}",
         after in "[a-z ]{0,20}",
@@ -95,6 +154,21 @@ proptest! {
         let text = format!("{before} {key}{sep}{value} {after}");
         let out = redact(&text).unwrap_or_else(|| text.clone());
         prop_assert!(!out.contains(&value), "{text:?} → {out:?}");
+    }
+
+    /// A quoted value after a sensitive key never survives, spaces and all (review N5).
+    #[test]
+    fn a_quoted_value_with_spaces_never_survives(
+        key in prop::sample::select(KEYS),
+        quote in prop::sample::select(&["\"", "'"][..]),
+        words in prop::collection::vec("[A-Za-z0-9]{3,9}", 2..5),
+    ) {
+        let value = words.join(" ");
+        let text = format!("failed {key}={quote}{value}{quote} later");
+        let out = redact(&text).unwrap_or_else(|| text.clone());
+        prop_assert!(!out.contains(&value), "{text:?} → {out:?}");
+        let last = words.last().map(String::as_str).unwrap_or_default();
+        prop_assert!(!out.contains(&format!(" {last}{quote}")), "{text:?} → {out:?}");
     }
 
     /// Credentials in a URL's userinfo never survive.

@@ -125,10 +125,13 @@ the incidents, and its result is committed under `perf/results/`.
   and again in the collector (D-014). It covers known credential prefixes,
   `Bearer`/`Basic` credentials, JWTs, PEM blocks, values after keys that
   name a secret (`*_token`, `api-key`, `client_secret`, `password`,
-  `cookie`, …), URL passwords and long mixed-case alphanumeric tokens, with
-  property tests (`crates/aiops-domain/tests/redaction.rs`). It is pattern
-  matching, so it is partial by nature; the A4 privacy red-team is still
-  owed.
+  `cookie`, `sig`, `*sessionid`, camelCase forms such as `accessToken`, …)
+  after `=`, `:`, `=>` or `%3D`, quoted values to their closing quote, the
+  rest of an `Authorization:` line, URL passwords and long mixed-case
+  alphanumeric tokens, with property tests
+  (`crates/aiops-domain/tests/redaction.rs`). It is pattern matching, so it
+  is partial by nature (a key spelled with look-alike Unicode letters, for
+  one, is not caught); the A4 privacy red-team is still owed.
 
 ## Evidence plan
 
