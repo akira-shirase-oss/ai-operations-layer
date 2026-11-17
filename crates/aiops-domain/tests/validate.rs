@@ -453,3 +453,22 @@ fn every_refusal_code_has_a_distinct_stable_name() {
             .all(|s| s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
     );
 }
+
+// Review finding 18: a gap report's window is held to the event-time window too.
+#[test]
+fn a_gap_reports_drop_window_must_be_inside_the_event_time_window() {
+    assert_eq!(
+        refused(WireEvent {
+            first_dropped_at: Some("1970-01-01T00:00:00Z".into()),
+            ..gap()
+        }),
+        (RefusalCode::EventTimeOutOfRange, Some("first_dropped_at"))
+    );
+    assert_eq!(
+        refused(WireEvent {
+            last_dropped_at: Some("2099-01-01T00:00:00Z".into()),
+            ..gap()
+        }),
+        (RefusalCode::EventTimeOutOfRange, Some("last_dropped_at"))
+    );
+}

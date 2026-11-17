@@ -363,6 +363,11 @@ impl Validator<'_> {
         if last < first {
             return Err(Refusal::on(RefusalCode::InvalidTime, "last_dropped_at"));
         }
+        // The drop window is held to the event-time window too (review finding 18).
+        self.check_window(first)
+            .map_err(|_| Refusal::on(RefusalCode::EventTimeOutOfRange, "first_dropped_at"))?;
+        self.check_window(last)
+            .map_err(|_| Refusal::on(RefusalCode::EventTimeOutOfRange, "last_dropped_at"))?;
         Ok(EventBody::GapReported(GapReport {
             dropped,
             reason,
