@@ -462,6 +462,12 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(q) = std::env::var("REFHOST_SDK_QUEUE") {
                 cfg.queue_capacity = q.parse().context("REFHOST_SDK_QUEUE")?;
             }
+            if std::env::var("REFHOST_SDK_REQUEST_TIMEOUT_MS").is_ok() {
+                cfg.request_timeout = env_ms("REFHOST_SDK_REQUEST_TIMEOUT_MS", 2_000)?;
+            }
+            if std::env::var("REFHOST_SDK_RETRY_BUDGET_MS").is_ok() {
+                cfg.retry_budget = env_ms("REFHOST_SDK_RETRY_BUDGET_MS", 5_000)?;
+            }
             Client::start(&cfg).context("starting the aiops SDK")?
         }
         _ => Client::disabled(),

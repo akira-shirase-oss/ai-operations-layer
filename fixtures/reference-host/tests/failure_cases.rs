@@ -196,6 +196,11 @@ impl Drop for Host {
 }
 
 async fn start_host(collector: &str, key: &str) -> Host {
+    start_host_with(collector, key, &[]).await
+}
+
+/// Like [`start_host`], with extra environment for the host (its SDK's timeouts, say).
+async fn start_host_with(collector: &str, key: &str, env: &[(&str, &str)]) -> Host {
     // A port released by free_addr() can be taken by another socket before the child
     // binds it (parallel tests, a loaded machine): if the child exits, try a fresh port.
     for _ in 0..5 {
@@ -208,6 +213,7 @@ async fn start_host(collector: &str, key: &str) -> Host {
             .env("REFHOST_MODEL_LATENCY_MS", "4")
             .env("REFHOST_TIMEOUT_MS", "40")
             .env("REFHOST_LOG_FILE", "/dev/null")
+            .envs(env.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -635,7 +641,17 @@ async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected() 
     })
     .await;
     let k = keys(&c.store).await;
-    let host = start_host(&c.base, &k.ingest).await;
+    // A patient SDK for the pilot: this test is about the flood, and a 2 s request timeout
+    // inside a 5 s budget can drop a batch on a machine at load ~50 with no flood at all.
+    let host = start_host_with(
+        &c.base,
+        &k.ingest,
+        &[
+            ("REFHOST_SDK_REQUEST_TIMEOUT_MS", "10000"),
+            ("REFHOST_SDK_RETRY_BUDGET_MS", "60000"),
+        ],
+    )
+    .await;
 
     let flood_base = c.base.clone();
     let flood_key = k.flood.clone();
@@ -686,9 +702,22 @@ async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected() 
         limited > 0,
         "the flood was limited (ok {ok}, limited {limited})"
     );
-    // Shown only if the test fails: what the pilot's SDK saw during the flood.
-    let (_, sdk) = get_json(&host.base, "/aiops/stats", "").await;
-    eprintln!("pilot SDK after the flood: {sdk} (flood: ok {ok}, limited {limited})");
+    // The claim itself, checked first: once the pilot's SDK has settled every event it
+    // emitted, it dropped none and no batch failed. A loss fails here with its cause, not
+    // as a timeout below.
+    let mut sdk = Value::Null;
+    eventually("the pilot SDK settled every event", async || {
+        sdk = get_json(&host.base, "/aiops/stats", "").await.1;
+        let n = |k: &str| sdk[k].as_u64().unwrap_or(0);
+        n("emitted") > 0
+            && n("accepted") + n("duplicates") + n("refused") + n("dropped") >= n("emitted")
+    })
+    .await;
+    assert_eq!(
+        (sdk["dropped"].as_u64(), sdk["batches_failed"].as_u64()),
+        (Some(0), Some(0)),
+        "the pilot lost events during the flood: {sdk} (flood: ok {ok}, limited {limited})"
+    );
     for i in 0..15 {
         let t = timeline(&c, &k.reader, &format!("calm-{i}")).await;
         assert_eq!(t["status"]["state"], "succeeded");
