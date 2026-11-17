@@ -7,7 +7,8 @@
 > real host (D-027): the article workflow runs as its handlers through an
 > adapter that never changes what the runner decides, and the console shows
 > a real run end to end with the runner's own answer beside the timeline
-> (checked in Chromium against the real runner). The drill kit runs on
+> (checked in Chromium against the real runner); operations filter by status,
+> name, release and time, and releases compare from the same records. The drill kit runs on
 > Durable Runner (D-028); its first, seeder-aware baseline shows the
 > registered comparison cannot pass on that catalog (open question OQ8).
 > Decisions D-012–D-028. Load evidence is development observation on a busy
