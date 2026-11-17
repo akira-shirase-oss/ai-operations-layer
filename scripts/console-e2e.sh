@@ -95,7 +95,8 @@ curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorizat
    "event_time": "$now", "outcome": "succeeded", "events_emitted": 1}
  ]}
 JSON
-# A 5,000-event operation (the timeline's cap), in ten batches of 500.
+# A 5,000-event operation (the timeline's cap) in ten batches of 500: a bulk import of 2,499
+# effect-free tool calls, each started and finished, between the operation's start and finish.
 big_op="e2e000000000000000000000000b1600"
 for b in $(seq 0 9); do
   python3 - "$b" "$big_op" "$now" <<'PY' > "$work/big-$b.json"
@@ -109,7 +110,11 @@ for i in range(b * 500 + 1, b * 500 + 501):
     elif i == 5000:
         e.update(type="operation.finished", outcome="succeeded", events_emitted=5000)
     else:
-        e.update(type="step.started", step_id="%016x" % i, kind="tool", name="copy", attempt=1)
+        step = {"step_id": "%016x" % (i // 2), "kind": "tool", "name": "copy", "attempt": 1}
+        if i % 2 == 0:
+            e.update(type="step.started", external_effect=False, **step)
+        else:
+            e.update(type="step.finished", outcome="succeeded", **step)
     events.append(e)
 print(json.dumps({"schema_version": 1, "source": {"instance_id": "e2e000000000000000000000000000cc", "service": "e2e-bulk", "sdk": "python"}, "events": events}))
 PY
