@@ -660,3 +660,38 @@ async fn a_batch_refused_for_one_events_content_is_split_not_dropped() {
         .count();
     assert_eq!(delivered as u64, s.emitted - 1, "{s:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_can_report_under_ids_and_attempts_another_system_keys() {
+    // D-027: an adapter for a job runner names the operation and step after the runner's
+    // run and step, and reports the runner's own attempt number.
+    let (endpoint, fake) = fake_collector().await;
+    let client = Client::start(&config(&endpoint)).unwrap();
+    let op_id = aiops_sdk::OperationId::parse("7e78babdff320cdc53520e23a5efb7d5").unwrap();
+    let step_id = aiops_sdk::StepId::parse("00000000000000aa").unwrap();
+    let parent = aiops_sdk::StepId::parse("00000000000000bb").unwrap();
+    let op = client.operation("publish_article").id(op_id).start();
+    assert_eq!(op.id(), Some(op_id));
+    let s = op
+        .step(StepKind::Tool, "publish")
+        .id(step_id)
+        .attempt(3)
+        .parent_id(parent)
+        .start();
+    assert_eq!((s.id(), s.attempt()), (Some(step_id), 3));
+    s.succeed();
+    op.succeed();
+    eventually(|| all_events(&fake).len() == 4).await;
+    let events = all_events(&fake);
+    assert!(
+        events
+            .iter()
+            .all(|e| e["operation_id"] == op_id.to_string())
+    );
+    let started = &events[1];
+    assert_eq!(started["step_id"], "00000000000000aa");
+    assert_eq!(started["attempt"], 3);
+    assert_eq!(started["parent_step_id"], "00000000000000bb");
+    assert_eq!(events[2]["attempt"], 3, "the finish names the same attempt");
+    client.shutdown(Duration::from_secs(1)).await;
+}

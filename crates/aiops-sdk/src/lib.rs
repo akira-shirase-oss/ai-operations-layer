@@ -459,6 +459,7 @@ impl Client {
         OperationBuilder {
             client: self.clone(),
             name: name.to_owned(),
+            id: None,
             request_id: None,
             parent: None,
             attributes: Vec::new(),
@@ -520,12 +521,22 @@ impl Client {
 pub struct OperationBuilder {
     client: Client,
     name: String,
+    id: Option<OperationId>,
     request_id: Option<String>,
     parent: Option<TraceParent>,
     attributes: Vec<(String, AttrValue)>,
 }
 
 impl OperationBuilder {
+    /// Use this operation ID instead of a random one: for an operation that stands for a
+    /// record another system keys (a job runner's run, D-027), so a restarted host — or a
+    /// second instance — reports under the same operation. The caller owns uniqueness.
+    #[must_use]
+    pub fn id(mut self, id: OperationId) -> Self {
+        self.id = Some(id);
+        self
+    }
+
     #[must_use]
     pub fn request_id(mut self, id: &str) -> Self {
         self.request_id = Some(id.to_owned());
@@ -557,7 +568,7 @@ impl OperationBuilder {
             .parent
             .and_then(|tp| aiops_domain::TraceId::from_bytes(*tp.trace_id.as_bytes()));
         let core = Arc::new(OpCore {
-            id: inner.ids.operation_id(),
+            id: self.id.unwrap_or_else(|| inner.ids.operation_id()),
             root_span: inner.ids.step_id(),
             inner,
             op_seq: AtomicU32::new(0),
@@ -791,6 +802,27 @@ impl StepBuilder {
 
     pub fn parent(mut self, parent: &Step) -> Self {
         self.parent = parent.id;
+        self
+    }
+
+    /// Hang this step under a step known only by its ID (for example one another
+    /// instance started).
+    pub fn parent_id(mut self, parent: StepId) -> Self {
+        self.parent = Some(parent);
+        self
+    }
+
+    /// Use this step ID instead of a random one, so attempts reported separately (by
+    /// another instance, or after a restart) land on one step (D-027).
+    pub fn id(mut self, id: StepId) -> Self {
+        self.step_id = Some(id);
+        self
+    }
+
+    /// The attempt number, when the system that retries the step counts its attempts
+    /// (1 for the first). The collector refuses 0 and anything above 1,000.
+    pub fn attempt(mut self, attempt: u32) -> Self {
+        self.attempt = attempt;
         self
     }
 

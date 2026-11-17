@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "fixtures/reference-host"]
+members = ["crates/*", "fixtures/reference-host", "fixtures/dr-article-worker"]
 resolver = "3"
 
 [workspace.package]
@@ -25,6 +25,7 @@ clap = { version = "4.6", default-features = false, features = ["std", "derive",
 getrandom = { version = "0.3.4", features = ["std"] }
 # Property tests only (dev-dependency): the redaction rules over generated inputs.
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+http-body = "1.1"
 http-body-util = "0.1.5"
 # The collector's own accept loop (header-read timeout, connection cap, drain): the same
 # hyper and hyper-util versions axum already uses.
