@@ -94,7 +94,7 @@ pub async fn ingest(
     }
     response.refused.sort_by_key(|r| r.index);
     response.accepted = stored.accepted;
-    response.duplicates = stored.duplicates;
+    response.duplicates += stored.duplicates;
 
     let m = &app.metrics;
     Metrics::add(&m.batches, 1);
@@ -144,7 +144,29 @@ fn validate_all(
             }
         }
     }
-    Ok((prepared, response))
+    // An ID repeated inside the batch (review finding 3): an identical copy is a
+    // duplicate, a different one is refused at its own index; only the first goes on.
+    let mut first: std::collections::HashMap<aiops_domain::EventId, usize> =
+        std::collections::HashMap::with_capacity(prepared.len());
+    let mut unique: Vec<(usize, PreparedEvent)> = Vec::with_capacity(prepared.len());
+    for (index, p) in prepared {
+        if let Some(&pos) = first.get(&p.event.event_id) {
+            let (_, kept) = &unique[pos];
+            if kept.body == p.body && kept.marks == p.marks {
+                response.duplicates += 1;
+            } else {
+                response.refused.push(refused(
+                    index,
+                    Some(p.event.event_id.to_string()),
+                    Refusal::new(RefusalCode::ConflictingDuplicate),
+                ));
+            }
+            continue;
+        }
+        first.insert(p.event.event_id, unique.len());
+        unique.push((index, p));
+    }
+    Ok((unique, response))
 }
 
 fn refused(index: usize, event_id: Option<String>, r: Refusal) -> RefusedEvent {

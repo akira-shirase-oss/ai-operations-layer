@@ -558,3 +558,48 @@ async fn a_saturated_query_pool_does_not_block_ingest_or_audit(pool: PgPool) {
     locker.rollback().await.unwrap();
     assert!(slow.await.unwrap().unwrap().is_none());
 }
+
+// Review finding 3: an event ID repeated inside one batch.
+#[sqlx::test(migrations = "./migrations")]
+async fn an_in_batch_twin_is_counted_once_and_a_differing_twin_is_a_conflict(pool: PgPool) {
+    let f = fixture(pool).await;
+    let src = source(1);
+    let mut events = journey(1, 1);
+    let mut twin = events[2].clone();
+    twin.outcome = Some("failed".into());
+    twin.failure_class = Some("internal".into());
+    twin.cost_estimate = None;
+    let identical = events[1].clone();
+    events.push(twin);
+    events.push(identical);
+    let r = f
+        .store
+        .ingest(batch(&f, &src, prepare(events), WireStats::default()))
+        .await
+        .unwrap();
+    assert_eq!(r.accepted, 4);
+    assert_eq!(r.duplicates, 1, "the identical twin is one duplicate");
+    assert_eq!(
+        r.conflicts.len(),
+        1,
+        "the differing twin is a conflict, never a duplicate"
+    );
+    let ops = f
+        .store
+        .list_operations(
+            f.project,
+            &ListFilter {
+                limit: 10,
+                ..ListFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ops[0].host_events, 4, "each stored event counted once");
+    let inst = f
+        .store
+        .instances(f.project, &[src.instance_id])
+        .await
+        .unwrap();
+    assert_eq!(inst[0].events_received, 4);
+}

@@ -512,3 +512,47 @@ async fn conflicting_finishes_show_as_conflicting_in_the_list_whether_they_arriv
         );
     }
 }
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn e1_an_in_batch_twin_cannot_hide_a_missing_event(pool: PgPool) {
+    let e = env(pool).await;
+    // op_seq 1, 2, 3 and the finish (op_seq 5, events_emitted 5); op_seq 4 is never sent;
+    // event 3 appears twice with different outcomes.
+    let all = journey(1, 0);
+    let mut finish = all[7].clone();
+    finish.seq = 5;
+    finish.op_seq = 5;
+    finish.events_emitted = Some(5);
+    let mut twin = all[2].clone();
+    twin.failure_class = Some("rejected".into());
+    let events = vec![all[0].clone(), all[1].clone(), all[2].clone(), finish, twin];
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    assert_eq!(r.body["accepted"], 4, "{}", r.body);
+    assert_eq!(r.body["duplicates"], 0, "{}", r.body);
+    assert_eq!(r.body["refused"][0]["index"], 4, "{}", r.body);
+    assert_eq!(r.body["refused"][0]["code"], "conflicting_duplicate");
+    let list = send(
+        &e.app,
+        get("/v1/projects/pilot/operations?request_id=req-1", &e.reader),
+    )
+    .await;
+    let row = &list.body["operations"][0];
+    assert_eq!(row["events_received"], 4);
+    assert_eq!(
+        row["events_missing"], 1,
+        "the list must agree with the timeline"
+    );
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(t.body["coverage"]["missing_known"], 1);
+    assert_eq!(
+        t.body["sources"][0]["missing_by_seq"], 1,
+        "seq 4 never arrived"
+    );
+}

@@ -393,9 +393,27 @@ impl Store {
     /// `(project, event_id)`), summaries from the newly stored events only, source
     /// counters, new names, and a content check on duplicates.
     pub async fn ingest(&self, mut batch: IngestBatch<'_>) -> Result<IngestResult, StoreError> {
-        let mut events = std::mem::take(&mut batch.events);
-        // One global lock order for concurrent batches: event IDs ascending.
-        events.sort_by_key(|p| p.event.event_id);
+        let mut sorted = std::mem::take(&mut batch.events);
+        // One global lock order for concurrent batches: event IDs ascending (stable, so the
+        // first copy of a repeated ID comes first).
+        sorted.sort_by_key(|p| p.event.event_id);
+        // An ID repeated inside the batch: an identical copy is one duplicate, a different
+        // one is a conflict; only the first copy is stored or counted (review finding 3).
+        let mut in_batch_duplicates = 0u32;
+        let mut in_batch_conflicts = Vec::new();
+        let mut events: Vec<PreparedEvent> = Vec::with_capacity(sorted.len());
+        for p in sorted {
+            match events.last() {
+                Some(prev) if prev.event.event_id == p.event.event_id => {
+                    if prev.body == p.body && prev.marks == p.marks {
+                        in_batch_duplicates += 1;
+                    } else {
+                        in_batch_conflicts.push(p.event.event_id);
+                    }
+                }
+                _ => events.push(p),
+            }
+        }
         let received = to_odt(batch.received_at);
         let instance = uuid128(batch.source.instance_id.as_bytes());
 
@@ -419,9 +437,11 @@ impl Store {
         let accepted = u32::try_from(inserted.len()).unwrap_or(u32::MAX);
         let total = u32::try_from(events.len()).unwrap_or(u32::MAX);
         let conflict_count = u32::try_from(conflicts.len()).unwrap_or(u32::MAX);
+        let mut conflicts = conflicts;
+        conflicts.extend(in_batch_conflicts);
         Ok(IngestResult {
             accepted,
-            duplicates: total - accepted - conflict_count,
+            duplicates: total - accepted - conflict_count + in_batch_duplicates,
             conflicts,
         })
     }
