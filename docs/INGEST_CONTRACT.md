@@ -40,7 +40,10 @@ the cache, so revocation can then take up to 5 minutes 30 seconds.
 ```
 
 - `source.instance_id`: random per process start (128-bit, lowercase hex,
-  not all zero). `service`, `sdk`: identifiers (below).
+  not all zero). `service`, `sdk`: identifiers (below). An instance belongs
+  to the first ingest key that used it: a batch from another key under the
+  same instance is refused whole with `409 instance_owned_by_another_key`,
+  so one host cannot fill another's gaps or change its counters.
 - `stats`: the sender's **cumulative** counters since its process started.
   Sent with every batch, so the latest values survive lost batches.
 
@@ -127,7 +130,8 @@ Per type, only the listed fields may appear (anything else is
 Errors use one envelope:
 `{"error": {"code": "…", "message": "…", "request_id": "…"}}` — `400`
 `malformed_batch`, `unsupported_schema_version`, `invalid_source`; `401`
-`unauthenticated`; `413`; `429`; `503`.
+`unauthenticated`; `409` `instance_owned_by_another_key`; `413`; `429`;
+`503`.
 
 **What a sender should retry:** 429 (after `Retry-After`), 503, and
 connection errors — with the same events (same `event_id`s). Never retry

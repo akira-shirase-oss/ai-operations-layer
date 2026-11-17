@@ -28,6 +28,8 @@ pub enum ApiError {
     InvalidSource(&'static str),
     #[error("the batch has more events than the collector accepts ({0})")]
     TooManyEvents(usize),
+    #[error("the batch's source instance belongs to another ingest key")]
+    InstanceConflict,
     #[error("rate limit exceeded")]
     RateLimited { retry_after_secs: u64 },
     #[error("the collector is at capacity; retry later")]
@@ -69,6 +71,7 @@ impl ApiError {
             | Self::UnsupportedSchema
             | Self::InvalidSource(_) => StatusCode::BAD_REQUEST,
             Self::TooManyEvents(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::InstanceConflict => StatusCode::CONFLICT,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Overloaded | Self::StoreUnavailable | Self::AuditUnavailable => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -87,6 +90,7 @@ impl ApiError {
             Self::UnsupportedSchema => "unsupported_schema_version",
             Self::InvalidSource(_) => "invalid_source",
             Self::TooManyEvents(_) => "too_many_events",
+            Self::InstanceConflict => "instance_owned_by_another_key",
             Self::RateLimited { .. } => "rate_limited",
             Self::Overloaded => "overloaded",
             Self::StoreUnavailable => "store_unavailable",
@@ -108,6 +112,9 @@ impl ApiError {
 
 impl From<aiops_store::StoreError> for ApiError {
     fn from(e: aiops_store::StoreError) -> Self {
+        if matches!(e, aiops_store::StoreError::InstanceOwnedByAnotherKey) {
+            return Self::InstanceConflict;
+        }
         if e.is_retryable() {
             tracing::warn!(error = %e, cause = ?std::error::Error::source(&e).map(ToString::to_string), "store unavailable");
             Self::StoreUnavailable

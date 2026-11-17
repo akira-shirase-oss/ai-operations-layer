@@ -615,3 +615,53 @@ async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
         "the legitimate host lost batches to unauthenticated traffic"
     );
 }
+
+// Review finding 7: another key of the project cannot write under a host's instance.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn e5_another_key_cannot_fill_a_hosts_gaps_or_inflate_its_counters(pool: PgPool) {
+    let e = env(pool).await;
+    let mut events = journey(1, 0);
+    let lost = events.remove(6); // the uncertain publish finish never arrives
+    send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    // A second key of the same project posts the missing op_seq, claiming success, under
+    // the first host's instance, with inflated drop counters.
+    let mut forged = lost.clone();
+    forged.outcome = Some("succeeded".into());
+    forged.uncertain_reason = None;
+    let body = serde_json::json!({
+        "schema_version": 1,
+        "source": {"instance_id": common::INSTANCE, "service": "reference-host", "sdk": "test/1"},
+        "stats": {"dropped_queue_full": 999_999},
+        "events": [forged],
+    })
+    .to_string();
+    let r = send(&e.app, post_ingest(&e.other_ingest_key_same_project, body)).await;
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (409, Some("instance_owned_by_another_key")),
+        "{}",
+        r.body
+    );
+
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(
+        t.body["coverage"]["missing_known"], 1,
+        "the hole stays a hole"
+    );
+    assert_eq!(
+        t.body["flags"]["external_effect_unknown"], true,
+        "the publish stays unknown"
+    );
+    assert_eq!(
+        t.body["sources"][0]["reported_dropped_queue_full"], 0,
+        "counters untouched"
+    );
+    assert_eq!(t.body["sources"][0]["ingest_key"], "reference-host");
+}

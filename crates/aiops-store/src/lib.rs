@@ -37,6 +37,10 @@ pub enum StoreError {
     AlreadyExists,
     #[error("not found: {0}")]
     NotFound(&'static str),
+    /// The batch's source instance was first used by another ingest key (review finding
+    /// 7): the batch is refused whole, so one host cannot write under another's identity.
+    #[error("the source instance belongs to another ingest key")]
+    InstanceOwnedByAnotherKey,
     #[error("migration failed")]
     Migrate(#[source] sqlx::migrate::MigrateError),
     /// A stored row no longer validates (should be impossible; reported, never hidden).
@@ -986,7 +990,7 @@ async fn upsert_summaries(
     let currencies: Vec<Option<&str>> = deltas.iter().map(|d| d.cost_currency.as_deref()).collect();
     let conflicts: Vec<bool> = deltas.iter().map(|d| d.finish_conflict).collect();
 
-    sqlx::query(
+    let counts = sqlx::query(
         "WITH ops AS (
             INSERT INTO operations AS o (project_id, operation_id, name, request_id, release,
                 first_event_time, last_event_time, first_received_at, last_received_at,
@@ -1042,6 +1046,7 @@ async fn upsert_summaries(
                 dropped_rejected = GREATEST(s.dropped_rejected, EXCLUDED.dropped_rejected),
                 gap_overflow = GREATEST(s.gap_overflow, EXCLUDED.gap_overflow),
                 truncated_events = GREATEST(s.truncated_events, EXCLUDED.truncated_events)
+            WHERE s.ingest_key_id = EXCLUDED.ingest_key_id
             RETURNING 1
         ), names AS (
             INSERT INTO known_names (project_id, name) SELECT $1, n FROM UNNEST($31::text[]) AS n
@@ -1081,8 +1086,12 @@ async fn upsert_summaries(
     .bind(sat_i64(batch.stats.truncated_events))
     .bind(&batch.new_names)
     .bind(&conflicts)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
+    let src_rows: i64 = counts.get(1);
+    if src_rows == 0 {
+        return Err(StoreError::InstanceOwnedByAnotherKey);
+    }
     Ok(())
 }
 
