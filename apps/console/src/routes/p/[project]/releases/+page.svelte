@@ -8,6 +8,9 @@
 	import { money, time } from '#lib/format.js';
 	import type { Comparison } from '#lib/types.js';
 	import Notice from '#lib/components/Notice.svelte';
+	import Failure from '#lib/components/Failure.svelte';
+	import Loading from '#lib/components/Loading.svelte';
+	import { NativeSelect } from '@aiops/ui/ui/native-select';
 
 	// Releases side by side, from the same summaries the operations list filters (A2): every
 	// count links to the list that shows exactly those operations.
@@ -15,6 +18,7 @@
 	let releases = $state(page.url.searchParams.get('releases') ?? '');
 	let hours = $state('24');
 	let result = $state<Result<Comparison> | null>(null);
+	let loading = $state(false);
 	const STATUS_COLUMNS = ['succeeded', 'failed', 'uncertain', 'conflicting', 'no_finish_observed'] as const;
 
 	async function compare(event?: SubmitEvent) {
@@ -23,7 +27,9 @@
 		const to = new Date();
 		const from = new Date(to.getTime() - Number(hours) * 3_600_000);
 		const q = new URLSearchParams({ releases: releases.trim(), from: from.toISOString(), to: to.toISOString() });
+		loading = true;
 		result = await api<Comparison>(`/v1/projects/${encodeURIComponent(project)}/releases/compare?${q}`);
+		loading = false;
 	}
 
 	$effect(() => {
@@ -47,17 +53,22 @@
 	</label>
 	<label class="grid gap-1 text-sm">
 		<span class="text-muted-foreground">Window</span>
-		<select bind:value={hours} aria-label="Window" class="h-9 rounded-md border bg-background px-2">
+		<NativeSelect bind:value={hours} aria-label="Window">
 			<option value="1">last hour</option>
 			<option value="24">last 24 hours</option>
 			<option value="168">last 7 days</option>
-		</select>
+		</NativeSelect>
 	</label>
 	<Button type="submit">Compare</Button>
 </form>
 
-{#if result === null}
-	<p class="text-muted-foreground">Name the releases to compare.</p>
+{#if loading && result === null}
+	<Loading rows={3} label="Comparing releases" />
+{:else if result === null}
+	<Notice kind="unknown" title="Name the releases to compare.">
+		Releases are what hosts send as <code>release</code> (the SDK's <code>AIOPS_RELEASE</code>). Each count links to
+		the operations behind it.
+	</Notice>
 {:else if result.state === 'ok'}
 	{@const c = result.data}
 	<p class="mb-2 text-sm text-muted-foreground">
@@ -96,12 +107,6 @@
 			{/each}
 		</TableBody>
 	</Table>
-{:else if result.state === 'forbidden'}
-	<Notice kind="fail">Denied: {result.message}. The denial was recorded in the audit log.</Notice>
-{:else if result.state === 'rateLimited'}
-	<Notice kind="uncertain">Rate limited; retry in {result.retryAfter} s.</Notice>
-{:else if result.state === 'needsAuth'}
-	<Notice kind="fail">The token is missing, expired or revoked.</Notice>
 {:else}
-	<Notice kind="fail">The comparison could not be read: {result.state === 'unreachable' ? result.message : 'not found'}</Notice>
+	<Failure {result} retry={() => void compare()} />
 {/if}

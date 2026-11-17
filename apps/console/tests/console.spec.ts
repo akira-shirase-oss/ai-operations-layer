@@ -99,7 +99,8 @@ test('a token without the project sees a denial, not data', async ({ page }) => 
 	await page.getByPlaceholder('aiops_tk_…').fill(process.env['AIOPS_E2E_OTHER_TOKEN'] ?? '');
 	await page.getByRole('button', { name: 'Sign in' }).click();
 	await page.goto(`/console/p/pilot/op/${DOWN}`);
-	await expect(page.getByText(/Denied: forbidden: project_not_in_scope/)).toBeVisible();
+	await expect(page.getByText('This token cannot read this project.')).toBeVisible();
+	await expect(page.getByText('The denial was recorded in the audit log.', { exact: false })).toBeVisible();
 	// The 403 itself is logged by the browser as a failed resource; nothing else may fail.
 	expect(problems.filter((p) => !p.includes('403'))).toEqual([]);
 });
@@ -223,7 +224,7 @@ test.describe('Durable Runner, the first real host', () => {
 		await openByRequest(page, DR_OK);
 		await expect(page.locator('h1 .badge')).toHaveText('succeeded');
 		await expect(page.getByText(/^No gaps: every event/)).toBeVisible();
-		await expect(page.getByTestId('authority-state')).toHaveText('done');
+		await expect(page.getByTestId('authority-state')).toContainText('done');
 		await expect(page.getByTestId('authority')).toContainText('Read ');
 		const steps = page.getByRole('rowgroup', { name: 'Steps' });
 		for (const name of ['generate', 'validate', 'factcheck', 'publish']) {
@@ -247,7 +248,7 @@ test.describe('Durable Runner, the first real host', () => {
 		await expect(steps.getByRole('row').filter({ hasText: 'publish.reconcile' }).locator('.badge')).toHaveText(
 			'succeeded'
 		);
-		await expect(page.getByTestId('authority-state')).toHaveText('done');
+		await expect(page.getByTestId('authority-state')).toContainText('done');
 		expect(problems).toEqual([]);
 	});
 
@@ -256,7 +257,7 @@ test.describe('Durable Runner, the first real host', () => {
 		await signIn(page);
 		await openByRequest(page, DR_INVALID);
 		await expect(page.locator('h1 .badge')).toHaveText('failed: validation');
-		await expect(page.getByTestId('authority-state')).toHaveText('failed:step:1');
+		await expect(page.getByTestId('authority-state')).toContainText('failed:step:1');
 		const validate = page.getByRole('rowgroup', { name: 'Steps' }).getByRole('row').filter({ hasText: 'validate' });
 		await expect(validate).toHaveCount(5); // the runner's five attempts, numbered by the runner
 		await expect(validate.locator('.badge').first()).toHaveText('failed: validation');
@@ -273,7 +274,7 @@ test.describe('Durable Runner, the first real host', () => {
 		await expect(page.getByText(/an unknown number/)).toBeVisible();
 		await expect(page.getByText('Events after this point may be missing (no finish observed)')).toBeVisible();
 		await expect(page.getByText(/^No gaps/)).toHaveCount(0);
-		await expect(page.getByTestId('authority-state')).toHaveText('done');
+		await expect(page.getByTestId('authority-state')).toContainText('done');
 		const generate = page.getByRole('rowgroup', { name: 'Steps' }).getByRole('row').filter({ hasText: 'generate' });
 		await expect(generate.first().locator('.badge')).toHaveText('no finish observed');
 		expect(problems).toEqual([]);

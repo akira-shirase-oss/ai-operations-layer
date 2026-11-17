@@ -3,6 +3,9 @@
 	import { page } from '$app/state';
 	import { Button } from '@aiops/ui/ui/button';
 	import { Input } from '@aiops/ui/ui/input';
+	import { NativeSelect } from '@aiops/ui/ui/native-select';
+	import Failure from '#lib/components/Failure.svelte';
+	import Loading from '#lib/components/Loading.svelte';
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { api, type Result } from '#lib/api.js';
 	import { money, short, time } from '#lib/format.js';
@@ -48,6 +51,12 @@
 		void load();
 	});
 
+	const filtered = $derived(Boolean(requestId || status || name || release || from || to));
+	function clearFilters() {
+		requestId = status = name = release = from = to = '';
+		void load();
+	}
+
 	function search(event: SubmitEvent) {
 		event.preventDefault();
 		void load();
@@ -65,10 +74,10 @@
 	<div class="grid grid-cols-2 gap-2 text-sm md:grid-cols-5">
 		<label class="grid gap-1">
 			<span class="text-muted-foreground">Status</span>
-			<select bind:value={status} aria-label="Status" class="h-9 rounded-md border bg-background px-2">
+			<NativeSelect bind:value={status} aria-label="Status">
 				<option value="">any</option>
 				{#each STATUS_CHOICES as s (s)}<option value={s}>{s.replaceAll('_', ' ')}</option>{/each}
-			</select>
+			</NativeSelect>
 		</label>
 		<label class="grid gap-1"
 			><span class="text-muted-foreground">Operation name</span><Input bind:value={name} aria-label="Operation name" /></label
@@ -90,12 +99,24 @@
 </form>
 
 {#if result === null}
-	<p class="text-muted-foreground">Loading…</p>
+	<Loading label="Loading operations" />
 {:else if result.state === 'ok'}
-	{#if result.data.operations.length === 0}
-		<Notice kind="unknown">
-			No operations recorded{requestId || status || name || release || from || to ? ' that match' : ''}. That means no
-			events arrived — not that nothing ran.
+	{#if result.data.operations.length === 0 && filtered}
+		<Notice kind="unknown" title="No operations match these filters.">
+			Nothing arrived that matches — which is not proof that nothing ran.
+			<Button variant="outline" size="sm" onclick={clearFilters}>Clear filters</Button>
+		</Notice>
+	{:else if result.data.operations.length === 0}
+		<Notice kind="unknown" title="No operations yet.">
+			<p>No host has sent events to this project. To connect a first host:</p>
+			<ol class="mt-1 list-decimal pl-5">
+				<li>Mint an ingest key: <code>aiops-server admin create-ingest-key --project {project} --name my-host</code></li>
+				<li>
+					Give it to the host's SDK (<code>AIOPS_ENDPOINT</code>, <code>AIOPS_INGEST_KEY</code>; see
+					<code>crates/aiops-sdk/examples</code>), or run the Durable Runner adapter in front of its handlers.
+				</li>
+				<li>Run one operation; it appears here within a second.</li>
+			</ol>
 		</Notice>
 	{:else}
 		<Table>
@@ -148,14 +169,6 @@
 			<Button class="mt-4" variant="outline" onclick={() => load(next)}>Older operations</Button>
 		{/if}
 	{/if}
-{:else if result.state === 'forbidden'}
-	<Notice kind="fail">Denied: {result.message}. The denial was recorded in the audit log.</Notice>
-{:else if result.state === 'rateLimited'}
-	<Notice kind="uncertain">Rate limited; retry in {result.retryAfter} s.</Notice>
-{:else if result.state === 'needsAuth'}
-	<Notice kind="fail">The token is missing, expired or revoked.</Notice>
-{:else if result.state === 'unreachable'}
-	<Notice kind="fail">The collector could not be reached: {result.message}</Notice>
 {:else}
-	<Notice kind="fail">Not found.</Notice>
+	<Failure {result} retry={() => void load()} />
 {/if}

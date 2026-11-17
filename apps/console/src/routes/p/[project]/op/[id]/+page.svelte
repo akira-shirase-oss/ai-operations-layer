@@ -11,17 +11,32 @@
 	import Notice from '#lib/components/Notice.svelte';
 	import Flag from '#lib/components/Flag.svelte';
 	import VirtualRows from '#lib/components/VirtualRows.svelte';
+	import Failure from '#lib/components/Failure.svelte';
+	import Loading from '#lib/components/Loading.svelte';
 
 	const project = $derived(page.params['project'] ?? '');
 	const id = $derived(page.params['id'] ?? '');
 	let result = $state<Result<Timeline> | null>(null);
 	let authority = $state<Result<Authority> | null>(null);
 
-	$effect(() => {
+	function load() {
 		const path = `/v1/projects/${encodeURIComponent(project)}/operations/${encodeURIComponent(id)}`;
 		api<Timeline>(path).then((r) => (result = r));
 		api<Authority>(`${path}/authority`).then((r) => (authority = r));
-	});
+	}
+	$effect(load);
+	// The runner's own words, said plainly; its raw state stays one click away.
+	function runnerSays(state: string, steps: number): string {
+		if (state === 'done') return 'finished every step';
+		if (state === 'cancelled') return 'was cancelled (a cancel never undoes what already happened)';
+		const failed = /^failed:step:(\d+)$/.exec(state);
+		if (failed) return `failed at step ${Number(failed[1]) + 1} of ${steps}, after its retries`;
+		if (state.startsWith('reconciling:')) return 'is checking whether a call whose reply was lost took effect';
+		if (state.startsWith('retry_waiting:')) return 'is waiting to retry a step';
+		if (state.startsWith('running:')) return 'is running a step';
+		if (state === 'queued') return 'has not started yet';
+		return 'is in a state this console does not know';
+	}
 	const REASON_TEXT: Record<string, string> = {
 		timeout: 'it did not answer within 2 s',
 		unreachable: 'it could not be reached',
@@ -76,7 +91,7 @@
 </p>
 
 {#if result === null}
-	<p class="text-muted-foreground">Loading…</p>
+	<Loading rows={8} label="Loading the operation" />
 {:else if result.state === 'ok'}
 	{@const t = result.data}
 	<h1 class="mt-1 flex flex-wrap items-center gap-3 text-2xl font-semibold tracking-tight">
@@ -153,11 +168,16 @@
 			<CardContent class="text-sm">
 				{#if a.state === 'answered'}
 					<p>
-						Durable Runner says <strong class="font-mono" data-testid="authority-state">{a.answer.state}</strong> for run
-						{a.run_id} ({a.answer.steps} steps; key <bdi class="font-mono">{a.answer.key}</bdi>){a.answer.finished_at_ms
-							? `, finished ${time(new Date(a.answer.finished_at_ms).toISOString())}`
+						Durable Runner says this run <strong>{runnerSays(a.answer.state, a.answer.steps)}</strong>{a.answer
+							.finished_at_ms
+							? ` (${time(new Date(a.answer.finished_at_ms).toISOString())})`
 							: ''}.
 					</p>
+					<details class="text-xs text-muted-foreground">
+						<summary>Details</summary>
+						Run {a.run_id} on {a.runner}, state <code data-testid="authority-state">{a.answer.state}</code>, {a.answer.steps}
+						steps, key <bdi class="font-mono">{a.answer.key}</bdi>.
+					</details>
 					<p class="text-muted-foreground">
 						Read {time(a.read_at)} from runner {a.runner}. Where the timeline and this disagree, this is the record; the
 						timeline is evidence of what was observed.
@@ -226,12 +246,17 @@
 	{#if t.steps.length === 0}
 		<p class="text-muted-foreground">No step events received.</p>
 	{:else}
-		<div class="overflow-x-auto">
-			<div class="min-w-[69rem]">
-				<div class="{STEP_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
-					<span>Step</span><span>Attempt</span><span>Outcome</span><span>Duration</span><span>Model / version</span><span
-						>Error</span
-					><span>Est. cost</span>
+		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+		<div class="overflow-x-auto rounded-md outline-none focus-visible:ring-4 focus-visible:ring-ring/25" tabindex="0" role="region" aria-label="Steps, scrolls sideways">
+			<div class="min-w-[69rem]" role="table" aria-label="Every attempt of every step">
+				<div role="rowgroup">
+					<div class="{STEP_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
+						<span role="columnheader">Step</span><span role="columnheader">Attempt</span><span role="columnheader"
+							>Outcome</span
+						><span role="columnheader">Duration</span><span role="columnheader">Model / version</span><span
+							role="columnheader">Error</span
+						><span role="columnheader">Est. cost</span>
+					</div>
 				</div>
 				<VirtualRows
 					rows={attemptRows}
@@ -242,7 +267,7 @@
 					{#snippet row(r: AttemptRow)}
 						{@const a = r.attempt}
 						<div class="{STEP_COLUMNS} h-full items-center text-sm">
-							<span class="min-w-0 leading-tight">
+							<span role="cell" class="min-w-0 leading-tight">
 								<span class="block truncate {r.first ? 'font-semibold' : 'text-muted-foreground'}" title={r.step.name ?? ''}
 									>{r.step.name ?? 'name not observed'}</span
 								>
@@ -251,18 +276,18 @@
 									{/if}<span class="font-mono">{r.step.step_id}</span>
 								</span>
 							</span>
-							<span>{a.attempt}</span>
-							<span data-cell="outcome" class="flex min-w-0 flex-col items-start gap-0.5">
+							<span role="cell">{a.attempt}</span>
+							<span role="cell" data-cell="outcome" class="flex min-w-0 flex-col items-start gap-0.5">
 								<StatusBadge status={a} />
 								{#if !a.start_observed}<Flag>start not received</Flag>{/if}
 							</span>
-							<span class="font-mono text-xs">{micros(a.duration_us)}</span>
-							<span class="min-w-0 truncate font-mono text-xs" title={versionText(a)}>{versionText(a)}</span>
-							<span class="min-w-0 font-mono text-xs leading-tight" title={errorText(a)}>
+							<span role="cell" class="font-mono text-xs">{micros(a.duration_us)}</span>
+							<span role="cell" class="min-w-0 truncate font-mono text-xs" title={versionText(a)}>{versionText(a)}</span>
+							<span role="cell" class="min-w-0 font-mono text-xs leading-tight" title={errorText(a)}>
 								<span class="block truncate">{a.error_code ?? ''}</span>
 								{#if a.error_message}<span class="block truncate text-muted-foreground"><bdi>{a.error_message}</bdi></span>{/if}
 							</span>
-							<span class="font-mono text-xs"
+							<span role="cell" class="font-mono text-xs"
 								>{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</span
 							>
 						</div>
@@ -303,11 +328,17 @@
 
 	<h2 class="mt-8 mb-2 text-lg font-semibold">Events (event time · receive time)</h2>
 	<TooltipProvider>
-		<div class="overflow-x-auto">
-			<div class="min-w-[69rem]">
-				<div class="{EVENT_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
-					<span>Event time · received</span><span>Delay</span><span>Outcome</span><span>Event</span><span>#</span
-					><span>Source</span><span>Details</span>
+		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+		<div class="overflow-x-auto rounded-md outline-none focus-visible:ring-4 focus-visible:ring-ring/25" tabindex="0" role="region" aria-label="Events, scrolls sideways">
+			<div class="min-w-[69rem]" role="table" aria-label="Every event, by event time">
+				<div role="rowgroup">
+					<div class="{EVENT_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
+						<span role="columnheader">Event time · received</span><span role="columnheader">Delay</span><span
+							role="columnheader">Outcome</span
+						><span role="columnheader">Event</span><span role="columnheader">#</span><span role="columnheader"
+							>Source</span
+						><span role="columnheader">Details</span>
+					</div>
 				</div>
 				<VirtualRows rows={t.entries} label="Events" key={(e: EntryView) => e.event_id}>
 					{#snippet row(e: EntryView)}
@@ -316,22 +347,22 @@
 								? 'gap bg-state-unknown-soft/60'
 								: ''}"
 						>
-							<span class="font-mono text-xs leading-tight">
+							<span role="cell" class="font-mono text-xs leading-tight">
 								{time(e.event_time)}<br /><span class="text-muted-foreground">{time(e.received_at)}</span>
 							</span>
-							<span class="font-mono text-xs">{micros(e.receive_delay_us)}</span>
-							<span data-cell="outcome" class="min-w-0">
+							<span role="cell" class="font-mono text-xs">{micros(e.receive_delay_us)}</span>
+							<span role="cell" data-cell="outcome" class="min-w-0">
 								{#if e.outcome}<StatusBadge status={e.outcome} />{/if}
 							</span>
-							<span data-cell="event" class="min-w-0 truncate" title={eventText(e)}>{eventText(e)}</span>
-							<span class="font-mono text-xs">{e.op_seq || '—'}</span>
-							<span class="min-w-0 truncate font-mono text-xs">
+							<span role="cell" data-cell="event" class="min-w-0 truncate" title={eventText(e)}>{eventText(e)}</span>
+							<span role="cell" class="font-mono text-xs">{e.op_seq || '—'}</span>
+							<span role="cell" class="min-w-0 truncate font-mono text-xs">
 								<Tooltip>
 									<TooltipTrigger>{e.ingest_key} · {short(e.instance_id)}</TooltipTrigger>
 									<TooltipContent>instance {e.instance_id}</TooltipContent>
 								</Tooltip>
 							</span>
-							<span data-cell="details" class="min-w-0 truncate" title={detailText(e)}>
+							<span role="cell" data-cell="details" class="min-w-0 truncate" title={detailText(e)}>
 								{#each e.flags as f (f)}<Flag>{f.replaceAll('_', ' ')}</Flag>{/each}
 								{#if e.withheld_attributes}<Flag>{e.withheld_attributes} attributes withheld by policy</Flag>{/if}
 								{#if e.redactions}<Flag>{e.redactions} redacted</Flag>{/if}
@@ -378,14 +409,6 @@
 			{/each}
 		</TableBody>
 	</Table>
-{:else if result.state === 'missing'}
-	<Notice kind="unknown">No events have been received for this operation. That is not proof that it did not run.</Notice>
-{:else if result.state === 'forbidden'}
-	<Notice kind="fail">Denied: {result.message}. The denial was recorded in the audit log.</Notice>
-{:else if result.state === 'rateLimited'}
-	<Notice kind="uncertain">Rate limited; retry in {result.retryAfter} s.</Notice>
-{:else if result.state === 'needsAuth'}
-	<Notice kind="fail">The token is missing, expired or revoked.</Notice>
 {:else}
-	<Notice kind="fail">The collector could not be reached: {result.message}</Notice>
+	<Failure {result} retry={load} />
 {/if}

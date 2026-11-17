@@ -29,11 +29,14 @@
 	const visible = $derived(rows.slice(first, last));
 </script>
 
+<!-- Focusable: a scrolling list must be reachable and scrollable from the keyboard. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div
-	class="overflow-y-auto rounded-xl border"
+	class="overflow-y-auto rounded-xl border outline-none focus-visible:ring-4 focus-visible:ring-ring/25"
 	style="height: {viewport + 2}px"
 	role="rowgroup"
 	aria-label={label}
+	tabindex="0"
 	onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
 >
 	<div style="height: {first * rowHeight}px" aria-hidden="true"></div>
