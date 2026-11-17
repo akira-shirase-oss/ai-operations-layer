@@ -67,7 +67,8 @@ jobs:
       - run: npm run build --workspace @aiops/console
 
   # The investigation view in Chromium against the release collector, the reference host
-  # and real PostgreSQL (scripts/console-e2e.sh).
+  # and real PostgreSQL, then the first real host: Durable Runner built from its public
+  # repository at the tested revision (scripts/console-e2e.sh, scripts/durable-runner.sh).
   console-e2e:
     name: console journey (Chromium, real collector and reference host)
     runs-on: ubuntu-latest
@@ -93,7 +94,7 @@ jobs:
       - name: Install the pinned toolchain
         run: |
           channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
-          rustup toolchain install "$channel" --profile minimal
+          rustup toolchain install "$channel" --profile minimal --component clippy,rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
