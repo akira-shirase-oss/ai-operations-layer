@@ -23,6 +23,8 @@ axum = "0.8.9"
 base64 = "0.22"
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "env"] }
 getrandom = { version = "0.3.4", features = ["std"] }
+# Property tests only (dev-dependency): the redaction rules over generated inputs.
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 http-body-util = "0.1.5"
 # The collector's own accept loop (header-read timeout, connection cap, drain): the same
 # hyper and hyper-util versions axum already uses.

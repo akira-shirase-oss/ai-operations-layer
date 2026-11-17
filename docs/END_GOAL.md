@@ -121,8 +121,14 @@ the incidents, and its result is committed under `perf/results/`.
   authorizes nothing (invariant 1), and every event shows the key and
   source instance it arrived under, so provenance is visible (D-015).
 - Error strings are the usual privacy leak: secret-shape redaction runs on
-  every string field, error messages included, in the SDK and again in the
-  collector (D-014).
+  every free-text string (error messages and string attributes), in the SDK
+  and again in the collector (D-014). It covers known credential prefixes,
+  `Bearer`/`Basic` credentials, JWTs, PEM blocks, values after keys that
+  name a secret (`*_token`, `api-key`, `client_secret`, `password`,
+  `cookie`, …), URL passwords and long mixed-case alphanumeric tokens, with
+  property tests (`crates/aiops-domain/tests/redaction.rs`). It is pattern
+  matching, so it is partial by nature; the A4 privacy red-team is still
+  owed.
 
 ## Evidence plan
 

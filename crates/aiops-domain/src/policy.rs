@@ -81,19 +81,58 @@ const SECRET_PREFIXES: &[&str] = &[
     "AIza",
 ];
 
-/// Keys whose `key=value` / `key: value` value is redacted (ASCII case-insensitive).
-const SECRET_KEYS: &[&str] = &[
-    "access_key",
-    "api_key",
+/// Parts of a key name (split on `_`, `-`, `.`) that make its value a secret
+/// (`access_token`, `X-Api-Key`, `db_password`, `Cookie`, …; review finding 12).
+const SECRET_PARTS: &[&str] = &[
     "apikey",
+    "auth",
     "authorization",
-    "client_secret",
+    "bearer",
+    "cookie",
+    "credential",
+    "credentials",
+    "jwt",
+    "passphrase",
     "passwd",
     "password",
     "pwd",
     "secret",
     "token",
 ];
+
+/// A `key` part is a secret only after one of these (`api_key`, `private-key`, …), so a
+/// cache key or a sort key stays readable.
+const KEY_QUALIFIERS: &[&str] = &[
+    "access",
+    "api",
+    "client",
+    "encryption",
+    "master",
+    "private",
+    "secret",
+    "signing",
+    "ssh",
+];
+
+/// Whether a key name (as written in text) names a secret.
+fn is_secret_key(key: &[u8]) -> bool {
+    let lower = key.to_ascii_lowercase();
+    let mut prev: &[u8] = b"";
+    for part in lower.split(|b| matches!(b, b'_' | b'-' | b'.')) {
+        if SECRET_PARTS.iter().any(|s| s.as_bytes() == part) {
+            return true;
+        }
+        if part == b"key" && KEY_QUALIFIERS.iter().any(|q| q.as_bytes() == prev) {
+            return true;
+        }
+        prev = part;
+    }
+    false
+}
+
+fn is_key_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
+}
 
 /// Schemes whose credential follows them (`Bearer abc…`).
 const AUTH_SCHEMES: &[&str] = &["bearer ", "basic "];
@@ -124,8 +163,7 @@ pub fn redact(text: &str) -> Option<String> {
     let mut copied = 0; // bytes of `text` already copied into `out`
     let mut i = 0;
     while i < bytes.len() {
-        let boundary = i == 0 || !is_word(bytes[i - 1]);
-        if let Some((keep, end)) = boundary.then(|| match_secret(bytes, i)).flatten() {
+        if let Some((keep, end)) = match_secret(bytes, i) {
             let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
             // Every match starts and ends on an ASCII byte, so these are char boundaries.
             buf.push_str(&text[copied..i + keep]);
@@ -142,9 +180,33 @@ pub fn redact(text: &str) -> Option<String> {
     })
 }
 
+/// URL userinfo: `scheme://user:password@host` keeps the user and hides the password.
+fn url_password(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    let rest = &bytes[i..];
+    if !rest.starts_with(b"://") {
+        return None;
+    }
+    let seg = rest[3..]
+        .iter()
+        .take_while(|b| !b.is_ascii_whitespace() && !b"/?#".contains(b))
+        .count();
+    let userinfo = &rest[3..3 + seg];
+    let at = userinfo.iter().rposition(|b| *b == b'@')?;
+    let colon = userinfo[..at].iter().position(|b| *b == b':')?;
+    (colon + 1 < at).then_some((3 + colon + 1, i + 3 + at))
+}
+
 /// At `i`, returns `(bytes to keep before the redaction, end of the secret)`.
 fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     let rest = &bytes[i..];
+    // URL userinfo follows the scheme's letters, so it needs no word boundary.
+    if let Some(found) = url_password(bytes, i) {
+        return Some(found);
+    }
+    // Every other shape starts a word.
+    if i > 0 && is_word(bytes[i - 1]) {
+        return None;
+    }
     if rest.starts_with(b"-----BEGIN") {
         return Some((0, bytes.len()));
     }
@@ -171,41 +233,57 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             return Some((0, i + run));
         }
     }
-    for key in SECRET_KEYS {
-        if starts_with_ignore_case(rest, key) {
-            let mut j = key.len();
-            if rest.get(j).is_some_and(|b| is_word(*b)) {
-                continue; // `tokens=`, `secretary:` are not the key
-            }
+    // `key=value` / `key: value` where the key names a secret. The key must start here
+    // (the caller checked the word boundary; a key byte before it would make it a suffix).
+    if i == 0 || !is_key_byte(bytes[i - 1]) {
+        let key_len = rest
+            .iter()
+            .take(64)
+            .take_while(|b| is_key_byte(**b))
+            .count();
+        if key_len > 0 && is_secret_key(&rest[..key_len]) {
+            let mut j = key_len;
             while rest
                 .get(j)
                 .is_some_and(|b| *b == b' ' || *b == b'"' || *b == b'\'')
             {
                 j += 1;
             }
-            if !rest.get(j).is_some_and(|b| *b == b'=' || *b == b':') {
-                continue;
-            }
-            j += 1;
-            while rest
-                .get(j)
-                .is_some_and(|b| *b == b' ' || *b == b'"' || *b == b'\'')
-            {
+            if rest.get(j).is_some_and(|b| *b == b'=' || *b == b':') {
                 j += 1;
-            }
-            // `Authorization: Bearer <token>`: the value is the scheme and its token.
-            let scheme = AUTH_SCHEMES
-                .iter()
-                .find(|s| starts_with_ignore_case(&rest[j..], s))
-                .map_or(0, |s| s.len());
-            let value = scheme
-                + rest[j + scheme..]
+                while rest
+                    .get(j)
+                    .is_some_and(|b| *b == b' ' || *b == b'"' || *b == b'\'')
+                {
+                    j += 1;
+                }
+                // `Authorization: Bearer <token>`: the value is the scheme and its token.
+                let scheme = AUTH_SCHEMES
                     .iter()
-                    .take_while(|b| !b.is_ascii_whitespace() && !b"&;,\"'".contains(b))
-                    .count();
-            if value > 0 {
-                return Some((j, i + j + value));
+                    .find(|s| starts_with_ignore_case(&rest[j..], s))
+                    .map_or(0, |s| s.len());
+                let value = scheme
+                    + rest[j + scheme..]
+                        .iter()
+                        .take_while(|b| !b.is_ascii_whitespace() && !b"&;,\"'".contains(b))
+                        .count();
+                if value > 0 {
+                    return Some((j, i + j + value));
+                }
             }
+        }
+    }
+    // A long mixed-case alphanumeric run is a credential shape (API keys, signing keys);
+    // lowercase hex (commit and content hashes) and UUIDs are not.
+    if rest.first().is_some_and(u8::is_ascii_alphanumeric) {
+        let run = token_run(rest, b"");
+        let token = &rest[..run];
+        if run >= 32
+            && token.iter().any(u8::is_ascii_uppercase)
+            && token.iter().any(u8::is_ascii_lowercase)
+            && token.iter().filter(|b| b.is_ascii_digit()).count() >= 2
+        {
+            return Some((0, i + run));
         }
     }
     None
