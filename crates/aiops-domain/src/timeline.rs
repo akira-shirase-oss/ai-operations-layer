@@ -124,6 +124,10 @@ pub struct Flags {
     pub conflicting_finish: bool,
     /// No `operation.started` was received.
     pub start_not_observed: bool,
+    /// Events are proven missing (sequence holes) or were reported dropped by the SDK: they
+    /// may include a whole step with an external effect, which no step view can show
+    /// (review N6). Sets `external_effect_unknown` too.
+    pub missing_events_may_hide_effects: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -690,6 +694,10 @@ pub fn assemble(
     };
     let mut effect_unknown_steps = Vec::new();
     let steps = build_steps(&c, &mut flags, &mut cost, &mut effect_unknown_steps);
+    if c.coverage.missing_known > 0 || c.coverage.reported_dropped > 0 {
+        flags.missing_events_may_hide_effects = true;
+        flags.external_effect_unknown = true;
+    }
     let entries = build_entries(&events, &c.step_start_time, limits, &mut flags);
     let sources = source_views(instances, &events);
     let meta = c.meta;

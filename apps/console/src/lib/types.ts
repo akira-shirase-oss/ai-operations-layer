@@ -20,6 +20,7 @@ export type Flags = {
 	late_events: number;
 	conflicting_finish: boolean;
 	start_not_observed: boolean;
+	missing_events_may_hide_effects: boolean;
 };
 
 export type InstanceCoverage = {

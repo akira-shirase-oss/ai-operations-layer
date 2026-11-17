@@ -527,3 +527,24 @@ fn e6_within_one_source_entries_follow_seq_and_the_backwards_step_is_flagged_whe
     );
     assert!(t.entries[0].flags.is_empty(), "{:?}", t.entries[0].flags);
 }
+
+// Review N6: a wholly lost step leaves no step to warn about, but events proven missing (or
+// reported dropped) may have been that step: the effect warning must still be raised.
+#[test]
+fn n6_events_proven_missing_may_hide_an_external_effect() {
+    let mut b = B::new();
+    let first = b.ev(0, 5, started());
+    b.op_seq += 2; // op_seq 2 and 3 never arrive: a step's start and finish, lost
+    let events = vec![
+        first,
+        b.ev(30, 5, finished(Outcome::Failed(FailureClass::Internal), 4)),
+    ];
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
+    assert_eq!(t.status.state, "failed");
+    assert_eq!(t.coverage.missing_known, 2);
+    assert!(
+        t.flags.external_effect_unknown,
+        "the lost events may include an effectful step"
+    );
+    assert!(t.flags.missing_events_may_hide_effects);
+}

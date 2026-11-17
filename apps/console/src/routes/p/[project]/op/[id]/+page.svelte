@@ -73,7 +73,13 @@
 							: ''}.
 					</li>
 				{/each}
-				{#if t.effect_unknown_steps.length === 0}
+				{#if t.flags.missing_events_may_hide_effects}
+					<li>
+						Events are missing ({t.coverage.missing_known} proven by sequence numbers, {t.coverage.reported_dropped} reported
+						dropped by the SDK); they may include a step that affected the outside world.
+					</li>
+				{/if}
+				{#if t.effect_unknown_steps.length === 0 && !t.flags.missing_events_may_hide_effects}
 					<li>The host declared the operation's outcome unknown.</li>
 				{/if}
 			</ul>
