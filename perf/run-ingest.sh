@@ -43,6 +43,8 @@ export AIOPS_DATABASE_URL="postgres://aiops:aiops-dev@127.0.0.1:${AIOPS_PG_PORT:
 "$bin" admin create-project perf >/dev/null
 key="$("$bin" admin create-ingest-key --project perf --name k6)"
 token="$("$bin" admin create-token --actor perf --project perf 2>/dev/null)"
+# The collector-wide counters need the admin scope (67bc0de); the query run keeps a read token.
+admin_token="$("$bin" admin create-token --actor perf --project perf --scope admin 2>/dev/null)"
 
 AIOPS_LISTEN="127.0.0.1:$port" \
 AIOPS_INGEST_EVENTS_PER_SEC=10000000 AIOPS_INGEST_BURST_EVENTS=10000000 \
@@ -85,7 +87,7 @@ query_status=$?
 set -e
 load_after="$(uptime | sed 's/.*load averages*: //')"
 rss_kb="$(ps -o rss= -p "$server_pid" | tr -d ' ')"
-collector_stats="$(curl -fsS -H "authorization: Bearer $token" "http://127.0.0.1:$port/v1/collector/stats")"
+collector_stats="$(curl -fsS -H "authorization: Bearer $admin_token" "http://127.0.0.1:$port/v1/collector/stats")"
 
 mkdir -p perf/results
 cp "$work/ingest.json" "$out.ingest.json"
