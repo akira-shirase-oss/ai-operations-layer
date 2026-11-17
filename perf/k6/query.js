@@ -25,6 +25,10 @@ export const options = {
 	thresholds: {
 		'http_req_duration{name:timeline}': ['p(95)<150'],
 		'http_req_duration{name:list}': ['p(95)<150'],
+		// A2: the list filtered by status and release, and the release comparison (an aggregate
+		// over the last 24 h of summaries, so a tenth of iterations ask for it).
+		'http_req_duration{name:list_filtered}': ['p(95)<150'],
+		'http_req_duration{name:compare}': ['p(95)<500'],
 		http_req_failed: ['rate==0'],
 		checks: ['rate==1'],
 	},
@@ -52,4 +56,17 @@ export default function () {
 		tags: { name: 'list' },
 	});
 	check(l, { 'list 200': (r) => r.status === 200 && r.json().operations.length === 1 });
+	// The ingest scenario's operations are release load-r1, all succeeded.
+	const f = http.get(`${BASE_URL}/v1/projects/${PROJECT}/operations?limit=50&status=succeeded&release=load-r1`, {
+		headers,
+		tags: { name: 'list_filtered' },
+	});
+	check(f, { 'filtered 200': (r) => r.status === 200 && r.json().operations.length > 0 });
+	if (Math.random() < 0.1) {
+		const c = http.get(`${BASE_URL}/v1/projects/${PROJECT}/releases/compare?releases=load-r1`, {
+			headers,
+			tags: { name: 'compare' },
+		});
+		check(c, { 'compare 200': (r) => r.status === 200 && r.json().releases[0].operations > 0 });
+	}
 }

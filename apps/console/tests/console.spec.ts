@@ -279,3 +279,23 @@ test.describe('Durable Runner, the first real host', () => {
 		expect(problems).toEqual([]);
 	});
 });
+
+test('releases compare from the same records the filtered list shows', async ({ page }) => {
+	const problems = watch(page);
+	await signIn(page);
+	await page.getByRole('link', { name: 'pilot' }).click();
+	await page.getByRole('link', { name: 'Compare releases' }).click();
+	await page.getByLabel('Releases').fill('cmp-a, cmp-b');
+	await page.getByRole('button', { name: 'Compare' }).click();
+	const b = page.locator('tr[data-release="cmp-b"]');
+	await expect(b.locator('td').nth(1)).toHaveText('3');
+	await expect(b.locator('[data-status="no_finish_observed"]')).toHaveText('1');
+	await expect(page.locator('tr[data-release="cmp-a"] [data-status="succeeded"]')).toHaveText('2');
+	await b.locator('[data-status="failed"] a').click();
+	const rows = page.locator('tbody tr');
+	await expect(rows).toHaveCount(1);
+	await expect(rows.first()).toContainText('e2e-cmp-4');
+	await expect(rows.first().locator('.badge')).toHaveText('failed: rejected');
+	await expect(page.getByLabel('Status')).toHaveValue('failed');
+	expect(problems).toEqual([]);
+});

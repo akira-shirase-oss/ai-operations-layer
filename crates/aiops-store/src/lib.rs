@@ -330,6 +330,54 @@ pub struct ListFilter {
     pub request_id: Option<String>,
     /// Only this operation.
     pub operation_id: Option<OperationId>,
+    /// The list's own status words: `succeeded`, `failed`, `uncertain`, `conflicting`,
+    /// `no_finish_observed` (the caller validates them).
+    pub status: Option<&'static str>,
+    pub name: Option<String>,
+    pub release: Option<String>,
+    /// Operations whose first event time is in `[from, to)`.
+    pub from: Option<Timestamp>,
+    pub to: Option<Timestamp>,
+}
+
+/// One release's operations in a window, counted from the same summaries the list reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseCounts {
+    pub release: String,
+    pub operations: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub uncertain: i64,
+    pub conflicting: i64,
+    pub no_finish_observed: i64,
+    /// Finished, single-source operations that received fewer events than they declared.
+    pub missing_events: i64,
+    pub reported_dropped: i64,
+    pub failed_attempts: i64,
+    pub uncertain_attempts: i64,
+    pub cost_estimate_micros: i64,
+    /// Distinct currencies among the estimates (more than one: not summable).
+    pub currencies: i64,
+}
+
+/// The SQL every status filter shares with the list's status (`list_state`).
+macro_rules! status_matches {
+    ($p:literal) => {
+        concat!(
+            "(",
+            $p,
+            "::text IS NULL",
+            " OR (",
+            $p,
+            " = 'conflicting' AND finish_conflict)",
+            " OR (",
+            $p,
+            " = 'no_finish_observed' AND NOT finish_conflict AND finish_outcome IS NULL)",
+            " OR (NOT finish_conflict AND finish_outcome = ",
+            $p,
+            "))"
+        )
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -666,6 +714,13 @@ impl Store {
                AND ($2::timestamptz IS NULL OR (first_event_time, operation_id) < ($2, $3::uuid))
                AND ($4::text IS NULL OR request_id = $4)
                AND ($6::uuid IS NULL OR operation_id = $6)
+               AND ($7::text IS NULL OR name = $7)
+               AND ($8::text IS NULL OR release = $8)
+               AND ($9::timestamptz IS NULL OR first_event_time >= $9)
+               AND ($10::timestamptz IS NULL OR first_event_time < $10)
+               AND ",
+            status_matches!("$11"),
+            "
              ORDER BY first_event_time DESC, operation_id DESC
              LIMIT $5"
         ))
@@ -675,9 +730,79 @@ impl Store {
         .bind(filter.request_id.as_deref())
         .bind(filter.limit)
         .bind(filter.operation_id.map(|o| uuid128(o.as_bytes())))
+        .bind(filter.name.as_deref())
+        .bind(filter.release.as_deref())
+        .bind(filter.from.map(to_odt))
+        .bind(filter.to.map(to_odt))
+        .bind(filter.status)
         .fetch_all(&self.query)
         .await?;
         rows.into_iter().map(|r| operation_row(&r)).collect()
+    }
+
+    /// Releases side by side over `[from, to)`: the same summaries, statuses and window the
+    /// list filters by, so a comparison and a filtered list never disagree.
+    pub async fn compare_releases(
+        &self,
+        project_id: Uuid,
+        releases: &[String],
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Result<Vec<ReleaseCounts>, StoreError> {
+        let rows = sqlx::query(concat!(
+            "SELECT release, count(*),
+                    count(*) FILTER (WHERE ",
+            status_matches!("'succeeded'"),
+            "),
+                    count(*) FILTER (WHERE ",
+            status_matches!("'failed'"),
+            "),
+                    count(*) FILTER (WHERE ",
+            status_matches!("'uncertain'"),
+            "),
+                    count(*) FILTER (WHERE ",
+            status_matches!("'conflicting'"),
+            "),
+                    count(*) FILTER (WHERE ",
+            status_matches!("'no_finish_observed'"),
+            "),
+                    count(*) FILTER (WHERE events_emitted IS NOT NULL AND NOT multi_source
+                                       AND host_events < events_emitted),
+                    coalesce(sum(reported_dropped), 0)::bigint,
+                    coalesce(sum(failed_attempts), 0)::bigint,
+                    coalesce(sum(uncertain_attempts), 0)::bigint,
+                    coalesce(sum(cost_estimate_micros), 0)::bigint,
+                    count(DISTINCT cost_currency)
+             FROM operations
+             WHERE project_id = $1 AND release = ANY($2)
+               AND first_event_time >= $3 AND first_event_time < $4
+             GROUP BY release
+             ORDER BY release"
+        ))
+        .bind(project_id)
+        .bind(releases)
+        .bind(to_odt(from))
+        .bind(to_odt(to))
+        .fetch_all(&self.query)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ReleaseCounts {
+                release: r.get(0),
+                operations: r.get(1),
+                succeeded: r.get(2),
+                failed: r.get(3),
+                uncertain: r.get(4),
+                conflicting: r.get(5),
+                no_finish_observed: r.get(6),
+                missing_events: r.get(7),
+                reported_dropped: r.get(8),
+                failed_attempts: r.get(9),
+                uncertain_attempts: r.get(10),
+                cost_estimate_micros: r.get(11),
+                currencies: r.get(12),
+            })
+            .collect())
     }
 
     /// The operation's stored events, oldest event time first, at most `limit`; the flag

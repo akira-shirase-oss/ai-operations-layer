@@ -322,6 +322,10 @@ pub fn router(state: SharedState) -> Router {
             get(query::timeline),
         )
         .route(
+            "/v1/projects/{project}/releases/compare",
+            get(query::compare_releases),
+        )
+        .route(
             "/v1/projects/{project}/operations/{operation_id}/authority",
             get(crate::authority::authority),
         )

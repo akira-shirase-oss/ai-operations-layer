@@ -142,6 +142,49 @@ pub struct ListParams {
     pub before_time: Option<String>,
     pub before_id: Option<String>,
     pub request_id: Option<String>,
+    /// The list's status words (`succeeded`, `failed`, `uncertain`, `conflicting`,
+    /// `no_finish_observed`).
+    pub status: Option<String>,
+    pub name: Option<String>,
+    pub release: Option<String>,
+    /// RFC 3339: operations whose first event time is in `[from, to)`.
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+const STATUSES: [&str; 5] = [
+    "succeeded",
+    "failed",
+    "uncertain",
+    "conflicting",
+    "no_finish_observed",
+];
+
+fn status_param(s: Option<&str>) -> Result<Option<&'static str>, ApiError> {
+    match s {
+        None | Some("") => Ok(None),
+        Some(v) => STATUSES
+            .iter()
+            .find(|k| **k == v)
+            .copied()
+            .map(Some)
+            .ok_or(ApiError::BadRequest("status")),
+    }
+}
+
+fn ident_param(v: Option<String>, field: &'static str) -> Result<Option<String>, ApiError> {
+    match v {
+        None => Ok(None),
+        Some(v) if v.is_empty() => Ok(None),
+        Some(v) if v.len() <= 128 => Ok(Some(v)),
+        Some(_) => Err(ApiError::BadRequest(field)),
+    }
+}
+
+fn time_param(v: Option<&str>, field: &'static str) -> Result<Option<Timestamp>, ApiError> {
+    v.filter(|t| !t.is_empty())
+        .map(|t| Timestamp::parse_rfc3339(t).map_err(|_| ApiError::BadRequest(field)))
+        .transpose()
 }
 
 #[derive(Serialize)]
@@ -209,9 +252,12 @@ pub async fn list_operations(
             ));
         }
     };
-    if params.request_id.as_ref().is_some_and(|r| r.len() > 128) {
-        return Err(ApiError::BadRequest("request_id"));
-    }
+    let request_id = ident_param(params.request_id, "request_id")?;
+    let status = status_param(params.status.as_deref())?;
+    let name = ident_param(params.name, "name")?;
+    let release = ident_param(params.release, "release")?;
+    let from = time_param(params.from.as_deref(), "from")?;
+    let to = time_param(params.to.as_deref(), "to")?;
     let rows = app
         .store
         .list_operations(
@@ -219,8 +265,13 @@ pub async fn list_operations(
             &ListFilter {
                 limit,
                 before,
-                request_id: params.request_id,
+                request_id,
                 operation_id: None,
+                status,
+                name,
+                release,
+                from,
+                to,
             },
         )
         .await?;
@@ -312,6 +363,109 @@ pub async fn timeline(
         timeline.release.clone_from(&row.release);
     }
     Ok(Json(timeline))
+}
+
+#[derive(Deserialize)]
+pub struct CompareParams {
+    /// Comma-separated, at most four.
+    pub releases: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReleaseView {
+    pub release: String,
+    pub operations: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub uncertain: i64,
+    pub conflicting: i64,
+    pub no_finish_observed: i64,
+    pub missing_events: i64,
+    pub reported_dropped: i64,
+    pub failed_attempts: i64,
+    pub uncertain_attempts: i64,
+    /// Always an estimate, never a bill (invariant 7); `None` when currencies are mixed.
+    pub cost_estimate_micros: Option<i64>,
+    pub mixed_currencies: bool,
+}
+
+#[derive(Serialize)]
+pub struct Comparison {
+    pub from: Timestamp,
+    pub to: Timestamp,
+    /// Each requested release, in the order asked; one with no operations in the window is
+    /// listed with zeros, never dropped.
+    pub releases: Vec<ReleaseView>,
+}
+
+/// Longest window a comparison may span (it reads the summaries in it).
+const MAX_COMPARE_WINDOW_MICROS: i64 = 7 * 24 * 3_600 * 1_000_000;
+
+/// Releases side by side over one window, from the same summaries and statuses the list
+/// filters by (A2): a release whose operations lost events or never finished shows that
+/// in its own columns, never as success.
+pub async fn compare_releases(
+    State(app): State<SharedState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Query(params): Query<CompareParams>,
+) -> Result<Json<Comparison>, ApiError> {
+    let actor = authenticate(&app, &headers).await?;
+    let project = authorize(&app, &actor, "releases.compare", &slug, None).await?;
+    let mut releases: Vec<String> = Vec::new();
+    for r in params
+        .releases
+        .split(',')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        if r.len() > 128 {
+            return Err(ApiError::BadRequest("releases"));
+        }
+        if !releases.iter().any(|x| x == r) {
+            releases.push(r.to_owned());
+        }
+    }
+    if releases.is_empty() || releases.len() > 4 {
+        return Err(ApiError::BadRequest("releases (one to four)"));
+    }
+    let to = time_param(params.to.as_deref(), "to")?.unwrap_or_else(|| app.now());
+    let from = time_param(params.from.as_deref(), "from")?
+        .unwrap_or_else(|| to.plus_micros(-24 * 3_600 * 1_000_000));
+    let span = to.micros_since(from);
+    if span <= 0 || span > MAX_COMPARE_WINDOW_MICROS {
+        return Err(ApiError::BadRequest("from/to (a window of at most 7 days)"));
+    }
+    let counts = app
+        .store
+        .compare_releases(project.id, &releases, from, to)
+        .await?;
+    let releases = releases
+        .into_iter()
+        .map(|name| {
+            let c = counts.iter().find(|c| c.release == name);
+            let g = |f: fn(&aiops_store::ReleaseCounts) -> i64| c.map_or(0, f);
+            let mixed = c.is_some_and(|c| c.currencies > 1);
+            ReleaseView {
+                operations: g(|c| c.operations),
+                succeeded: g(|c| c.succeeded),
+                failed: g(|c| c.failed),
+                uncertain: g(|c| c.uncertain),
+                conflicting: g(|c| c.conflicting),
+                no_finish_observed: g(|c| c.no_finish_observed),
+                missing_events: g(|c| c.missing_events),
+                reported_dropped: g(|c| c.reported_dropped),
+                failed_attempts: g(|c| c.failed_attempts),
+                uncertain_attempts: g(|c| c.uncertain_attempts),
+                cost_estimate_micros: (!mixed).then(|| g(|c| c.cost_estimate_micros)),
+                mixed_currencies: mixed,
+                release: name,
+            }
+        })
+        .collect();
+    Ok(Json(Comparison { from, to, releases }))
 }
 
 /// Collector-wide counters span every project, so they need the `admin` scope (review

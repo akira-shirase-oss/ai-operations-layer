@@ -131,6 +131,31 @@ curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorizat
    "event_time": "$now", "outcome": "succeeded", "events_emitted": 1}
  ]}
 JSON
+# Two releases for the comparison journey: cmp-a with two succeeded operations; cmp-b with one
+# succeeded, one failed and one that never finished.
+python3 - "$now" > "$work/releases.json" <<'PY'
+import json, sys
+now = sys.argv[1]
+events, seq = [], 0
+for n, (release, outcome) in enumerate([("cmp-a", "succeeded"), ("cmp-a", "succeeded"), ("cmp-b", "succeeded"),
+                                        ("cmp-b", "failed"), ("cmp-b", None)], start=1):
+    op = "c0de%028x" % n
+    seq += 1
+    events.append({"event_id": "c0de%028x" % (n * 2), "type": "operation.started", "operation_id": op, "seq": seq,
+                   "op_seq": 1, "event_time": now, "name": "publish_article", "release": release,
+                   "request_id": "e2e-cmp-%d" % n})
+    if outcome:
+        seq += 1
+        fin = {"event_id": "c0de%028x" % (n * 2 + 1), "type": "operation.finished", "operation_id": op, "seq": seq,
+               "op_seq": 2, "event_time": now, "outcome": outcome, "events_emitted": 2}
+        if outcome == "failed":
+            fin["failure_class"] = "rejected"
+        events.append(fin)
+print(json.dumps({"schema_version": 1, "source": {"instance_id": "e2e000000000000000000000000000ee",
+                  "service": "e2e-releases", "sdk": "python"}, "events": events}))
+PY
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" \
+  -H 'content-type: application/json' --data-binary @"$work/releases.json"
 # A 5,000-event operation (the timeline's cap) in ten batches of 500: a bulk import of 2,499
 # effect-free tool calls, each started and finished, between the operation's start and finish.
 big_op="e2e000000000000000000000000b1600"

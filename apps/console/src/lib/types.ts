@@ -219,3 +219,22 @@ export type Authority =
 			read_at: string;
 			answer: { state: string; key: string; steps: number; finished_at_ms: number | null };
 	  };
+
+/** Releases side by side (GET …/releases/compare), from the list's own summaries. */
+export type ReleaseView = {
+	release: string;
+	operations: number;
+	succeeded: number;
+	failed: number;
+	uncertain: number;
+	conflicting: number;
+	no_finish_observed: number;
+	missing_events: number;
+	reported_dropped: number;
+	failed_attempts: number;
+	uncertain_attempts: number;
+	cost_estimate_micros: number | null;
+	mixed_currencies: boolean;
+};
+
+export type Comparison = { from: string; to: string; releases: ReleaseView[] };
