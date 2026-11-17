@@ -122,7 +122,11 @@ pub fn failure_of(
 /// takes anything but a 2xx as "no".
 pub fn probe_outcome(seen: &Seen) -> Finish {
     match seen {
-        Seen::Answered { status, .. } if (200..300).contains(status) => Finish::succeeded(),
+        Seen::Answered { status, .. } | Seen::ReplyOverLimit { status }
+            if (200..300).contains(status) =>
+        {
+            Finish::succeeded()
+        }
         Seen::Answered { status, .. } | Seen::ReplyOverLimit { status } => {
             Finish::failed(FailureClass::Rejected, "effect_not_found").message(&format!(
                 "the handler answered {status}: the call did not land; the runner retries it"

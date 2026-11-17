@@ -43,6 +43,13 @@ async fn main() -> anyhow::Result<()> {
         release: env("AIOPS_RELEASE"),
     };
     config.validate().map_err(anyhow::Error::msg)?;
+    if config.file.runner.max_in_flight.is_none() {
+        // Unchecked otherwise (review R3b): past max_calls_in_flight the adapter answers 503.
+        tracing::warn!(
+            max_calls_in_flight = config.file.max_calls_in_flight,
+            "runner.max_in_flight is not stated; set it to the runner's --max-in-flight so this is checked"
+        );
+    }
     let sdk = match (&config.endpoint, &config.ingest_key) {
         (Some(endpoint), Some(key)) => {
             let mut c = aiops_sdk::Config::new(endpoint, key, "durable-runner-adapter");

@@ -311,3 +311,43 @@ async fn a_connect_timeout_reaches_the_runner_as_lost_not_failed() {
     };
     assert!(lost, "the runner must reconcile this call, not fail it");
 }
+
+/// Review R3(a): the runner reads only a probe's status. A handler that answers its probe
+/// 200 with a body past the adapter's reply limit has found the call: the runner must see
+/// 200 ("landed", so it does not retry the effect), not 502 ("not found").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probe_answered_200_with_an_oversized_body_reaches_the_runner_as_found() {
+    let big = "x".repeat(300 * 1024);
+    let handler = Router::new().route(
+        "/step",
+        get(move || {
+            let big = big.clone();
+            async move { (StatusCode::OK, big) }
+        }),
+    );
+    let (_, runner) = handler_and_runner(Duration::ZERO, 200, "done").await;
+    let upstream = serve(handler).await;
+    let (col, batches) = collector().await;
+    let (_a, url) = adapter(&upstream, &runner, &col).await;
+    let r = reqwest::Client::new()
+        .get(format!("{url}/h/publish?idem_key=article%2Fr-5%2F0"))
+        .header("x-durable-run-id", "5")
+        .header("x-durable-step", "0")
+        .header("x-durable-attempt", "1")
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "the probe's own status reaches the runner");
+    eventually(
+        || {
+            events(&batches).iter().any(|e| {
+                e["type"] == "step.finished"
+                    && e["name"] == "publish.reconcile"
+                    && e["outcome"] == "succeeded"
+            })
+        },
+        "the reconcile probe reported as having found the call",
+    )
+    .await;
+}

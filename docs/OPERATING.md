@@ -70,6 +70,20 @@ Mint one ingest key per host (`aiops-server admin create-ingest-key --project pi
      `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`, so the console shows the runner's own
      answer beside each run. Restart the collector.
 
+  **Limits that must match the runner** (review R3; the first two are checked at
+  start when stated in `adapter.json`):
+
+  - `runner.max_in_flight`: the runner's `--max-in-flight` (default 32). The adapter's
+    `max_calls_in_flight` (default 256) must be at least that, or past it the adapter
+    answers 503 and the runner fails an attempt it would have made. Not stated, the
+    adapter starts and warns.
+  - `runner.max_output_bytes`: the runner's output limit. It must not exceed the
+    adapter's reply limit (256 KiB), or a reply the runner would accept is answered
+    502. A reconcile probe's status is forwarded whatever its body's size.
+  - Every handler the runner calls must be a route in `adapter.json`: a call to a
+    missing route is answered 404, which the runner treats as the handler's answer.
+    The adapter cannot list the runner's handlers, so this is not checked at start.
+
   `GET http://<adapter>/stats` counts calls and runs. `calls_unidentified` means an
   older runner without the call headers; `runs_untracked_capacity` means the
   tracking bound was reached.

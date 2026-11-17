@@ -476,9 +476,14 @@ async fn handle_probe(
     if let Some(c) = id.filter(|_| op.is_some()) {
         a.leave(c, None);
     }
-    match reply {
-        Some((status, _, _)) => status.into_response(),
-        None => StatusCode::BAD_GATEWAY.into_response(),
+    // The runner reads only a probe's status, so the handler's status is forwarded even
+    // when its body is past the reply limit (review R3a): 200 means "landed".
+    match (reply, &seen) {
+        (Some((status, _, _)), _) => status.into_response(),
+        (None, Seen::ReplyOverLimit { status }) => StatusCode::from_u16(*status)
+            .unwrap_or(StatusCode::BAD_GATEWAY)
+            .into_response(),
+        (None, _) => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
 

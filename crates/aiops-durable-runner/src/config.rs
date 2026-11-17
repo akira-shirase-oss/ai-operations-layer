@@ -19,6 +19,16 @@ pub struct Runner {
     /// The runner's `--step-timeout-ms`. A call that outlives it was given up by the
     /// runner: its outcome is unknown to the run even if the handler answered later.
     pub step_timeout_ms: u64,
+    /// The runner's `--max-in-flight` (its default is 32). When stated, the adapter refuses
+    /// to start with fewer call slots: past them it answers 503, which fails an attempt the
+    /// runner would have made (review R3b).
+    #[serde(default)]
+    pub max_in_flight: Option<usize>,
+    /// The runner's output limit in bytes (its `max_output_bytes`). When stated, it must
+    /// not exceed the adapter's reply limit (256 KiB), or a reply the runner would accept
+    /// is answered 502 (review R3d).
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
 }
 
 /// One allowlisted handler the runner calls through the adapter (`POST /h/{route}`).
@@ -169,6 +179,21 @@ impl Config {
         if self.read_key.len() < 32 {
             errors.push("DURABLE_READ_KEY (at least 32 characters) is required: the adapter declares a run's outcome only from the runner's own answer".to_owned());
         }
+        if let Some(n) = f.runner.max_in_flight
+            && n > f.max_calls_in_flight
+        {
+            errors.push(format!(
+                "max_calls_in_flight ({}) is below the runner's max_in_flight ({n}): the adapter would refuse calls the runner makes",
+                f.max_calls_in_flight
+            ));
+        }
+        if let Some(n) = f.runner.max_output_bytes
+            && n > MAX_REPLY_BYTES
+        {
+            errors.push(format!(
+                "runner.max_output_bytes ({n}) is above the adapter's reply limit ({MAX_REPLY_BYTES}): a reply the runner accepts would be answered 502"
+            ));
+        }
         if f.max_runs_tracked == 0 || f.max_calls_in_flight == 0 || f.poll_interval_ms == 0 {
             errors.push(
                 "max_runs_tracked, max_calls_in_flight and poll_interval_ms must be positive"
@@ -196,5 +221,69 @@ impl Config {
 
     pub fn route(&self, name: &str) -> Option<&Route> {
         self.file.routes.iter().find(|r| r.route == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(runner: &serde_json::Value, calls: usize) -> Config {
+        let file: File = serde_json::from_value(serde_json::json!({
+            "listen": "127.0.0.1:0",
+            "runner": runner,
+            "workflow": "w",
+            "routes": [{"route": "publish", "kind": "tool", "upstream": "http://127.0.0.1:1/p"}],
+            "max_calls_in_flight": calls
+        }))
+        .unwrap_or_else(|e| panic!("{e}"));
+        Config {
+            file,
+            read_key: "r".repeat(32),
+            endpoint: None,
+            ingest_key: None,
+            release: None,
+        }
+    }
+
+    // Review R3(b, d): the runner's limits, when stated, are checked against the adapter's.
+    #[test]
+    fn the_runners_stated_limits_must_fit_the_adapters() {
+        let runner = |extra: serde_json::Value| {
+            let mut r = serde_json::json!({"label": "dr", "url": "http://127.0.0.1:2", "step_timeout_ms": 1000});
+            if let (Some(r), Some(e)) = (r.as_object_mut(), extra.as_object()) {
+                r.extend(e.clone());
+            }
+            r
+        };
+        assert!(
+            config(&runner(serde_json::json!({})), 256)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            config(&runner(serde_json::json!({"max_in_flight": 32})), 256)
+                .validate()
+                .is_ok()
+        );
+        let err = config(&runner(serde_json::json!({"max_in_flight": 64})), 32)
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("below the runner's max_in_flight"), "{err}");
+        let err = config(
+            &runner(serde_json::json!({"max_output_bytes": MAX_REPLY_BYTES + 1})),
+            256,
+        )
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("above the adapter's reply limit"), "{err}");
+        assert!(
+            config(
+                &runner(serde_json::json!({"max_output_bytes": MAX_REPLY_BYTES})),
+                256
+            )
+            .validate()
+            .is_ok()
+        );
     }
 }
