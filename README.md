@@ -12,8 +12,10 @@
 > investigation console (on the workspace design system, checked in
 > Chromium), and the in-repo reference host with the contract failure cases
 > as end-to-end tests. Load evidence so far is two short smokes on a heavily
-> loaded laptop (no loss; ingest latency target missed); the 1,000,000-event
-> run is owed. Evidence per milestone: `docs/ROADMAP.md`. Development
+> loaded laptop (no loss; ingest latency target missed), and one
+> 1,000,000-event run on 2026-11-17 that missed its thresholds on a machine
+> that became busy mid-run (36,580 events shed and counted, p95 152 ms;
+> `perf/results/2026-11-17-ingest-million.md`). A quiet-machine 1M run is owed. Evidence per milestone: `docs/ROADMAP.md`. Development
 > software, no production claim. Contract:
 > `../../docs/Project_Guides/08_AI_Operations_Layer.docx` (extract with
 > `textutil -convert txt -stdout`).
