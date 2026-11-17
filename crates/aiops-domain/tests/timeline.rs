@@ -150,7 +150,14 @@ fn full_journey(b: &mut B) -> Vec<StoredEvent> {
 #[test]
 fn a_complete_operation_reassembles_with_retries_cost_and_no_loss() {
     let mut b = B::new();
-    let t = assemble(op(), full_journey(&mut b), &[], &Limits::default(), false);
+    let t = assemble(
+        op(),
+        full_journey(&mut b),
+        &[],
+        &Limits::default(),
+        false,
+        None,
+    );
     assert_eq!(t.status.state, "succeeded");
     assert!(t.status.declared);
     assert_eq!(t.name.as_deref(), Some("publish_article"));
@@ -174,10 +181,10 @@ fn a_complete_operation_reassembles_with_retries_cost_and_no_loss() {
 fn input_order_does_not_change_the_timeline() {
     let mut b = B::new();
     let events = full_journey(&mut b);
-    let sorted = assemble(op(), events.clone(), &[], &Limits::default(), false);
+    let sorted = assemble(op(), events.clone(), &[], &Limits::default(), false, None);
     let mut reversed = events;
     reversed.reverse();
-    let shuffled = assemble(op(), reversed, &[], &Limits::default(), false);
+    let shuffled = assemble(op(), reversed, &[], &Limits::default(), false, None);
     assert_eq!(sorted, shuffled);
 }
 
@@ -186,7 +193,7 @@ fn a_missing_finish_is_no_finish_observed_with_an_unknown_tail_never_did_not_run
     let mut b = B::new();
     let mut events = full_journey(&mut b);
     events.truncate(8); // lost: publish's finish and the operation's finish
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert_eq!(t.status.state, "no_finish_observed");
     assert!(!t.status.declared);
     let publish = &t.steps[2];
@@ -216,7 +223,7 @@ fn op_seq_holes_are_counted_exactly_and_sdk_reports_shown_beside_them() {
             last_dropped_at: Timestamp::from_unix_micros(T0 + 402_000),
         }),
     ));
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert_eq!(t.status.state, "succeeded");
     assert_eq!(t.coverage.missing_known, 3);
     assert_eq!(t.coverage.reported_dropped, 3);
@@ -252,7 +259,7 @@ fn an_operation_known_only_from_gap_reports_is_shown_as_unknown_not_absent() {
             last_dropped_at: Timestamp::from_unix_micros(T0 + 800_000),
         }),
     );
-    let t = assemble(op(), vec![gap], &[], &Limits::default(), false);
+    let t = assemble(op(), vec![gap], &[], &Limits::default(), false, None);
     assert_eq!(t.status.state, "no_finish_observed");
     assert!(t.flags.start_not_observed);
     assert_eq!(t.coverage.reported_dropped, 7);
@@ -282,7 +289,7 @@ fn an_uncertain_publish_stays_uncertain() {
             finished(Outcome::Uncertain(UncertainReason::TimeoutAfterSend), 4),
         ),
     ];
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert_eq!(t.status.state, "uncertain");
     assert_eq!(t.status.reason, Some("timeout_after_send"));
     assert_eq!(t.steps[0].attempts[0].state, "uncertain");
@@ -298,7 +305,7 @@ fn both_clocks_are_kept_and_late_or_skewed_events_are_flagged() {
     events[4].received_at = events[4].event.event_time.plus_micros(30_000_000);
     // A host clock 5 s ahead of the collector.
     events[8].received_at = events[8].event.event_time.plus_micros(-5_000_000);
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert_eq!(t.flags.late_events, 1);
     assert!(t.flags.clock_skew_suspected);
     let late = t
@@ -321,7 +328,7 @@ fn a_host_clock_that_jumps_back_is_flagged_not_reordered_silently() {
     let mut events = full_journey(&mut b);
     // The 7th emitted event carries an event time before the 6th.
     events[6].event.event_time = events[5].event.event_time.plus_micros(-50_000);
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert!(t.flags.clock_skew_suspected);
     assert!(
         t.entries
@@ -351,7 +358,7 @@ fn a_finish_whose_start_was_lost_is_legible_and_marked() {
             }),
         ),
     ];
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     let a = &t.steps[0].attempts[0];
     assert!(!a.start_observed);
     assert!(a.finish_observed);
@@ -367,7 +374,7 @@ fn conflicting_finish_events_are_flagged() {
         b.ev(10, 5, finished(Outcome::Succeeded, 3)),
         b.ev(11, 5, finished(Outcome::Failed(FailureClass::Internal), 3)),
     ];
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert!(t.flags.conflicting_finish);
     assert_eq!(
         t.status.state, "conflicting",
@@ -388,7 +395,7 @@ fn e2_a_downstream_success_never_hides_an_upstream_uncertain_outcome_in_either_o
             down.ev(1, 5, started()),
             down.ev(t_down, 5, finished(Outcome::Succeeded, 2)),
         ];
-        let t = assemble(op(), events, &[], &Limits::default(), false);
+        let t = assemble(op(), events, &[], &Limits::default(), false, None);
         assert_eq!(
             t.status.state, "conflicting",
             "downstream first: {downstream_first}"
@@ -424,7 +431,7 @@ fn e3_a_lost_publish_start_still_warns_that_the_effect_may_have_happened() {
         b.ev(10, 5, publish_finish(1, LOST)),
         b.ev(11, 5, finished(Outcome::Failed(FailureClass::Internal), 3)),
     ];
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert_eq!(t.status.state, "failed");
     assert!(
         t.flags.external_effect_unknown,
@@ -445,7 +452,7 @@ fn e4_an_uncertain_first_attempt_with_a_lost_start_warns_even_when_a_retry_succe
         b.ev(30, 5, publish_finish(2, Outcome::Succeeded)),
         b.ev(31, 5, finished(Outcome::Succeeded, 5)),
     ];
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert_eq!(t.status.state, "succeeded");
     assert!(t.steps[0].external_effect);
     assert!(
@@ -465,7 +472,7 @@ fn e4b_the_same_stream_with_attempt_one_started_gives_the_same_answer() {
         b.ev(30, 5, publish_finish(2, Outcome::Succeeded)),
         b.ev(31, 5, finished(Outcome::Succeeded, 6)),
     ];
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert!(t.flags.external_effect_unknown);
 }
 
@@ -492,7 +499,7 @@ fn an_uncertain_attempt_of_a_step_declared_effect_free_does_not_raise_the_effect
         ),
         b.ev(11, 5, finished(Outcome::Failed(FailureClass::Internal), 4)),
     ];
-    let t = assemble(op(), events, &[], &Limits::default(), false);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
     assert_eq!(t.flags.uncertain_attempts, 1);
     assert!(!t.flags.external_effect_unknown, "declared effect-free");
     assert_eq!(t.effect_unknown_steps, vec![]);

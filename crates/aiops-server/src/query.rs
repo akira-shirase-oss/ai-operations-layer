@@ -2,7 +2,7 @@
 //! page and timeline sizes. A valid token asking outside its scope is denied with 403 and
 //! audited synchronously; if the audit row cannot be written the request fails closed.
 
-use aiops_domain::timeline::{Status, Timeline, assemble, list_state};
+use aiops_domain::timeline::{RetentionContext, Status, Timeline, assemble, list_state};
 use aiops_domain::{FailureClass, OperationId, Outcome, Timestamp, UncertainReason};
 use aiops_store::{AuditEntry, ListFilter, OperationRow, Project, Token};
 use axum::Json;
@@ -161,6 +161,9 @@ pub struct OperationSummary {
     pub uncertain_attempts: i32,
     pub cost_estimate_micros: i64,
     pub cost_currency: Option<String>,
+    /// Some raw events were received before the retention cutoff and may be deleted; the
+    /// summary still stands.
+    pub detail_expired: bool,
 }
 
 #[derive(Serialize)]
@@ -212,9 +215,11 @@ pub async fn list_operations(
                 limit,
                 before,
                 request_id: params.request_id,
+                operation_id: None,
             },
         )
         .await?;
+    let cutoff = app.store.retention_watermark().await?;
     let next = (rows.len() == usize::try_from(limit).unwrap_or(0))
         .then(|| {
             rows.last()
@@ -240,6 +245,7 @@ pub async fn list_operations(
             uncertain_attempts: r.uncertain_attempts,
             cost_estimate_micros: r.cost_estimate_micros,
             cost_currency: r.cost_currency.clone(),
+            detail_expired: cutoff.is_some_and(|c| r.first_received_at < c),
         })
         .collect();
     Ok(Json(OperationList { operations, next }))
@@ -258,14 +264,45 @@ pub async fn timeline(
         .store
         .operation_events(project.id, op, app.config.timeline_max_events)
         .await?;
-    if events.is_empty() {
+    // The summary outlives the raw events (D-016): with the retention cutoff it tells an
+    // expired operation from one that never sent anything (review finding 10).
+    let summary = app.store.operation_summary(project.id, op).await?;
+    let cutoff = app.store.retention_watermark().await?;
+    let retention = match (&summary, cutoff) {
+        (Some(row), Some(cutoff)) => Some(RetentionContext {
+            cutoff,
+            first_received_at: row.first_received_at,
+            finish: row_outcome(row),
+            finish_conflict: row.finish_conflict,
+            events_received: u32::try_from(row.host_events).unwrap_or(0),
+        }),
+        _ => None,
+    };
+    let expired = retention
+        .as_ref()
+        .is_some_and(|r| r.first_received_at < r.cutoff);
+    if events.is_empty() && !expired {
         return Err(ApiError::NotFound);
     }
     let mut instances: Vec<_> = events.iter().map(|e| e.instance_id).collect();
     instances.sort_unstable();
     instances.dedup();
     let stats = app.store.instances(project.id, &instances).await?;
-    Ok(Json(assemble(op, events, &stats, &app.limits, truncated)))
+    let mut timeline = assemble(
+        op,
+        events,
+        &stats,
+        &app.limits,
+        truncated,
+        retention.as_ref(),
+    );
+    if let Some(row) = summary.as_ref().filter(|_| timeline.name.is_none()) {
+        // The start may have expired; the summary kept the name and request.
+        timeline.name.clone_from(&row.name);
+        timeline.request_id.clone_from(&row.request_id);
+        timeline.release.clone_from(&row.release);
+    }
+    Ok(Json(timeline))
 }
 
 pub async fn stats(

@@ -37,6 +37,7 @@ export type Coverage = {
 	reported_dropped: number;
 	missing_known: number;
 	missing_unknown: boolean;
+	expired: number;
 	per_instance: InstanceCoverage[];
 };
 
@@ -108,7 +109,7 @@ export type StepView = {
 };
 
 export type GapView = {
-	kind: 'sdk_reported' | 'op_seq_hole' | 'unknown_tail';
+	kind: 'sdk_reported' | 'op_seq_hole' | 'unknown_tail' | 'expired';
 	instance_id: string;
 	count: number | null;
 	reason?: string;
@@ -156,6 +157,8 @@ export type Timeline = {
 	gaps: GapView[];
 	sources: SourceView[];
 	effect_unknown_steps: EffectCause[];
+	expired_by_retention: boolean;
+	retention_cutoff: string | null;
 	events_truncated: boolean;
 };
 
@@ -176,6 +179,7 @@ export type OperationSummary = {
 	uncertain_attempts: number;
 	cost_estimate_micros: number;
 	cost_currency: string | null;
+	detail_expired: boolean;
 };
 
 export type OperationList = {

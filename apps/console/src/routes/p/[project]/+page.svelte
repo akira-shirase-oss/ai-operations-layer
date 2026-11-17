@@ -71,6 +71,7 @@
 							{#if op.events_missing}<span class="flag">{op.events_missing} missing</span>{/if}
 							{#if op.events_emitted === null}<span class="flag">total unknown</span>{/if}
 							{#if op.reported_dropped > 0}<span class="flag">{op.reported_dropped} dropped by SDK</span>{/if}
+							{#if op.detail_expired}<span class="flag">detail expired</span>{/if}
 						</td>
 						<td>
 							{#if op.failed_attempts}<span class="flag">{op.failed_attempts} failed</span>{/if}

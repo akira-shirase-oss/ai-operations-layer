@@ -19,7 +19,8 @@
 	const GAP_TEXT: Record<string, string> = {
 		sdk_reported: 'The SDK reported dropping events',
 		op_seq_hole: 'Events missing (proven by sequence numbers)',
-		unknown_tail: 'Events after this point may be missing (no finish observed)'
+		unknown_tail: 'Events after this point may be missing (no finish observed)',
+		expired: 'Deleted by retention (received before the cutoff)'
 	};
 </script>
 
@@ -63,7 +64,14 @@
 			event is not proof that the work did not run.
 		</div>
 	{/if}
-	{#if t.flags.start_not_observed}
+	{#if t.expired_by_retention}
+		<div class="notice unknown">
+			<strong>Some of this operation's detail has expired.</strong> Raw events are kept 14 days; those
+			received before {time(t.retention_cutoff)} were deleted ({t.coverage.expired} of this operation's
+			events). The outcome and counts that remain come from its summary.
+		</div>
+	{/if}
+	{#if t.flags.start_not_observed && !t.expired_by_retention}
 		<div class="notice unknown">The start of this operation was not received; it is known only from later events.</div>
 	{/if}
 	{#if t.flags.conflicting_finish}
@@ -94,6 +102,10 @@
 					{#if t.coverage.missing_known > 0}{t.coverage.missing_known} proven missing{/if}
 					{#if t.coverage.missing_unknown}{t.coverage.missing_known > 0 ? ' + ' : ''}an unknown number{/if}
 				</dd>
+				{#if t.coverage.expired > 0}
+					<dt>Expired (retention)</dt>
+					<dd>{t.coverage.expired}</dd>
+				{/if}
 				<dt>Dropped by the SDK (reported)</dt>
 				<dd>{t.coverage.reported_dropped}</dd>
 			</dl>

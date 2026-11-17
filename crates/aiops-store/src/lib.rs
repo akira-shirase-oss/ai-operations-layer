@@ -238,6 +238,7 @@ pub struct OperationRow {
     pub release: Option<String>,
     pub first_event_time: Timestamp,
     pub last_event_time: Timestamp,
+    pub first_received_at: Timestamp,
     pub last_received_at: Timestamp,
     pub host_events: i32,
     pub gap_reports: i32,
@@ -259,6 +260,8 @@ pub struct ListFilter {
     /// Keyset cursor: operations that started strictly before this point.
     pub before: Option<(Timestamp, OperationId)>,
     pub request_id: Option<String>,
+    /// Only this operation.
+    pub operation_id: Option<OperationId>,
 }
 
 #[derive(Debug, Clone)]
@@ -573,11 +576,13 @@ impl Store {
         let rows = sqlx::query(
             "SELECT operation_id, name, request_id, release, first_event_time, last_event_time, last_received_at,
                     host_events, gap_reports, reported_dropped, finish_outcome, finish_detail, events_emitted,
-                    failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency, finish_conflict
+                    failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency, finish_conflict,
+                    first_received_at
              FROM operations
              WHERE project_id = $1
                AND ($2::timestamptz IS NULL OR (first_event_time, operation_id) < ($2, $3::uuid))
                AND ($4::text IS NULL OR request_id = $4)
+               AND ($6::uuid IS NULL OR operation_id = $6)
              ORDER BY first_event_time DESC, operation_id DESC
              LIMIT $5",
         )
@@ -586,6 +591,7 @@ impl Store {
         .bind(before_id)
         .bind(filter.request_id.as_deref())
         .bind(filter.limit)
+        .bind(filter.operation_id.map(|o| uuid128(o.as_bytes())))
         .fetch_all(&self.query)
         .await?;
         rows.into_iter()
@@ -611,6 +617,7 @@ impl Store {
                     cost_estimate_micros: r.get(15),
                     cost_currency: r.get(16),
                     finish_conflict: r.get(17),
+                    first_received_at: from_odt(r.get(18)),
                 })
             })
             .collect()
@@ -718,6 +725,35 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// One operation's summary (it outlives the raw events, D-016).
+    pub async fn operation_summary(
+        &self,
+        project_id: Uuid,
+        operation_id: OperationId,
+    ) -> Result<Option<OperationRow>, StoreError> {
+        let mut rows = self
+            .list_operations(
+                project_id,
+                &ListFilter {
+                    limit: 1,
+                    operation_id: Some(operation_id),
+                    ..ListFilter::default()
+                },
+            )
+            .await?;
+        Ok(rows.pop())
+    }
+
+    /// Raw events received before this may have been deleted by retention (`None`: the
+    /// sweep never ran).
+    pub async fn retention_watermark(&self) -> Result<Option<Timestamp>, StoreError> {
+        let t: Option<OffsetDateTime> =
+            sqlx::query_scalar("SELECT events_swept_before FROM retention_state WHERE id = 1")
+                .fetch_optional(&self.query)
+                .await?;
+        Ok(t.map(from_odt))
     }
 
     // ---- control (audit) --------------------------------------------------------------
@@ -904,6 +940,16 @@ impl Store {
                 retention.audit,
             ),
         ];
+        // Record the cutoff before deleting anything, so a timeline never calls a deleted
+        // event "never received" (review finding 10). It only moves forward.
+        sqlx::query(
+            "INSERT INTO retention_state (id, events_swept_before) VALUES (1, $1)
+             ON CONFLICT (id) DO UPDATE
+             SET events_swept_before = GREATEST(retention_state.events_swept_before, EXCLUDED.events_swept_before)",
+        )
+        .bind(cutoff(retention.raw_events))
+        .execute(&self.maintenance)
+        .await?;
         let mut counts = [0u64; 4];
         for (i, (sql, keep)) in tables.into_iter().enumerate() {
             let mut rounds = 0;

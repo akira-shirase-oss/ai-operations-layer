@@ -148,6 +148,8 @@ pub struct Coverage {
     pub missing_known: u32,
     /// Some loss cannot be sized (an instance never reported a finish).
     pub missing_unknown: bool,
+    /// Events deleted by retention (exact, from the surviving summary).
+    pub expired: u32,
     pub per_instance: Vec<InstanceCoverage>,
 }
 
@@ -290,6 +292,20 @@ pub struct SourceView {
     pub reported_gap_overflow: u64,
 }
 
+/// What survives retention for an operation (its summary), and the retention cutoff: raw
+/// events received before `cutoff` may have been deleted (review finding 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionContext {
+    pub cutoff: Timestamp,
+    /// When the operation's first event was received (from the summary).
+    pub first_received_at: Timestamp,
+    /// The declared finish the summary kept, and whether finishes conflicted.
+    pub finish: Option<Outcome>,
+    pub finish_conflict: bool,
+    /// Host events ever stored for the operation (from the summary).
+    pub events_received: u32,
+}
+
 /// Why the timeline says an external effect may have happened (one per attempt).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EffectCause {
@@ -321,6 +337,11 @@ pub struct Timeline {
     pub sources: Vec<SourceView>,
     /// Attempts whose effect outside the host is unknown (the console's warning).
     pub effect_unknown_steps: Vec<EffectCause>,
+    /// Some or all of this operation's raw events were deleted by retention; what is shown
+    /// comes from what remains and from the summary.
+    pub expired_by_retention: bool,
+    /// Raw events received before this may have been deleted.
+    pub retention_cutoff: Option<Timestamp>,
     /// The store returned only the first part of a very large operation.
     pub events_truncated: bool,
 }
@@ -617,6 +638,7 @@ pub fn assemble(
     instances: &[InstanceStats],
     limits: &Limits,
     events_truncated: bool,
+    retention: Option<&RetentionContext>,
 ) -> Timeline {
     events.sort_by(|a, b| {
         (a.event.event_time, a.instance_id, a.event.seq).cmp(&(
@@ -645,6 +667,19 @@ pub fn assemble(
         }
         None => Status::no_finish_observed(),
     };
+    let expired = retention.filter(|r| r.first_received_at < r.cutoff);
+    let status = match expired {
+        // The finish may itself have expired: the summary kept the declaration.
+        Some(r) if status.state == "no_finish_observed" => match r.finish {
+            Some(_) if r.finish_conflict => Status::conflicting(),
+            Some(outcome) => Status::from_outcome(outcome),
+            None => status,
+        },
+        _ => status,
+    };
+    if let Some(r) = expired {
+        apply_expiry(&mut c, r);
+    }
     let mut cost = CostView {
         label: "estimate",
         ..CostView::default()
@@ -671,7 +706,54 @@ pub fn assemble(
         gaps: c.gaps,
         sources,
         effect_unknown_steps,
+        expired_by_retention: expired.is_some(),
+        retention_cutoff: retention.map(|r| r.cutoff),
         events_truncated,
+    }
+}
+
+/// Raw events of this operation were deleted by retention: the holes they leave are
+/// expired, not proven loss. The expired count is exact (the summary counted every stored
+/// event); holes beyond it are still missing, though which numbers they are is unknown.
+fn apply_expiry(c: &mut Collected<'_>, r: &RetentionContext) {
+    let expired = r.events_received.saturating_sub(c.coverage.events_received);
+    let holes: u64 = c
+        .gaps
+        .iter()
+        .filter(|g| g.kind == "op_seq_hole")
+        .filter_map(|g| g.count)
+        .sum();
+    c.gaps.retain(|g| g.kind != "op_seq_hole");
+    let still_missing = holes.saturating_sub(u64::from(expired));
+    if still_missing > 0 {
+        c.gaps.push(GapView {
+            kind: "op_seq_hole",
+            instance_id: String::new(),
+            count: Some(still_missing),
+            reason: None,
+            from: None,
+            to: None,
+            op_seq_from: None,
+            op_seq_to: None,
+        });
+    }
+    if expired > 0 {
+        c.gaps.push(GapView {
+            kind: "expired",
+            instance_id: String::new(),
+            count: Some(u64::from(expired)),
+            reason: None,
+            from: None,
+            to: Some(r.cutoff),
+            op_seq_from: None,
+            op_seq_to: None,
+        });
+    }
+    c.coverage.missing_known = u32::try_from(still_missing).unwrap_or(u32::MAX);
+    c.coverage.expired = expired;
+    for i in &mut c.coverage.per_instance {
+        i.missing_known = 0;
+        i.missing_op_seq.clear();
     }
 }
 
