@@ -584,7 +584,7 @@ fn build_entries(
             _ => None,
         })
         .collect();
-    let mut last_seq: HashMap<InstanceId, u64> = HashMap::new();
+    let mut last_time: HashMap<InstanceId, Timestamp> = HashMap::new();
     let mut entries = Vec::with_capacity(events.len());
     for stored in events {
         let e = &stored.event;
@@ -598,8 +598,10 @@ fn build_entries(
             entry_flags.push("clock_ahead");
             flags.clock_skew_suspected = true;
         }
-        let prev = last_seq.insert(stored.instance_id, e.seq);
-        if prev.is_some_and(|p| p > e.seq) {
+        // In emission order, a time earlier than the previous event's is the clock going
+        // back, flagged on the event that carries the earlier time (review finding 14).
+        let prev = last_time.insert(stored.instance_id, e.event_time);
+        if prev.is_some_and(|p| p > e.event_time) {
             entry_flags.push("clock_went_backwards");
             flags.clock_skew_suspected = true;
         }
@@ -642,19 +644,13 @@ fn source_views(instances: &[InstanceStats], events: &[StoredEvent]) -> Vec<Sour
 /// operation, in any order; duplicates were merged on the way in.
 pub fn assemble(
     operation_id: OperationId,
-    mut events: Vec<StoredEvent>,
+    events: Vec<StoredEvent>,
     instances: &[InstanceStats],
     limits: &Limits,
     events_truncated: bool,
     retention: Option<&RetentionContext>,
 ) -> Timeline {
-    events.sort_by(|a, b| {
-        (a.event.event_time, a.instance_id, a.event.seq).cmp(&(
-            b.event.event_time,
-            b.instance_id,
-            b.event.seq,
-        ))
-    });
+    let events = emission_order(events);
     let mut c = collect(&events);
     measure_loss(&mut c);
 
@@ -763,6 +759,32 @@ fn apply_expiry(c: &mut Collected<'_>, r: &RetentionContext) {
         i.missing_known = 0;
         i.missing_op_seq.clear();
     }
+}
+
+/// Each source instance's events in `seq` order (its emission order, D-019), merged across
+/// instances by event time; a tie keeps the instance order, so the result is deterministic.
+fn emission_order(mut events: Vec<StoredEvent>) -> Vec<StoredEvent> {
+    events.sort_by_key(|e| (e.instance_id, e.event.seq));
+    let mut queues: Vec<std::collections::VecDeque<StoredEvent>> = Vec::new();
+    for e in events {
+        match queues.last_mut() {
+            Some(q) if q.back().is_some_and(|b| b.instance_id == e.instance_id) => q.push_back(e),
+            _ => queues.push(std::collections::VecDeque::from([e])),
+        }
+    }
+    let mut out = Vec::with_capacity(queues.iter().map(std::collections::VecDeque::len).sum());
+    loop {
+        let next = queues
+            .iter()
+            .enumerate()
+            .filter_map(|(i, q)| q.front().map(|e| (e.event.event_time, i)))
+            .min();
+        let Some((_, i)) = next else { break };
+        if let Some(e) = queues[i].pop_front() {
+            out.push(e);
+        }
+    }
+    out
 }
 
 fn hole(instance: InstanceId, from: u32, to: u32) -> GapView {

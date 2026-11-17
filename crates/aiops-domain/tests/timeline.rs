@@ -504,3 +504,26 @@ fn an_uncertain_attempt_of_a_step_declared_effect_free_does_not_raise_the_effect
     assert!(!t.flags.external_effect_unknown, "declared effect-free");
     assert_eq!(t.effect_unknown_steps, vec![]);
 }
+
+// Review finding 14: within one source, emission order (seq) is the truth; the clock that
+// stepped back is flagged on the event that carries the earlier time.
+#[test]
+fn e6_within_one_source_entries_follow_seq_and_the_backwards_step_is_flagged_where_it_happened() {
+    let mut b = B::new();
+    let mut events = vec![
+        b.ev(0, 5, started()),
+        b.ev(10, 5, step_start(1, StepKind::Model, "generate", 1, false)),
+        b.ev(20, 5, step_finish(1, 1, Outcome::Succeeded, None)),
+    ];
+    // seq 3's clock stepped back 5 s.
+    events[2].event.event_time = events[0].event.event_time.plus_micros(-5_000_000);
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
+    let seqs: Vec<u64> = t.entries.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![1, 2, 3], "one source: emission order");
+    assert!(
+        t.entries[2].flags.contains(&"clock_went_backwards"),
+        "{:?}",
+        t.entries[2].flags
+    );
+    assert!(t.entries[0].flags.is_empty(), "{:?}", t.entries[0].flags);
+}
