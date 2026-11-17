@@ -16,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 async fn server(limits: ServeLimits) -> (String, CancellationToken) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let app = Router::new().route("/", get(|| async { "ok" }));
+    // `/big`: a 1 MiB response, larger than the socket buffers between server and client.
+    let app = Router::new()
+        .route("/", get(|| async { "ok" }))
+        .route("/big", get(|| async { "x".repeat(1024 * 1024) }));
     let token = CancellationToken::new();
     let t = token.clone();
     tokio::spawn(async move { run(listener, app, limits, t).await });
@@ -153,5 +156,113 @@ async fn a_connection_that_sends_nothing_is_closed() {
     assert!(
         closed.is_some_and(|t| t < 4.0),
         "silent connection still open: {closed:?}"
+    );
+}
+
+/// A connection with a small receive buffer, so a server writing to it stalls quickly.
+async fn small_window(addr: &str) -> TcpStream {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4096).unwrap();
+    socket.connect(addr.parse().unwrap()).await.unwrap()
+}
+
+async fn answered_within(addr: &str, limit: Duration) -> Option<f64> {
+    let started = Instant::now();
+    let attempt = async {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.unwrap();
+        buf.starts_with(b"HTTP/1.1 200")
+    };
+    match tokio::time::timeout(limit, attempt).await {
+        Ok(true) => Some(started.elapsed().as_secs_f64()),
+        _ => None,
+    }
+}
+
+// Review N3: a client that never reads its responses is cut after the write-stall deadline
+// and frees its slot; before, it held the slot indefinitely and new clients waited.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_never_reads_is_cut_and_frees_its_slot() {
+    let (addr, _token) = server(ServeLimits {
+        max_connections: 1,
+        write_stall_timeout: Duration::from_secs(1),
+        ..ServeLimits::default()
+    })
+    .await;
+    let mut stalled = small_window(&addr).await;
+    let mut pipelined = Vec::new();
+    for _ in 0..20 {
+        pipelined.extend_from_slice(b"GET /big HTTP/1.1\r\nhost: x\r\n\r\n");
+    }
+    stalled.write_all(&pipelined).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let waited = answered_within(&addr, Duration::from_secs(6)).await;
+    assert!(
+        waited.is_some_and(|s| s < 4.0),
+        "a new client waited behind a non-reading one: {waited:?}"
+    );
+    drop(stalled);
+}
+
+// Review N3: a connection serves a bounded number of requests, then closes, so one client
+// cannot pipeline an unbounded stream through one slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_serves_a_bounded_number_of_requests() {
+    let (addr, _token) = server(ServeLimits {
+        max_requests_per_connection: 3,
+        ..one_second()
+    })
+    .await;
+    let mut s = TcpStream::connect(&addr).await.unwrap();
+    let mut pipelined = Vec::new();
+    for _ in 0..10 {
+        pipelined.extend_from_slice(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+    }
+    s.write_all(&pipelined).await.unwrap();
+    let mut buf = Vec::new();
+    let read = tokio::time::timeout(Duration::from_millis(800), s.read_to_end(&mut buf)).await;
+    assert!(
+        read.is_ok(),
+        "the connection was not closed after its last allowed request"
+    );
+    let answered = buf.windows(12).filter(|w| w == b"HTTP/1.1 200").count();
+    assert_eq!(answered, 3, "{}", String::from_utf8_lossy(&buf));
+}
+
+// Review N3: a busy connection is closed after its lifetime (after the request in flight),
+// so no client keeps one slot forever by never going idle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_connection_is_closed_after_its_lifetime() {
+    let (addr, _token) = server(ServeLimits {
+        connection_lifetime: Duration::from_secs(1),
+        ..ServeLimits::default()
+    })
+    .await;
+    let mut s = TcpStream::connect(&addr).await.unwrap();
+    let started = Instant::now();
+    let mut buf = [0u8; 4096];
+    let closed_after = loop {
+        if started.elapsed() > Duration::from_secs(5) {
+            break None;
+        }
+        if s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .is_err()
+        {
+            break Some(started.elapsed());
+        }
+        match tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await {
+            Ok(Ok(0) | Err(_)) => break Some(started.elapsed()),
+            Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(200)).await,
+            Err(_) => break None,
+        }
+    };
+    assert!(
+        closed_after.is_some_and(|d| d < Duration::from_secs(3)),
+        "a busy connection outlived its lifetime: {closed_after:?}"
     );
 }

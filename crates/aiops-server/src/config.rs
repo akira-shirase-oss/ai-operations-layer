@@ -40,6 +40,12 @@ pub struct Config {
     pub header_read_timeout: Duration,
     /// Accepted connections at most.
     pub max_connections: usize,
+    /// A response write making no progress for this long ends its connection (review N3).
+    pub write_stall_timeout: Duration,
+    /// Requests served on one connection at most (review N3).
+    pub max_requests_per_connection: u32,
+    /// A connection is closed after this long, after the request in flight (review N3).
+    pub connection_lifetime: Duration,
 }
 
 impl Config {
@@ -67,6 +73,9 @@ impl Config {
             shutdown_grace: Duration::from_secs(10),
             header_read_timeout: Duration::from_secs(10),
             max_connections: 2_048,
+            write_stall_timeout: Duration::from_secs(10),
+            max_requests_per_connection: 1_000,
+            connection_lifetime: Duration::from_secs(300),
         }
     }
 
@@ -95,6 +104,9 @@ impl Config {
         let mut sweep_secs = cfg.retention_sweep_every.map_or(0, |d| d.as_secs());
         let mut header_secs = cfg.header_read_timeout.as_secs();
         let mut max_conns = cfg.max_connections as u64;
+        let mut stall_secs = cfg.write_stall_timeout.as_secs();
+        let mut per_conn = u64::from(cfg.max_requests_per_connection);
+        let mut lifetime_secs = cfg.connection_lifetime.as_secs();
         num("AIOPS_INGEST_MAX_IN_FLIGHT", &mut in_flight);
         num("AIOPS_INGEST_BODY_BUDGET_MIB", &mut body_budget_mib);
         num("AIOPS_INGEST_EVENTS_PER_SEC", &mut rate);
@@ -105,6 +117,9 @@ impl Config {
         num("AIOPS_RETENTION_SWEEP_SECS", &mut sweep_secs);
         num("AIOPS_HEADER_READ_TIMEOUT_SECS", &mut header_secs);
         num("AIOPS_MAX_CONNECTIONS", &mut max_conns);
+        num("AIOPS_WRITE_STALL_TIMEOUT_SECS", &mut stall_secs);
+        num("AIOPS_MAX_REQUESTS_PER_CONNECTION", &mut per_conn);
+        num("AIOPS_CONNECTION_LIFETIME_SECS", &mut lifetime_secs);
         let to_u32 = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
         cfg.ingest_max_in_flight = usize::try_from(in_flight).unwrap_or(usize::MAX);
         cfg.ingest_body_budget_kib =
@@ -117,6 +132,9 @@ impl Config {
         cfg.retention_sweep_every = Some(Duration::from_secs(sweep_secs));
         cfg.header_read_timeout = Duration::from_secs(header_secs);
         cfg.max_connections = usize::try_from(max_conns).unwrap_or(usize::MAX);
+        cfg.write_stall_timeout = Duration::from_secs(stall_secs);
+        cfg.max_requests_per_connection = to_u32(per_conn);
+        cfg.connection_lifetime = Duration::from_secs(lifetime_secs);
         if let Ok(v) = std::env::var("AIOPS_LISTEN") {
             match v.parse() {
                 Ok(addr) => cfg.listen = addr,

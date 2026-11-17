@@ -96,6 +96,11 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
     let grace = config.shutdown_grace;
     let header_read_timeout = config.header_read_timeout;
     let max_connections = config.max_connections;
+    let (write_stall_timeout, max_requests_per_connection, connection_lifetime) = (
+        config.write_stall_timeout,
+        config.max_requests_per_connection,
+        config.connection_lifetime,
+    );
     let sweep_every = config.retention_sweep_every;
     let state = Arc::new(AppState::new(store.clone(), config, system_clock(), csp));
     let app = router(state.clone());
@@ -137,6 +142,9 @@ Ok(t) => {
         header_read_timeout,
         max_connections: fit_to_file_limit(max_connections).await,
         drain_grace: grace,
+        write_stall_timeout,
+        max_requests_per_connection,
+        connection_lifetime,
     };
     tracing::info!(%listen, max_connections = limits.max_connections, "collector listening");
     {
