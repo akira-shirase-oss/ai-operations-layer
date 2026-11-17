@@ -81,6 +81,8 @@ pub struct StoreConfig {
     /// Credential lookups (keys, tokens): their own pool, so unknown-key floods never
     /// take an ingest or query connection.
     pub auth_connections: u32,
+    /// The retention sweep's own connection (never an ingest, query or audit one).
+    pub maintenance_connections: u32,
     pub acquire_timeout: Duration,
     pub ingest_statement_timeout: Duration,
     pub query_statement_timeout: Duration,
@@ -95,6 +97,7 @@ impl StoreConfig {
             query_connections: 8,
             control_connections: 2,
             auth_connections: 4,
+            maintenance_connections: 1,
             acquire_timeout: Duration::from_secs(2),
             ingest_statement_timeout: Duration::from_secs(5),
             query_statement_timeout: Duration::from_secs(3),
@@ -109,6 +112,7 @@ pub struct Store {
     query: PgPool,
     control: PgPool,
     auth: PgPool,
+    maintenance: PgPool,
 }
 
 /// One validated event ready to store: the event, what policy changed, its stored JSON.
@@ -337,6 +341,14 @@ impl Store {
             )
             .await?,
             auth: pool(cfg, base, cfg.auth_connections, cfg.query_statement_timeout).await?,
+            // A bounded DELETE batch can take longer than a query; 30 s per statement.
+            maintenance: pool(
+                cfg,
+                base,
+                cfg.maintenance_connections,
+                Duration::from_secs(30),
+            )
+            .await?,
         })
     }
 
@@ -346,6 +358,7 @@ impl Store {
             ingest: pool.clone(),
             query: pool.clone(),
             auth: pool.clone(),
+            maintenance: pool.clone(),
             control: pool,
         }
     }
@@ -847,7 +860,7 @@ impl Store {
                 let n = sqlx::query(sql)
                     .bind(cutoff(keep))
                     .bind(batch)
-                    .execute(&self.ingest)
+                    .execute(&self.maintenance)
                     .await?
                     .rows_affected();
                 counts[i] += n;

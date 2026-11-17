@@ -54,7 +54,7 @@ impl Config {
             query_connections: 8,
             control_connections: 2,
             timeline_max_events: 5_000,
-            retention_sweep_every: Some(Duration::from_secs(3_600)),
+            retention_sweep_every: Some(Duration::from_secs(300)),
             shutdown_grace: Duration::from_secs(10),
         }
     }

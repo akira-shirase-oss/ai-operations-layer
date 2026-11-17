@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use aiops_server::retention::{self, SweepPlan};
 use aiops_server::{AppState, Config, admin, console, router, system_clock};
 use aiops_store::{Retention, Store, StoreConfig};
 use anyhow::Context;
@@ -25,6 +26,8 @@ enum Command {
     /// Keys, tokens and projects.
     #[command(subcommand)]
     Admin(admin::Admin),
+    /// Run the retention sweep now, until nothing expired is left, and report it.
+    Sweep,
 }
 
 fn store_config(cfg: &Config) -> StoreConfig {
@@ -60,6 +63,21 @@ async fn main() -> anyhow::Result<()> {
             admin::run(&store, cmd, (system_clock())()).await
         }
         Command::Serve => serve(store, config).await,
+        Command::Sweep => {
+            store.migrate().await?;
+            let plan = SweepPlan {
+                max_duration: std::time::Duration::from_secs(3_600),
+                ..SweepPlan::default()
+            };
+            let started = std::time::Instant::now();
+            let t = retention::run(&store, (system_clock())(), Retention::default(), plan).await?;
+            let secs = started.elapsed().as_secs_f64();
+            println!(
+                "{{\"events\":{},\"operations\":{},\"instances\":{},\"audit\":{},\"calls\":{},\"complete\":{},\"seconds\":{secs:.3}}}",
+                t.events, t.operations, t.instances, t.audit, t.calls, t.complete
+            );
+            Ok(())
+        }
     }
 }
 
@@ -90,8 +108,8 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
                 tokio::select! {
                     () = cancel.cancelled() => break,
                     _ = tick.tick() => {
-                        match state.store.sweep(state.now(), Retention::default(), 5_000, 20).await {
-                            Ok(r) => tracing::info!(events = r.events, operations = r.operations, instances = r.instances, audit = r.audit, more = r.more, "retention sweep"),
+                        match retention::run(&state.store, state.now(), Retention::default(), SweepPlan::default()).await {
+                            Ok(t) => tracing::info!(events = t.events, operations = t.operations, instances = t.instances, audit = t.audit, calls = t.calls, complete = t.complete, "retention sweep"),
                             Err(e) => tracing::warn!(error = %e, "retention sweep failed; will retry"),
                         }
                     }
