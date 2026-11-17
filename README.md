@@ -1,12 +1,13 @@
 # AI Operations Layer
 
-> **Status — A0 reopened (second review); A1 partly (2026-11-17).** A first
-> independent review's findings are fixed, each with a test. A second review
-> found three new High findings in ingestion (a U+0000 in one event fails its
-> batch; bodies read before authentication; no write-progress deadline) and
-> smaller ones; A0 stays in progress until they land (`docs/ROADMAP.md`).
+> **Status — A0 done (re-closed after a second review); A1 partly
+> (2026-11-17).** Two independent reviews' findings are fixed, each with a
+> test that fails without its fix; redaction remains pattern matching and
+> partial by nature (`docs/END_GOAL.md`), and what is still owed is listed
+> in `docs/ROADMAP.md`.
 > Decisions D-012–D-024 answer OQ1–OQ6 and amend the
-> drill before any counted run. Built and tested: the pure domain crate, the
+> drill before any counted run; D-025 defers joined services' counts to
+> schema v2. Built and tested: the pure domain crate, the
 > PostgreSQL store, the bounded collector and query API, the Rust SDK, the
 > investigation console (on the workspace design system, checked in
 > Chromium), and the in-repo reference host with the contract failure cases
