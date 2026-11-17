@@ -27,6 +27,7 @@ use axum::routing::get;
 use serde::Serialize;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::classify::{RunState, Seen, call_outcome, failure_of, probe_outcome, run_finish};
 use crate::config::{Config, MAX_CALL_BYTES, MAX_REPLY_BYTES, Route};
@@ -105,6 +106,10 @@ pub struct Adapter {
     http: reqwest::Client,
     runs: Mutex<HashMap<u64, Tracked>>,
     calls: Arc<Semaphore>,
+    /// Each call's forwarding and reporting runs here, not in the HTTP handler: the runner
+    /// hangs up at its deadline, which drops the handler, and the call must still be
+    /// reported and leave the run (else the run is never finished).
+    pub tasks: TaskTracker,
     pub counters: Counters,
 }
 
@@ -128,6 +133,7 @@ impl Adapter {
             http,
             runs: Mutex::new(HashMap::new()),
             calls,
+            tasks: TaskTracker::new(),
             counters: Counters::default(),
         }))
     }
@@ -348,6 +354,14 @@ async fn call(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let inner = a.clone();
+    a.tasks
+        .spawn(async move { handle_call(inner, route, headers, body).await })
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn handle_call(a: Arc<Adapter>, route: String, headers: HeaderMap, body: Bytes) -> Response {
     let Some(route) = a.config.route(&route).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -405,6 +419,19 @@ async fn probe(
     State(a): State<Arc<Adapter>>,
     Path(route): Path<String>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let inner = a.clone();
+    a.tasks
+        .spawn(async move { handle_probe(inner, route, query, headers).await })
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn handle_probe(
+    a: Arc<Adapter>,
+    route: String,
+    query: Option<String>,
     headers: HeaderMap,
 ) -> Response {
     let Some(route) = a.config.route(&route).cloned() else {

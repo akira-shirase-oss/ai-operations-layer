@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {}", config.file.listen))?;
     let adapter = Adapter::new(config, sdk.clone())?;
+    let calls = adapter.tasks.clone();
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
     tracker.spawn(watch(adapter.clone(), cancel.clone()));
@@ -70,6 +71,14 @@ async fn main() -> anyhow::Result<()> {
     tracker.close();
     serve(adapter, listener, cancel.clone()).await?;
     cancel.cancel();
+    // Calls in flight finish (and are reported) within the adapter's own upstream deadline.
+    calls.close();
+    if tokio::time::timeout(Duration::from_secs(5), calls.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!("calls still in flight after 5 s are reported as unfinished");
+    }
     if tokio::time::timeout(Duration::from_secs(5), tracker.wait())
         .await
         .is_err()
