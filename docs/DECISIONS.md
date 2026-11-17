@@ -118,7 +118,8 @@ are listed at the end, not guessed.
   password hash would add hot-path CPU and no security. Every stored event
   records the key it arrived under, so a forged event shows its
   provenance. API tokens (`aiops_tk_`) carry an actor name, a project list,
-  scopes (`read` now; `operate` reserved for A3 control), and an expiry
+  scopes (`read`; `admin` for the collector-wide counters, which span every
+  project; `operate` reserved for A3 control), and an expiry
   (default 30 days); they are stored hashed too. The console keeps its
   token in session storage and sends it as a bearer header — no cookies,
   so no CSRF surface; A3 control calls additionally require expected state

@@ -142,6 +142,7 @@ struct Keys {
     reader: String,
     no_read: String,
     other_reader: String,
+    admin: String,
 }
 
 async fn keys(store: &Store) -> Keys {
@@ -176,6 +177,7 @@ async fn keys(store: &Store) -> Keys {
         reader: token("ana", "read", "pilot").await,
         no_read: token("bob", "operate", "pilot").await,
         other_reader: token("eve", "read", "other").await,
+        admin: token("ops", "admin", "pilot").await,
         ingest,
         flood,
     }
@@ -601,7 +603,7 @@ async fn duplicated_and_reordered_batches_merge_without_false_chronology() {
             "one host: event time agrees with emission order"
         );
     }
-    let (_, stats) = get_json(&c.base, "/v1/collector/stats", &k.reader).await;
+    let (_, stats) = get_json(&c.base, "/v1/collector/stats", &k.admin).await;
     assert!(
         stats["events_duplicate"].as_u64().unwrap() > 0,
         "duplicates arrived and were merged: {stats}"
@@ -682,7 +684,7 @@ async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected() 
             "the pilot lost nothing to the flood"
         );
     }
-    let (_, stats) = get_json(&c.base, "/v1/collector/stats", &k.reader).await;
+    let (_, stats) = get_json(&c.base, "/v1/collector/stats", &k.admin).await;
     assert_eq!(
         stats["rate_limited"].as_u64(),
         Some(u64::from(limited)),

@@ -15,6 +15,8 @@ use crate::auth::{TOKEN_PREFIX, bearer, hash};
 use crate::error::ApiError;
 
 pub const SCOPE_READ: &str = "read";
+/// Collector-wide operations (counters across all projects).
+pub const SCOPE_ADMIN: &str = "admin";
 
 /// An authenticated actor.
 pub struct Actor {
@@ -305,10 +307,15 @@ pub async fn timeline(
     Ok(Json(timeline))
 }
 
+/// Collector-wide counters span every project, so they need the `admin` scope (review
+/// finding 17); any other token is denied and audited.
 pub async fn stats(
     State(app): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<Json<MetricsView>, ApiError> {
-    authenticate(&app, &headers).await?;
+    let actor = authenticate(&app, &headers).await?;
+    if !actor.token.scopes.iter().any(|s| s == SCOPE_ADMIN) {
+        return Err(deny(&app, &actor, "stats.read", None, None, "scope_missing").await);
+    }
     Ok(Json(app.metrics.view()))
 }

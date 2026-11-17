@@ -74,8 +74,8 @@ pub async fn run(store: &Store, command: Admin, now: Timestamp) -> anyhow::Resul
         } => {
             for s in &scopes {
                 anyhow::ensure!(
-                    s == "read" || s == "operate",
-                    "unknown scope {s} (read, operate)"
+                    matches!(s.as_str(), "read" | "operate" | "admin"),
+                    "unknown scope {s} (read, operate, admin)"
                 );
             }
             let token = generate(TOKEN_PREFIX)?;

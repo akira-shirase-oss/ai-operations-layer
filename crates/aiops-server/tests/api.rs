@@ -251,7 +251,7 @@ async fn a_flooding_host_is_limited_and_another_host_is_not(pool: PgPool) {
     let other = batch_from("22222222222222222222222222222222", &journey(3, 0));
     let r = send(&e.app, post_ingest(&e.other_ingest_key, other)).await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let stats = send(&e.app, get("/v1/collector/stats", &e.reader)).await;
+    let stats = send(&e.app, get("/v1/collector/stats", &e.admin)).await;
     assert_eq!(stats.body["rate_limited"], 1);
 }
 
@@ -769,5 +769,28 @@ async fn the_source_view_shows_how_many_events_the_collector_refused(pool: PgPoo
         t.body["sources"][0]["events_refused"], 1,
         "{}",
         t.body["sources"]
+    );
+}
+
+// Review finding 17: collector-wide counters need the admin scope; others are denied and audited.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn collector_wide_counters_need_the_admin_scope(pool: PgPool) {
+    let e = env(pool).await;
+    for token in [&e.reader, &e.no_read, &e.other_reader] {
+        let r = send(&e.app, get("/v1/collector/stats", token)).await;
+        assert_eq!(
+            (r.status, r.body["error"]["code"].as_str()),
+            (403, Some("forbidden"))
+        );
+    }
+    let r = send(&e.app, get("/v1/collector/stats", &e.admin)).await;
+    assert_eq!(r.status, 200);
+    let audit = e.store.recent_audit(10).await.unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|a| a.action == "stats.read" && a.decision == "denied")
+            .count(),
+        3
     );
 }
