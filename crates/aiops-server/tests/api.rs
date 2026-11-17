@@ -560,8 +560,15 @@ async fn e1_an_in_batch_twin_cannot_hide_a_missing_event(pool: PgPool) {
 // Review finding 4: unauthenticated traffic must not shed a legitimate host.
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
-    let e = env_with(pool, |s| {
+    // The collector as deployed: separate ingest, query, control and auth pools (a single
+    // shared test pool would let the flood's lookups compete with ingest for connections).
+    let base = (*pool.connect_options()).clone();
+    let separate = aiops_store::Store::connect_with(&aiops_store::StoreConfig::new(""), &base)
+        .await
+        .unwrap();
+    let e = env_with(pool, move |s| {
         s.ingest_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+        s.store = separate;
     })
     .await;
     // Warm the legitimate key (it is cached from then on).
@@ -587,7 +594,7 @@ async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
         }));
     }
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let mut shed = 0;
+    let mut shed: Vec<String> = Vec::new();
     for n in 2..=61u8 {
         let r = send(
             &e.app,
@@ -595,7 +602,7 @@ async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
         )
         .await;
         if r.status != 200 {
-            shed += 1;
+            shed.push(format!("{} {}", r.status, r.body["error"]["code"]));
         }
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -603,7 +610,8 @@ async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
         f.await.unwrap();
     }
     assert_eq!(
-        shed, 0,
-        "the legitimate host lost {shed} of 60 batches to unauthenticated traffic"
+        shed,
+        Vec::<String>::new(),
+        "the legitimate host lost batches to unauthenticated traffic"
     );
 }
