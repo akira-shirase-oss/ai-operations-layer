@@ -123,6 +123,7 @@ impl Flusher {
                     _ = self.rx.recv_many(&mut buf, self.batch_max) => {}
                     () = tokio::time::sleep(self.flush_interval), if waiting => {}
                 }
+                self.holding(buf.len());
             }
             if self.inner.cancel.is_cancelled() {
                 self.drain(buf).await;
@@ -133,7 +134,7 @@ impl Flusher {
             while !buf.is_empty() && buf.len() < self.batch_max {
                 let room = self.batch_max - buf.len();
                 match tokio::time::timeout_at(deadline, self.rx.recv_many(&mut buf, room)).await {
-                    Ok(n) if n > 0 => {}
+                    Ok(n) if n > 0 => self.holding(buf.len()),
                     _ => break,
                 }
             }
@@ -151,6 +152,7 @@ impl Flusher {
                     Err(_) => break,
                 }
             }
+            self.holding(buf.len());
             if buf.is_empty() && !self.gaps_waiting() {
                 return;
             }
@@ -252,6 +254,13 @@ impl Flusher {
         Some(body)
     }
 
+    /// Every host event this task has taken off the queue and not yet accounted for
+    /// (delivered, refused or counted as dropped): what a shutdown that aborts the task
+    /// must count as lost (D-021). Kept current at every point the task can be aborted.
+    fn holding(&self, events: usize) {
+        self.inner.in_flight.store(events as u64, Ordering::Relaxed);
+    }
+
     async fn flush(&mut self, buf: &mut Vec<Event>) {
         self.collect_gap_reports();
         let reports = self
@@ -299,6 +308,8 @@ impl Flusher {
         let mut delivered_reports = std::collections::HashSet::new();
         let c = &self.inner.counters;
         while let Some(chunk) = stack.pop() {
+            let events = |c: &Vec<Encoded>| c.iter().filter(|i| i.event.is_some()).count();
+            self.holding(events(&chunk) + stack.iter().map(events).sum::<usize>());
             if let Some(until) = self.open_until {
                 // Hold this batch and send it as the probe when the cool-down ends (a
                 // shutdown cuts the wait short; its deadline then bounds the rest).
@@ -311,12 +322,7 @@ impl Flusher {
                 self.lost(chunk, GapReason::Rejected);
                 continue;
             };
-            let events_in_chunk = chunk.iter().filter(|i| i.event.is_some()).count() as u64;
-            self.inner
-                .in_flight
-                .store(events_in_chunk, Ordering::Relaxed);
             let outcome = self.send(body).await;
-            self.inner.in_flight.store(0, Ordering::Relaxed);
             match outcome {
                 Sent::Accepted(answer) => {
                     self.accepted(&chunk, answer.as_ref(), &mut delivered_reports);

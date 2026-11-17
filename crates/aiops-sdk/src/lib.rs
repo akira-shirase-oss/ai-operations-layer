@@ -507,11 +507,14 @@ impl Client {
         if let Some(mut task) = task
             && tokio::time::timeout(deadline, &mut task).await.is_err()
         {
-            task.abort();
-            // Queued plus in flight: lost to the deadline (an in-flight batch may in
-            // fact have been stored; it is counted as lost, never as delivered).
+            // Queued plus held by the flusher: lost to the deadline (a batch in flight may in
+            // fact have been stored; it is counted as lost, never as delivered). Read before
+            // the abort: an aborted task drops the receiver, which frees every queued slot,
+            // so the queue would read as empty afterwards (CI run 44093842622 counted 24 of
+            // 200 events that way).
             let queued = u64::try_from(inner.tx.max_capacity() - inner.tx.capacity()).unwrap_or(0);
             let in_flight = inner.in_flight.load(Ordering::Relaxed);
+            task.abort();
             add(&inner.counters.dropped_shutdown, queued + in_flight);
         }
         inner.counters.snapshot()
