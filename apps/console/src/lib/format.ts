@@ -39,6 +39,7 @@ const STATE_TEXT: Record<string, string> = {
 	succeeded: 'succeeded',
 	failed: 'failed',
 	uncertain: 'outcome unknown',
+	conflicting: 'conflicting outcomes',
 	no_finish_observed: 'no finish observed'
 };
 

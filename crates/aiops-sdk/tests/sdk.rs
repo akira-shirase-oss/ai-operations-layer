@@ -159,7 +159,7 @@ async fn events_arrive_numbered_with_the_emitted_count_on_the_finish() {
     let client = Client::start(&config(&endpoint)).unwrap();
     let op = client
         .operation("publish_article")
-        .traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        .external_trace("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
         .attribute("http.route", "/articles")
         .attribute("prompt", "write about cats")
         .start();
@@ -193,8 +193,12 @@ async fn events_arrive_numbered_with_the_emitted_count_on_the_finish() {
     let events = all_events(&fake);
     assert_eq!(events.len(), 8);
     assert_eq!(
+        events[0]["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736",
+        "the external trace is recorded"
+    );
+    assert_ne!(
         events[0]["operation_id"], "4bf92f3577b34da6a3ce929d0e0e4736",
-        "traceparent continues the trace"
+        "but the operation is this service's own"
     );
     let op_seqs: Vec<u64> = events
         .iter()
@@ -357,4 +361,36 @@ fn start_outside_a_runtime_is_an_error_not_a_panic() {
 async fn bad_configuration_is_refused() {
     assert!(Client::start(&Config::new("not a url", KEY, "x")).is_err());
     assert!(Client::start(&Config::new("http://127.0.0.1:1", "sk-wrong", "x")).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_continued_operation_contributes_steps_but_never_its_own_start_or_finish() {
+    let (endpoint, fake) = fake_collector().await;
+    let client = Client::start(&config(&endpoint)).unwrap();
+    let header = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let op = client
+        .continue_operation(header)
+        .expect("a valid traceparent");
+    op.step(StepKind::Tool, "render")
+        .start()
+        .finish(Finish::succeeded());
+    op.finish(Finish::uncertain(UncertainReason::TimeoutAfterSend, "x")); // a no-op here
+    assert!(client.continue_operation("garbage").is_none());
+    client.shutdown(Duration::from_secs(2)).await;
+    let events = all_events(&fake);
+    let types: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        ["step.started", "step.finished"],
+        "only the owning service declares the outcome"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e["operation_id"] == "4bf92f3577b34da6a3ce929d0e0e4736")
+    );
+    assert_eq!(
+        events[0]["parent_step_id"], "00f067aa0ba902b7",
+        "steps hang under the caller's span"
+    );
 }

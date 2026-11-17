@@ -2,7 +2,7 @@
 // crates/aiops-server/src/query.rs. Every field the console renders is data from an
 // attacker-influenced source: it is shown as text, never as HTML.
 
-export type State = 'succeeded' | 'failed' | 'uncertain' | 'no_finish_observed';
+export type State = 'succeeded' | 'failed' | 'uncertain' | 'conflicting' | 'no_finish_observed';
 
 export type Status = {
 	state: State;

@@ -25,6 +25,8 @@ pub(crate) struct Env {
     pub(crate) store: Store,
     pub(crate) ingest_key: String,
     pub(crate) other_ingest_key: String,
+    /// A second key of `pilot` (another host of the same project).
+    pub(crate) other_ingest_key_same_project: String,
     /// read on `pilot`
     pub(crate) reader: String,
     /// `operate` only, on `pilot`
@@ -44,6 +46,15 @@ pub(crate) async fn env_with(pool: PgPool, tune: impl FnOnce(&mut AppState)) -> 
     let ingest_key = generate(INGEST_KEY_PREFIX).unwrap();
     store
         .create_ingest_key("pilot", "reference-host", &hash(&ingest_key))
+        .await
+        .unwrap();
+    let other_ingest_key_same_project = generate(INGEST_KEY_PREFIX).unwrap();
+    store
+        .create_ingest_key(
+            "pilot",
+            "second-host",
+            &hash(&other_ingest_key_same_project),
+        )
         .await
         .unwrap();
     let other_ingest_key = generate(INGEST_KEY_PREFIX).unwrap();
@@ -76,6 +87,7 @@ pub(crate) async fn env_with(pool: PgPool, tune: impl FnOnce(&mut AppState)) -> 
         store,
         ingest_key,
         other_ingest_key,
+        other_ingest_key_same_project,
         reader,
         no_read,
         other_reader,

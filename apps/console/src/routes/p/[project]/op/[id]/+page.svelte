@@ -67,7 +67,11 @@
 		<div class="notice unknown">The start of this operation was not received; it is known only from later events.</div>
 	{/if}
 	{#if t.flags.conflicting_finish}
-		<div class="notice fail">The host reported more than one different outcome for this operation.</div>
+		<div class="notice fail">
+			<strong>Conflicting outcomes.</strong> More than one host declared how this operation ended, and the
+			declarations disagree (see the finish events below). No single outcome is shown; ask the system that owns
+			the work.
+		</div>
 	{/if}
 	{#if t.flags.clock_skew_suspected}
 		<div class="notice uncertain">

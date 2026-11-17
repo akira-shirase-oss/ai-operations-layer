@@ -21,6 +21,8 @@ pub struct OperationDelta {
     pub gap_reports: u32,
     pub reported_dropped: u64,
     pub finish: Option<Outcome>,
+    /// This batch carried finishes with different outcomes.
+    pub finish_conflict: bool,
     pub events_emitted: Option<u32>,
     pub failed_attempts: u32,
     pub uncertain_attempts: u32,
@@ -49,6 +51,7 @@ pub fn summarize<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Operati
                 gap_reports: 0,
                 reported_dropped: 0,
                 finish: None,
+                finish_conflict: false,
                 events_emitted: None,
                 failed_attempts: 0,
                 uncertain_attempts: 0,
@@ -71,7 +74,8 @@ pub fn summarize<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<Operati
                 }
             }
             EventBody::OperationFinished(f) => {
-                d.finish.get_or_insert(f.outcome);
+                let first = *d.finish.get_or_insert(f.outcome);
+                d.finish_conflict |= first != f.outcome;
                 d.events_emitted = Some(
                     d.events_emitted
                         .map_or(f.events_emitted, |n| n.max(f.events_emitted)),

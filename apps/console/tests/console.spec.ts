@@ -10,6 +10,7 @@ const OK = process.env['AIOPS_E2E_OK'] ?? '';
 const XSS = process.env['AIOPS_E2E_XSS'] ?? '';
 const DOWN = process.env['AIOPS_E2E_GAP'] ?? '';
 const E3 = process.env['AIOPS_E2E_E3'] ?? '';
+const E2 = process.env['AIOPS_E2E_E2'] ?? '';
 
 function watch(page: Page): string[] {
 	const problems: string[] = [];
@@ -105,5 +106,21 @@ test('a publish whose start was lost and whose outcome is unknown still warns, t
 	await openByRequest(page, E3);
 	await expect(page.locator('h1 .badge')).toHaveText('failed: internal');
 	await expect(page.locator('.notice.uncertain').first()).toContainText('An external effect may have happened.');
+	expect(problems).toEqual([]);
+});
+
+test('two services that declare different outcomes read as conflicting, in the list and the timeline', async ({
+	page
+}) => {
+	const problems = watch(page);
+	await signIn(page);
+	await page.getByRole('link', { name: 'pilot' }).click();
+	await page.getByPlaceholder(/Find by request ID/).fill(E2);
+	await page.getByRole('button', { name: 'Find' }).click();
+	const row = page.locator('tbody tr').first();
+	await expect(row.locator('.badge')).toHaveText('conflicting outcomes');
+	await row.getByRole('link').click();
+	await expect(page.locator('h1 .badge')).toHaveText('conflicting outcomes');
+	await expect(page.locator('.notice.fail').first()).toContainText('Conflicting outcomes.');
 	expect(problems).toEqual([]);
 });

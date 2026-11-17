@@ -369,6 +369,31 @@ fn conflicting_finish_events_are_flagged() {
     ];
     let t = assemble(op(), events, &[], &Limits::default(), false);
     assert!(t.flags.conflicting_finish);
+    assert_eq!(
+        t.status.state, "conflicting",
+        "never pick one of two declared outcomes"
+    );
+}
+
+#[test]
+fn e2_a_downstream_success_never_hides_an_upstream_uncertain_outcome_in_either_order() {
+    for downstream_first in [true, false] {
+        let mut up = B::new();
+        let mut down = B::new();
+        down.instance = instance(2);
+        let (t_up, t_down) = if downstream_first { (50, 10) } else { (10, 50) };
+        let events = vec![
+            up.ev(0, 5, started()),
+            up.ev(t_up, 5, finished(LOST, 2)),
+            down.ev(1, 5, started()),
+            down.ev(t_down, 5, finished(Outcome::Succeeded, 2)),
+        ];
+        let t = assemble(op(), events, &[], &Limits::default(), false);
+        assert_eq!(
+            t.status.state, "conflicting",
+            "downstream first: {downstream_first}"
+        );
+    }
 }
 
 // --- Review finding 1: the external-effect warning must not depend on which events

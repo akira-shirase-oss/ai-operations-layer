@@ -184,6 +184,8 @@ pub struct OperationRow {
     pub reported_dropped: i64,
     pub finish_outcome: Option<String>,
     pub finish_detail: Option<String>,
+    /// Hosts declared different outcomes.
+    pub finish_conflict: bool,
     pub events_emitted: Option<i32>,
     pub failed_attempts: i32,
     pub uncertain_attempts: i32,
@@ -480,7 +482,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT operation_id, name, request_id, release, first_event_time, last_event_time, last_received_at,
                     host_events, gap_reports, reported_dropped, finish_outcome, finish_detail, events_emitted,
-                    failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency
+                    failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency, finish_conflict
              FROM operations
              WHERE project_id = $1
                AND ($2::timestamptz IS NULL OR (first_event_time, operation_id) < ($2, $3::uuid))
@@ -517,6 +519,7 @@ impl Store {
                     uncertain_attempts: r.get(14),
                     cost_estimate_micros: r.get(15),
                     cost_currency: r.get(16),
+                    finish_conflict: r.get(17),
                 })
             })
             .collect()
@@ -941,19 +944,22 @@ async fn upsert_summaries(
         .map(|d| sat_i64(d.cost_estimate_micros))
         .collect();
     let currencies: Vec<Option<&str>> = deltas.iter().map(|d| d.cost_currency.as_deref()).collect();
+    let conflicts: Vec<bool> = deltas.iter().map(|d| d.finish_conflict).collect();
 
     sqlx::query(
         "WITH ops AS (
             INSERT INTO operations AS o (project_id, operation_id, name, request_id, release,
                 first_event_time, last_event_time, first_received_at, last_received_at,
                 host_events, gap_reports, reported_dropped, finish_outcome, finish_detail,
-                events_emitted, failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency)
+                events_emitted, failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency,
+                finish_conflict)
             SELECT $1, d.op, d.name, d.req, d.rel, d.tmin, d.tmax, $2, $2, d.host, d.gaps, d.dropped,
-                   d.fin, d.detail, d.emitted, d.failed, d.unc, d.cost, d.cur
+                   d.fin, d.detail, d.emitted, d.failed, d.unc, d.cost, d.cur, d.conflict
             FROM UNNEST($3::uuid[], $4::text[], $5::text[], $6::text[], $7::timestamptz[], $8::timestamptz[],
                         $9::int4[], $10::int4[], $11::int8[], $12::text[], $13::text[], $14::int4[],
-                        $15::int4[], $16::int4[], $17::int8[], $18::text[])
-                 AS d(op, name, req, rel, tmin, tmax, host, gaps, dropped, fin, detail, emitted, failed, unc, cost, cur)
+                        $15::int4[], $16::int4[], $17::int8[], $18::text[], $32::bool[])
+                 AS d(op, name, req, rel, tmin, tmax, host, gaps, dropped, fin, detail, emitted, failed, unc, cost, cur,
+                      conflict)
             ORDER BY d.op
             ON CONFLICT (project_id, operation_id) DO UPDATE SET
                 name = COALESCE(o.name, EXCLUDED.name),
@@ -965,6 +971,11 @@ async fn upsert_summaries(
                 host_events = o.host_events + EXCLUDED.host_events,
                 gap_reports = o.gap_reports + EXCLUDED.gap_reports,
                 reported_dropped = o.reported_dropped + EXCLUDED.reported_dropped,
+                -- Finishes that disagree make the operation conflicting (SET reads the old row).
+                finish_conflict = o.finish_conflict OR EXCLUDED.finish_conflict OR (
+                    o.finish_outcome IS NOT NULL AND EXCLUDED.finish_outcome IS NOT NULL
+                    AND (o.finish_outcome, COALESCE(o.finish_detail, ''))
+                        <> (EXCLUDED.finish_outcome, COALESCE(EXCLUDED.finish_detail, ''))),
                 finish_detail = CASE WHEN o.finish_outcome IS NULL THEN EXCLUDED.finish_detail ELSE o.finish_detail END,
                 finish_outcome = COALESCE(o.finish_outcome, EXCLUDED.finish_outcome),
                 events_emitted = GREATEST(o.events_emitted, EXCLUDED.events_emitted),
@@ -1029,6 +1040,7 @@ async fn upsert_summaries(
     .bind(sat_i64(batch.stats.gap_overflow))
     .bind(sat_i64(batch.stats.truncated_events))
     .bind(&batch.new_names)
+    .bind(&conflicts)
     .execute(&mut *tx)
     .await?;
     Ok(())

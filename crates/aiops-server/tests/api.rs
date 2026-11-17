@@ -456,3 +456,59 @@ async fn the_console_is_served_under_a_hash_based_csp_with_an_spa_fallback(pool:
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn conflicting_finishes_show_as_conflicting_in_the_list_whether_they_arrive_together_or_apart(
+    pool: PgPool,
+) {
+    let e = env(pool).await;
+    // Apart: the honest finish first, a contradicting one (another key) later.
+    let events = journey(1, 0);
+    send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    let mut contradiction = events[7].clone();
+    contradiction.event_id = format!("{:032x}", 0xc0ff_u128);
+    contradiction.outcome = Some("succeeded".into());
+    contradiction.uncertain_reason = None;
+    contradiction.seq = 1;
+    contradiction.op_seq = 1;
+    contradiction.events_emitted = Some(1);
+    let other = batch_from("22222222222222222222222222222222", &[contradiction.clone()]);
+    let r = send(&e.app, post_ingest(&e.other_ingest_key_same_project, other)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["accepted"], 1, "{}", r.body);
+    // Together: both finishes in one batch.
+    let mut together = journey(2, 100);
+    let mut second = together[7].clone();
+    second.event_id = format!("{:032x}", 0xc1ff_u128);
+    second.outcome = Some("succeeded".into());
+    second.uncertain_reason = None;
+    together.push(second);
+    send(&e.app, post_ingest(&e.ingest_key, batch(&together))).await;
+
+    for (op, rid) in [(1u8, "req-1"), (2u8, "req-2")] {
+        let list = send(
+            &e.app,
+            get(
+                &format!("/v1/projects/pilot/operations?request_id={rid}"),
+                &e.reader,
+            ),
+        )
+        .await;
+        assert_eq!(
+            list.body["operations"][0]["status"]["state"], "conflicting",
+            "list, op {op}"
+        );
+        let t = send(
+            &e.app,
+            get(
+                &format!("/v1/projects/pilot/operations/{}", op_hex(op)),
+                &e.reader,
+            ),
+        )
+        .await;
+        assert_eq!(
+            t.body["status"]["state"], "conflicting",
+            "timeline, op {op}"
+        );
+    }
+}

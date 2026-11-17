@@ -58,7 +58,8 @@ impl InstanceStats {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Status {
-    /// `succeeded`, `failed`, `uncertain` or `no_finish_observed`.
+    /// `succeeded`, `failed`, `uncertain`, `conflicting` (hosts declared different
+    /// outcomes) or `no_finish_observed`.
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class: Option<&'static str>,
@@ -79,6 +80,16 @@ impl Status {
             state: outcome.as_str(),
             class,
             reason,
+            declared: true,
+        }
+    }
+
+    /// Hosts declared different outcomes for one operation: no single answer is shown.
+    pub fn conflicting() -> Self {
+        Self {
+            state: "conflicting",
+            class: None,
+            reason: None,
             declared: true,
         }
     }
@@ -621,11 +632,16 @@ pub fn assemble(
         start_not_observed: c.meta.is_none(),
         ..Flags::default()
     };
-    // The declared status: the first finish in event-time order; disagreement is flagged.
+    // The declared status. Finishes that disagree are `conflicting`: never pick one,
+    // whatever order they arrived or were stamped in.
     let status = match c.finishes.first() {
         Some((_, outcome, _)) => {
             flags.conflicting_finish = c.finishes.iter().any(|(_, o, _)| o != outcome);
-            Status::from_outcome(*outcome)
+            if flags.conflicting_finish {
+                Status::conflicting()
+            } else {
+                Status::from_outcome(*outcome)
+            }
         }
         None => Status::no_finish_observed(),
     };
@@ -814,6 +830,9 @@ fn entry_view(stored: &StoredEvent, delay: i64, flags: Vec<&'static str>) -> Ent
 }
 
 /// For lists: the state of an operation from its summary counters alone.
-pub fn list_state(finish: Option<Outcome>) -> Status {
+pub fn list_state(finish: Option<Outcome>, conflict: bool) -> Status {
+    if conflict {
+        return Status::conflicting();
+    }
     finish.map_or_else(Status::no_finish_observed, Status::from_outcome)
 }

@@ -232,7 +232,7 @@ pub async fn list_operations(
             name: r.name.clone(),
             request_id: r.request_id.clone(),
             release: r.release.clone(),
-            status: list_state(row_outcome(r)),
+            status: list_state(row_outcome(r), r.finish_conflict),
             first_event_time: r.first_event_time,
             last_event_time: r.last_event_time,
             last_received_at: r.last_received_at,

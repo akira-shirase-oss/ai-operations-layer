@@ -138,6 +138,11 @@ tr.gap td {
 .badge.uncertain {
 	color: var(--uncertain);
 }
+.badge.conflicting {
+	color: var(--fail);
+	border-style: double;
+	border-width: 3px;
+}
 .badge.no_finish_observed {
 	color: var(--unknown);
 	border-style: dashed;

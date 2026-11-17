@@ -445,6 +445,29 @@ impl Client {
         }
     }
 
+    /// Join an operation that another SDK-instrumented service owns, from the W3C
+    /// `traceparent` it sent. The handle records steps under that operation (as
+    /// children of the caller's span) but never emits `operation.started` or
+    /// `operation.finished`: only the owning service declares the outcome, so two
+    /// services can never contradict each other's finish. `None` for an invalid header.
+    pub fn continue_operation(&self, traceparent: &str) -> Option<Operation> {
+        let tp = TraceParent::parse(traceparent)?;
+        let Some(inner) = self.inner.clone() else {
+            return Some(Operation { core: None });
+        };
+        Some(Operation {
+            core: Some(Arc::new(OpCore {
+                inner,
+                id: tp.trace_id,
+                root_span: tp.parent_id,
+                op_seq: AtomicU32::new(0),
+                // Already "finished" from this service's point of view: finish() is a no-op.
+                finished: AtomicBool::new(true),
+                continued: true,
+            })),
+        })
+    }
+
     pub fn stats(&self) -> Stats {
         self.inner
             .as_ref()
@@ -489,10 +512,12 @@ impl OperationBuilder {
         self
     }
 
-    /// Continue an operation whose context arrived in a W3C `traceparent` header. An
-    /// unparseable header starts a fresh operation (and is not an error).
+    /// Record the OpenTelemetry trace this operation belongs to (from an incoming W3C
+    /// `traceparent` written by a service that does not use this SDK). The operation is
+    /// still this service's own: it gets its own ID, start and finish. To join an
+    /// operation another SDK-instrumented service owns, use [`Client::continue_operation`].
     #[must_use]
-    pub fn traceparent(mut self, header: &str) -> Self {
+    pub fn external_trace(mut self, header: &str) -> Self {
         self.parent = TraceParent::parse(header);
         self
     }
@@ -508,16 +533,16 @@ impl OperationBuilder {
         let Some(inner) = self.client.inner.clone() else {
             return Operation { core: None };
         };
-        let (id, root) = match self.parent {
-            Some(tp) => (tp.trace_id, tp.parent_id),
-            None => (inner.ids.operation_id(), inner.ids.step_id()),
-        };
+        let trace_id = self
+            .parent
+            .and_then(|tp| aiops_domain::TraceId::from_bytes(*tp.trace_id.as_bytes()));
         let core = Arc::new(OpCore {
+            id: inner.ids.operation_id(),
+            root_span: inner.ids.step_id(),
             inner,
-            id,
-            root_span: root,
             op_seq: AtomicU32::new(0),
             finished: AtomicBool::new(false),
+            continued: false,
         });
         let limits = &core.inner.limits;
         let mut truncated = 0;
@@ -533,7 +558,7 @@ impl OperationBuilder {
             &core,
             EventBody::OperationStarted(OperationMeta {
                 name,
-                trace_id: None,
+                trace_id,
                 request_id,
                 release: core.inner.release.clone(),
                 deployment: core.inner.deployment.clone(),
@@ -585,6 +610,9 @@ struct OpCore {
     root_span: StepId,
     op_seq: AtomicU32,
     finished: AtomicBool,
+    /// Joined from another service: contributes steps, never the start or the finish
+    /// (only the owning service declares the operation's outcome).
+    continued: bool,
 }
 
 impl OpCore {
@@ -641,13 +669,19 @@ impl Operation {
     }
 
     pub fn step(&self, kind: StepKind, name: &str) -> StepBuilder {
+        // In a continued operation, steps hang under the caller's span.
+        let parent = self
+            .core
+            .as_ref()
+            .filter(|c| c.continued)
+            .map(|c| c.root_span);
         StepBuilder {
             op: self.clone(),
             kind,
             name: name.to_owned(),
             step_id: None,
             attempt: 1,
-            parent: None,
+            parent,
             model: None,
             prompt_version: None,
             config_version: None,
@@ -662,6 +696,7 @@ impl Operation {
 
     /// Emits `operation.finished` with the declared outcome and the number of events
     /// this SDK emitted for the operation (so the collector can count what is missing).
+    /// A no-op on a continued operation ([`Client::continue_operation`]).
     pub fn finish(&self, finish: Finish) {
         let Some(core) = &self.core else { return };
         if core.finished.swap(true, Ordering::AcqRel) {
