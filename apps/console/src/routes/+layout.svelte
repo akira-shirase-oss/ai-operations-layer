@@ -33,7 +33,7 @@
 
 <div class="flex min-h-dvh flex-col bg-background text-foreground">
 	<header class="border-b">
-		<div class="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-6">
+		<div class="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
 			<a class="font-semibold tracking-tight" href={resolve('/')}>AI Operations Layer</a>
 			<div class="flex items-center gap-2">
 				<Button variant="ghost" size="icon" aria-label="Toggle dark mode" onclick={toggleMode}>
@@ -45,7 +45,7 @@
 			</div>
 		</div>
 	</header>
-	<main class="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
+	<main class="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 sm:py-8">
 		{#if signedIn}
 			{@render children()}
 		{:else}

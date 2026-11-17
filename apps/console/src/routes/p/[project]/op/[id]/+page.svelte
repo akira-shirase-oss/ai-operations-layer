@@ -6,13 +6,14 @@
 	import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@aiops/ui/ui/tooltip';
 	import { api, type Result } from '#lib/api.js';
 	import { micros, money, short, time, value } from '#lib/format.js';
-	import type { AttemptView, Authority, EntryView, StepView, Timeline } from '#lib/types.js';
+	import type { AttemptView, Authority, EntryView, GapView, StepView, Timeline } from '#lib/types.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import Notice from '#lib/components/Notice.svelte';
 	import Flag from '#lib/components/Flag.svelte';
 	import VirtualRows from '#lib/components/VirtualRows.svelte';
 	import Failure from '#lib/components/Failure.svelte';
 	import Loading from '#lib/components/Loading.svelte';
+	import { viewport } from '#lib/viewport.svelte.js';
 
 	const project = $derived(page.params['project'] ?? '');
 	const id = $derived(page.params['id'] ?? '');
@@ -59,6 +60,7 @@
 	// details truncate instead, with the full text on hover (review N4).
 	const EVENT_COLUMNS =
 		'grid grid-cols-[12rem_4.5rem_23rem_minmax(7rem,1fr)_2.5rem_8rem_minmax(6rem,14rem)] gap-3 px-3';
+	const gapText = (g: GapView) => `${GAP_TEXT[g.kind] ?? g.kind}${g.reason ? ` (${g.reason})` : ''}`;
 	const eventText = (e: EntryView) =>
 		`${e.type}${e.name ? ` · ${e.name}` : ''}${e.attempt ? ` #${e.attempt}` : ''}`;
 	// Every attempt of every step is one row, windowed like the events (a 5,000-event
@@ -72,6 +74,9 @@
 				)
 			: []
 	);
+	// A stacked row's height below 640 px: the outcome (which may wrap to two lines) and two
+	// lines of detail.
+	const NARROW_ROW = 96;
 	const STEP_COLUMNS =
 		'grid grid-cols-[minmax(10rem,1fr)_4rem_23rem_6rem_minmax(8rem,12rem)_minmax(8rem,1fr)_7rem] gap-3 px-3';
 	const errorText = (a: AttemptView) => `${a.error_code ?? ''}${a.error_message ? ` ${a.error_message}` : ''}`;
@@ -246,51 +251,87 @@
 	{#if t.steps.length === 0}
 		<p class="text-muted-foreground">No step events received.</p>
 	{:else}
+		<!-- Below 640 px each attempt is a stacked row, its outcome first (review U1); wider, a
+		     table that scrolls sideways past the outcome column. -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-		<div class="overflow-x-auto rounded-md outline-none focus-visible:ring-4 focus-visible:ring-ring/25" tabindex="0" role="region" aria-label="Steps, scrolls sideways">
-			<div class="min-w-[69rem]" role="table" aria-label="Every attempt of every step">
+		<div
+			class="rounded-md outline-none focus-visible:ring-4 focus-visible:ring-ring/25 {viewport.narrow ? '' : 'overflow-x-auto'}"
+			tabindex={viewport.narrow ? undefined : 0}
+			role="region"
+			aria-label={viewport.narrow ? 'Steps' : 'Steps, scrolls sideways'}
+		>
+			<div class={viewport.narrow ? '' : 'min-w-[69rem]'} role="table" aria-label="Every attempt of every step">
 				<div role="rowgroup">
-					<div class="{STEP_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
-						<span role="columnheader">Step</span><span role="columnheader">Attempt</span><span role="columnheader"
-							>Outcome</span
-						><span role="columnheader">Duration</span><span role="columnheader">Model / version</span><span
-							role="columnheader">Error</span
-						><span role="columnheader">Est. cost</span>
-					</div>
+					{#if viewport.narrow}
+						<div class="sr-only" role="row">
+							<span role="columnheader">Outcome</span><span role="columnheader">Step and attempt</span><span
+								role="columnheader">Details</span
+							>
+						</div>
+					{:else}
+						<div class="{STEP_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
+							<span role="columnheader">Step</span><span role="columnheader">Attempt</span><span role="columnheader"
+								>Outcome</span
+							><span role="columnheader">Duration</span><span role="columnheader">Model / version</span><span
+								role="columnheader">Error</span
+							><span role="columnheader">Est. cost</span>
+						</div>
+					{/if}
 				</div>
 				<VirtualRows
 					rows={attemptRows}
 					label="Steps"
 					height={448}
+					rowHeight={viewport.narrow ? NARROW_ROW : 56}
 					key={(r: AttemptRow) => `${r.step.step_id}:${r.attempt.attempt}`}
 				>
 					{#snippet row(r: AttemptRow)}
 						{@const a = r.attempt}
-						<div class="{STEP_COLUMNS} h-full items-center text-sm">
-							<span role="cell" class="min-w-0 leading-tight">
-								<span class="block truncate {r.first ? 'font-semibold' : 'text-muted-foreground'}" title={r.step.name ?? ''}
-									>{r.step.name ?? 'name not observed'}</span
-								>
-								<span class="block truncate text-xs text-muted-foreground">
-									{#if r.first}{r.step.kind ?? 'kind unknown'}{r.step.external_effect ? ' · external effect' : ''} ·
-									{/if}<span class="font-mono">{r.step.step_id}</span>
+						{#if viewport.narrow}
+							<div class="grid h-full content-center gap-1 px-3 text-sm">
+								<span role="cell" data-cell="outcome" class="flex min-w-0 flex-wrap items-center gap-1">
+									<StatusBadge status={a} />
+									{#if !a.start_observed}<Flag>start not received</Flag>{/if}
 								</span>
-							</span>
-							<span role="cell">{a.attempt}</span>
-							<span role="cell" data-cell="outcome" class="flex min-w-0 flex-col items-start gap-0.5">
-								<StatusBadge status={a} />
-								{#if !a.start_observed}<Flag>start not received</Flag>{/if}
-							</span>
-							<span role="cell" class="font-mono text-xs">{micros(a.duration_us)}</span>
-							<span role="cell" class="min-w-0 truncate font-mono text-xs" title={versionText(a)}>{versionText(a)}</span>
-							<span role="cell" class="min-w-0 font-mono text-xs leading-tight" title={errorText(a)}>
-								<span class="block truncate">{a.error_code ?? ''}</span>
-								{#if a.error_message}<span class="block truncate text-muted-foreground"><bdi>{a.error_message}</bdi></span>{/if}
-							</span>
-							<span role="cell" class="font-mono text-xs"
-								>{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</span
-							>
-						</div>
+								<span role="cell" class="min-w-0 truncate">
+									<span class={r.first ? 'font-semibold' : 'text-muted-foreground'}>{r.step.name ?? 'name not observed'}</span>
+									· attempt {a.attempt}{a.duration_us !== undefined ? ` · ${micros(a.duration_us)}` : ''}
+								</span>
+								<span role="cell" class="min-w-0 truncate font-mono text-xs text-muted-foreground" title={errorText(a)}
+									>{[errorText(a).trim(), versionText(a), a.cost_estimate_micros !== undefined
+										? `est. ${money(a.cost_estimate_micros, a.cost_currency ?? null)}`
+										: '']
+										.filter(Boolean)
+										.join(' · ') || ' '}</span
+								>
+							</div>
+						{:else}
+							<div class="{STEP_COLUMNS} h-full items-center text-sm">
+								<span role="cell" class="min-w-0 leading-tight">
+									<span class="block truncate {r.first ? 'font-semibold' : 'text-muted-foreground'}" title={r.step.name ?? ''}
+										>{r.step.name ?? 'name not observed'}</span
+									>
+									<span class="block truncate text-xs text-muted-foreground">
+										{#if r.first}{r.step.kind ?? 'kind unknown'}{r.step.external_effect ? ' · external effect' : ''} ·
+										{/if}<span class="font-mono">{r.step.step_id}</span>
+									</span>
+								</span>
+								<span role="cell">{a.attempt}</span>
+								<span role="cell" data-cell="outcome" class="flex min-w-0 flex-col items-start gap-0.5">
+									<StatusBadge status={a} />
+									{#if !a.start_observed}<Flag>start not received</Flag>{/if}
+								</span>
+								<span role="cell" class="font-mono text-xs">{micros(a.duration_us)}</span>
+								<span role="cell" class="min-w-0 truncate font-mono text-xs" title={versionText(a)}>{versionText(a)}</span>
+								<span role="cell" class="min-w-0 font-mono text-xs leading-tight" title={errorText(a)}>
+									<span class="block truncate">{a.error_code ?? ''}</span>
+									{#if a.error_message}<span class="block truncate text-muted-foreground"><bdi>{a.error_message}</bdi></span>{/if}
+								</span>
+								<span role="cell" class="font-mono text-xs"
+									>{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</span
+								>
+							</div>
+						{/if}
 					{/snippet}
 				</VirtualRows>
 			</div>
@@ -303,45 +344,101 @@
 			No gaps: every event this operation's SDK numbered was received{t.status.declared ? '' : ' so far'}.
 		</p>
 	{:else}
-		<Table>
-			<TableHeader>
-				<TableRow><TableHead>What</TableHead><TableHead>How many</TableHead><TableHead>Where</TableHead><TableHead
-						>Source</TableHead
-					></TableRow
-				>
-			</TableHeader>
-			<TableBody>
+		{#snippet gapWhere(g: GapView)}
+			{#if g.op_seq_from !== undefined}#{g.op_seq_from}{g.op_seq_to !== undefined ? `–#${g.op_seq_to}` : ' onwards'}{/if}
+			{#if g.from}{time(g.from)} – {time(g.to)}{/if}
+		{/snippet}
+		{#if viewport.narrow}
+			<ul class="grid gap-2" aria-label="Gaps">
 				{#each t.gaps as g, i (i)}
-					<TableRow class="gap border-dashed bg-state-unknown-soft/60">
-						<TableCell>{GAP_TEXT[g.kind] ?? g.kind}{g.reason ? ` (${g.reason})` : ''}</TableCell>
-						<TableCell>{g.count ?? 'unknown'}</TableCell>
-						<TableCell class="font-mono text-xs">
-							{#if g.op_seq_from !== undefined}#{g.op_seq_from}{g.op_seq_to !== undefined ? `–#${g.op_seq_to}` : ' onwards'}{/if}
-							{#if g.from}{time(g.from)} – {time(g.to)}{/if}
-						</TableCell>
-						<TableCell class="font-mono text-xs">{g.instance_id ? short(g.instance_id) : '—'}</TableCell>
-					</TableRow>
+					<li class="gap grid gap-1 rounded-xl border border-dashed bg-state-unknown-soft/60 p-3 text-sm">
+						<span><strong data-testid="gap-count">{g.count ?? 'unknown'}</strong> · {gapText(g)}</span>
+						<span class="font-mono text-xs break-all text-muted-foreground"
+							>{@render gapWhere(g)}{g.instance_id ? ` · source ${short(g.instance_id)}` : ''}</span
+						>
+					</li>
 				{/each}
-			</TableBody>
-		</Table>
+			</ul>
+		{:else}
+			<Table>
+				<TableHeader>
+					<TableRow
+						><TableHead>How many</TableHead><TableHead>What</TableHead><TableHead>Where</TableHead><TableHead
+							>Source</TableHead
+						></TableRow
+					>
+				</TableHeader>
+				<TableBody>
+					{#each t.gaps as g, i (i)}
+						<TableRow class="gap border-dashed bg-state-unknown-soft/60">
+							<TableCell><span data-testid="gap-count">{g.count ?? 'unknown'}</span></TableCell>
+							<TableCell>{gapText(g)}</TableCell>
+							<TableCell class="font-mono text-xs">{@render gapWhere(g)}</TableCell>
+							<TableCell class="font-mono text-xs">{g.instance_id ? short(g.instance_id) : '—'}</TableCell>
+						</TableRow>
+					{/each}
+				</TableBody>
+			</Table>
+		{/if}
 	{/if}
 
 	<h2 class="mt-8 mb-2 text-lg font-semibold">Events (event time · receive time)</h2>
 	<TooltipProvider>
+		<!-- Below 640 px each event is a stacked row, its outcome first (review U1). -->
 		<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-		<div class="overflow-x-auto rounded-md outline-none focus-visible:ring-4 focus-visible:ring-ring/25" tabindex="0" role="region" aria-label="Events, scrolls sideways">
-			<div class="min-w-[69rem]" role="table" aria-label="Every event, by event time">
+		<div
+			class="rounded-md outline-none focus-visible:ring-4 focus-visible:ring-ring/25 {viewport.narrow ? '' : 'overflow-x-auto'}"
+			tabindex={viewport.narrow ? undefined : 0}
+			role="region"
+			aria-label={viewport.narrow ? 'Events' : 'Events, scrolls sideways'}
+		>
+			<div class={viewport.narrow ? '' : 'min-w-[69rem]'} role="table" aria-label="Every event, by event time">
 				<div role="rowgroup">
-					<div class="{EVENT_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
-						<span role="columnheader">Event time · received</span><span role="columnheader">Delay</span><span
-							role="columnheader">Outcome</span
-						><span role="columnheader">Event</span><span role="columnheader">#</span><span role="columnheader"
-							>Source</span
-						><span role="columnheader">Details</span>
-					</div>
+					{#if viewport.narrow}
+						<div class="sr-only" role="row">
+							<span role="columnheader">Outcome and event</span><span role="columnheader">Event time · received</span><span
+								role="columnheader">Details</span
+							>
+						</div>
+					{:else}
+						<div class="{EVENT_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
+							<span role="columnheader">Event time · received</span><span role="columnheader">Delay</span><span
+								role="columnheader">Outcome</span
+							><span role="columnheader">Event</span><span role="columnheader">#</span><span role="columnheader"
+								>Source</span
+							><span role="columnheader">Details</span>
+						</div>
+					{/if}
 				</div>
-				<VirtualRows rows={t.entries} label="Events" key={(e: EntryView) => e.event_id}>
+				<VirtualRows
+					rows={t.entries}
+					label="Events"
+					rowHeight={viewport.narrow ? NARROW_ROW : 56}
+					key={(e: EntryView) => e.event_id}
+				>
 					{#snippet row(e: EntryView)}
+						{#if viewport.narrow}
+							<div
+								class="grid h-full content-center gap-1 px-3 text-sm {e.type === 'gap.reported'
+									? 'gap bg-state-unknown-soft/60'
+									: ''}"
+							>
+								<span role="cell" data-cell="outcome" class="flex min-w-0 flex-wrap items-center gap-1">
+									{#if e.outcome}<StatusBadge status={e.outcome} />{/if}
+									<span class="min-w-0 truncate" title={eventText(e)}>{eventText(e)}</span>
+								</span>
+								<span role="cell" class="min-w-0 truncate font-mono text-xs"
+									>{time(e.event_time)} · <span class="text-muted-foreground"
+										>received {micros(e.receive_delay_us)} later · #{e.op_seq || '—'}</span
+									></span
+								>
+								<span role="cell" class="min-w-0 truncate font-mono text-xs text-muted-foreground" title={detailText(e)}
+									>{[`${e.ingest_key} · ${short(e.instance_id)}`, ...e.flags.map((f) => f.replaceAll('_', ' ')), detailText(e)]
+										.filter(Boolean)
+										.join(' · ')}</span
+								>
+							</div>
+						{:else}
 						<div
 							class="{EVENT_COLUMNS} h-full items-center text-sm {e.type === 'gap.reported'
 								? 'gap bg-state-unknown-soft/60'
@@ -378,6 +475,7 @@
 								{/each}
 							</span>
 						</div>
+						{/if}
 					{/snippet}
 				</VirtualRows>
 			</div>

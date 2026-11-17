@@ -9,7 +9,8 @@
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { api, type Result } from '#lib/api.js';
 	import { money, short, time } from '#lib/format.js';
-	import type { OperationList } from '#lib/types.js';
+	import type { OperationList, OperationSummary } from '#lib/types.js';
+	import { viewport } from '#lib/viewport.svelte.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import Notice from '#lib/components/Notice.svelte';
 	import Flag from '#lib/components/Flag.svelte';
@@ -119,51 +120,80 @@
 			</ol>
 		</Notice>
 	{:else}
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>Started (event time)</TableHead>
-					<TableHead>Operation</TableHead>
-					<TableHead>Request</TableHead>
-					<TableHead>Status</TableHead>
-					<TableHead>Events</TableHead>
-					<TableHead>Attempts</TableHead>
-					<TableHead>Est. cost</TableHead>
-				</TableRow>
-			</TableHeader>
-			<TableBody>
+		{#snippet opLink(op: OperationSummary)}
+			<a class="font-medium underline-offset-4 hover:underline" href={resolve('/p/[project]/op/[id]', { project, id: op.operation_id })}
+				>{op.name ?? 'name not observed'}</a
+			>
+		{/snippet}
+		{#snippet eventsFacts(op: OperationSummary)}
+			{op.events_received}{#if op.events_emitted !== null}/{op.events_emitted}{/if}
+			{#if op.events_missing}<Flag>{op.events_missing} missing</Flag>{/if}
+			{#if op.multi_source}<Flag>several sources: see timeline</Flag>
+			{:else if op.events_emitted === null}<Flag>total unknown</Flag>{/if}
+			{#if op.reported_dropped > 0}<Flag>{op.reported_dropped} dropped by SDK</Flag>{/if}
+			{#if op.detail_expired}<Flag>detail expired</Flag>{/if}
+		{/snippet}
+		{#snippet attemptFacts(op: OperationSummary)}
+			{#if op.failed_attempts}<Flag>{op.failed_attempts} failed</Flag>{/if}
+			{#if op.uncertain_attempts}<Flag>{op.uncertain_attempts} uncertain</Flag>{/if}
+		{/snippet}
+		{#if viewport.narrow}
+			<!-- Below 640 px each operation is a card with its status first (review U1). -->
+			<ul class="grid gap-2" aria-label="Operations">
 				{#each result.data.operations as op (op.operation_id)}
-					<TableRow>
-						<TableCell class="font-mono text-xs">{time(op.first_event_time)}</TableCell>
-						<TableCell>
-							<a class="font-medium underline-offset-4 hover:underline" href={resolve('/p/[project]/op/[id]', { project, id: op.operation_id })}
-								>{op.name ?? 'name not observed'}</a
-							>
-							<div class="font-mono text-xs text-muted-foreground">
-								{short(op.operation_id, 12)}{op.release ? ` · ${op.release}` : ''}
-							</div>
-						</TableCell>
-						<TableCell class="font-mono text-xs">{op.request_id ?? '—'}</TableCell>
-						<TableCell><StatusBadge status={op.status} /></TableCell>
-						<TableCell>
-							{op.events_received}{#if op.events_emitted !== null}/{op.events_emitted}{/if}
-							{#if op.events_missing}<Flag>{op.events_missing} missing</Flag>{/if}
-							{#if op.multi_source}<Flag>several sources: see timeline</Flag>
-							{:else if op.events_emitted === null}<Flag>total unknown</Flag>{/if}
-							{#if op.reported_dropped > 0}<Flag>{op.reported_dropped} dropped by SDK</Flag>{/if}
-							{#if op.detail_expired}<Flag>detail expired</Flag>{/if}
-						</TableCell>
-						<TableCell>
-							{#if op.failed_attempts}<Flag>{op.failed_attempts} failed</Flag>{/if}
-							{#if op.uncertain_attempts}<Flag>{op.uncertain_attempts} uncertain</Flag>{/if}
-						</TableCell>
-						<TableCell class="font-mono text-xs"
-							>{op.cost_estimate_micros ? money(op.cost_estimate_micros, op.cost_currency) : '—'}</TableCell
-						>
-					</TableRow>
+					<li data-testid="operation" class="grid gap-1.5 rounded-xl border bg-card p-3 text-sm">
+						<StatusBadge status={op.status} />
+						<div class="min-w-0 break-words">{@render opLink(op)}</div>
+						<div class="font-mono text-xs break-all text-muted-foreground">
+							{time(op.first_event_time)} · {op.request_id ? `request ${op.request_id}` : 'no request ID'}{op.release
+								? ` · ${op.release}`
+								: ''}
+						</div>
+						<div class="text-xs">
+							<span class="text-muted-foreground">Events</span> {@render eventsFacts(op)}
+							{@render attemptFacts(op)}
+							{#if op.cost_estimate_micros}<span class="font-mono text-muted-foreground"
+									>· est. {money(op.cost_estimate_micros, op.cost_currency)}</span
+								>{/if}
+						</div>
+					</li>
 				{/each}
-			</TableBody>
-		</Table>
+			</ul>
+		{:else}
+			<Table>
+				<TableHeader>
+					<TableRow>
+						<TableHead>Started (event time)</TableHead>
+						<TableHead>Operation</TableHead>
+						<TableHead>Request</TableHead>
+						<TableHead>Status</TableHead>
+						<TableHead>Events</TableHead>
+						<TableHead>Attempts</TableHead>
+						<TableHead>Est. cost</TableHead>
+					</TableRow>
+				</TableHeader>
+				<TableBody>
+					{#each result.data.operations as op (op.operation_id)}
+						<TableRow data-testid="operation">
+							<TableCell class="font-mono text-xs">{time(op.first_event_time)}</TableCell>
+							<TableCell>
+								{@render opLink(op)}
+								<div class="font-mono text-xs text-muted-foreground">
+									{short(op.operation_id, 12)}{op.release ? ` · ${op.release}` : ''}
+								</div>
+							</TableCell>
+							<TableCell class="font-mono text-xs">{op.request_id ?? '—'}</TableCell>
+							<TableCell><StatusBadge status={op.status} /></TableCell>
+							<TableCell>{@render eventsFacts(op)}</TableCell>
+							<TableCell>{@render attemptFacts(op)}</TableCell>
+							<TableCell class="font-mono text-xs"
+								>{op.cost_estimate_micros ? money(op.cost_estimate_micros, op.cost_currency) : '—'}</TableCell
+							>
+						</TableRow>
+					{/each}
+				</TableBody>
+			</Table>
+		{/if}
 		{#if result.data.next}
 			{@const next = result.data.next}
 			<Button class="mt-4" variant="outline" onclick={() => load(next)}>Older operations</Button>

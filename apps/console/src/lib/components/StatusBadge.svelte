@@ -23,7 +23,7 @@
 
 <Badge
 	variant="outline"
-	class="badge {status.state} {look[status.state] ?? ''}"
+	class="badge {status.state} {look[status.state] ?? ''} max-sm:max-w-full max-sm:whitespace-normal max-sm:text-left"
 	title={status.declared === false ? 'not declared by the host' : 'declared by the host'}
 >
 	{#if status.state === 'succeeded'}<CircleCheck aria-hidden="true" />

@@ -5,6 +5,7 @@
 # operation, an operation known only from gap reports, hostile event text, a denial).
 # Then the first real host (A2): Durable Runner (scripts/durable-runner.sh) running the
 # article workflow through the adapter, with the collector reading the runner's answer.
+# Arguments go to Playwright (for example a spec file or `-g <title>`); none runs every journey.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -276,4 +277,4 @@ AIOPS_E2E_DR_RESTART=article/e2e-dr-restart \
 AIOPS_SCREENS_DIR="${AIOPS_SCREENS_DIR:-}" \
 AIOPS_E2E_BASE="http://127.0.0.1:$port" AIOPS_E2E_TOKEN="$token" AIOPS_E2E_OTHER_TOKEN="$other_token" \
 AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_BIG=e2e-big AIOPS_E2E_LONG=e2e-long AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
-  npm run test:e2e --workspace @aiops/console
+  npm run test:e2e --workspace @aiops/console -- "$@"
