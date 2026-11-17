@@ -82,8 +82,10 @@ against the tickets, compares, and writes the result file under
   (A1); the layer run is A4.
 - **Which workflow counts (D-024).** The comparison that decides the ship
   gate runs on a workflow whose evidence is split across at least two
-  services' logs — the Durable Runner-hosted workflow (A2). The reference
-  host keeps one clean, request-scoped log, so its logs-only baseline
-  already needs about one search action per ticket (dry run
-  `perf/results/drill/20261116T223335Z-baseline.md`); no tool can be 30%
-  better than that, and reference-host runs are dry runs of the kit only.
+  services' logs — the Durable Runner-hosted workflow (A2) — and its
+  baseline uses those services' logs as they ship, not lines written for
+  the drill. On the reference host the logs-only baseline needs about one
+  search action per ticket (dry runs in `perf/results/drill/`), while the
+  console needs at least two (a list search and a timeline load) plus the
+  publisher lookup for a lost publish, so reference-host runs are dry runs
+  of the kit only.

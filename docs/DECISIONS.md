@@ -211,21 +211,27 @@ are listed at the end, not guessed.
   A0 is larger than the original — accepted, because a schema without a
   collector cannot prove bounded ingestion.
 
-- **D-024 — The drill's comparison runs on a multi-service workflow, and
-  every run includes a lost publish response (amends D-017 before any
-  counted run).** The first dry run of the kit on the reference host
-  (`perf/results/drill/20261116T223335Z-baseline.md`, seeder-aware) needed
-  a median of one search action per ticket with logs alone: the host writes
-  one clean log with the request ID on every line, so `grep <request id>`
-  answers most tickets. A 30% reduction from one action is impossible, so
-  the reference host cannot decide the ship gate; it proves the kit and the
-  mechanism. The deciding comparison runs on the Durable Runner-hosted
-  workflow (A2), where the evidence is split across the runner, its
-  handlers and the publisher. The same dry run drew no
+- **D-024 — The drill's comparison runs on a multi-service workflow whose
+  logs the builder did not write, and every run includes a lost publish
+  response (amends D-017 before any counted run).** Two dry runs of the kit
+  on the reference host (`perf/results/drill/`, seeder-aware) needed a
+  median of 1 and 1.5 search actions per ticket with logs alone: the host
+  writes one clean log with the request ID on every line, so `grep <request
+  id>` answers most tickets, and a lost publish adds one publisher lookup.
+  The layer cannot beat that there: finding an operation in the console is
+  at least a list search plus a timeline load (two counted actions), and a
+  lost publish still needs the publisher lookup, because the trace is
+  evidence, not the authority. So the reference host cannot decide the ship
+  gate; it proves the kit and the mechanism. A further risk: the builder
+  wrote the baseline's log lines (and chose not to log cost), so the
+  baseline's difficulty was under the seeder's control. The deciding
+  comparison therefore runs on the Durable Runner-hosted workflow (A2), and
+  its baseline uses Durable Runner's and the handlers' logs **as they ship**,
+  not lines written for the drill. The first dry run also drew no
   `publish_lost_response` (draws were with repetition), the class the
   guide's first release is about, so every run now includes at least one.
-  Trade-off: the gate moves later, behind A2 — accepted; a gate that the
-  baseline already passes measures nothing.
+  Trade-off: the gate moves later, behind A2 — accepted; a gate whose
+  baseline the builder controls measures nothing.
 
 ## Open questions
 

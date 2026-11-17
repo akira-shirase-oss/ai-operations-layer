@@ -1,6 +1,8 @@
 # AI Operations Layer
 
-> **Status — A0 built; A1 partly (2026-11-16).** Decisions D-012–D-024
+> **Status — A0 reopened, fixes in progress; A1 partly (2026-11-16).** An
+> independent review found timeline-honesty and ingestion defects; A0 stays in
+> progress until they are fixed (`docs/ROADMAP.md`). Decisions D-012–D-024
 > answer OQ1–OQ6 and amend the drill before any counted run. Built and
 > tested: the pure domain crate, the PostgreSQL store, the bounded collector
 > and query API, the Rust SDK, the investigation console (checked in
@@ -34,7 +36,7 @@ through public APIs (D-012).
   investigate/control paths, consistency story, layout
 - `docs/ROADMAP.md` — A0 spine → A1 one workflow, investigated → A2 first
   real host → A3 controlled recovery → A4 quality/adoption
-- `docs/DECISIONS.md` — D-001..D-023 and any open question
+- `docs/DECISIONS.md` — D-001..D-024 and any open question
 - `docs/DRILL.md` — the pre-registered diagnosis drill behind the ship gate
 - `docs/INGEST_CONTRACT.md` — the language-neutral wire contract (schema v1)
 
