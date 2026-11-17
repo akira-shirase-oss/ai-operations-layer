@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Prints the path of a release `durable-server` built from Durable Runner's public
+# Prints the path of a release `durable-server` (with `durable-cli` beside it) built from
+# Durable Runner's public
 # repository at the revision this layer is tested against (its D-050 handler-call headers).
 # Uses DURABLE_RUNNER_DIR (a checkout) when set, else clones into target/durable-runner-src.
 # Either way the runner is built in its own repository's target/ (never this one's).
@@ -23,5 +24,5 @@ elif ! git -C "$dir" merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
   echo "error: $dir does not contain Durable Runner $rev (the handler-call headers)" >&2
   exit 1
 fi
-(cd "$dir" && cargo build --release --locked --quiet -p durable-server >&2)
+(cd "$dir" && cargo build --release --locked --quiet -p durable-server -p durable-cli >&2)
 echo "$(cd "$dir" && pwd)/target/release/durable-server"
