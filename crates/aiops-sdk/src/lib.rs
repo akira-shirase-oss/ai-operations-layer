@@ -76,8 +76,15 @@ pub struct Config {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub max_send_attempts: u32,
-    /// Total time one batch may spend in retries before it is dropped and counted.
+    /// Total time one batch may spend sending, every attempt's timeout included, before it
+    /// is dropped and counted.
     pub retry_budget: Duration,
+    /// Failed batches in a row that open the circuit breaker: the next batch is then held
+    /// and sent as a probe after the cool-down.
+    pub breaker_threshold: u32,
+    /// The first cool-down; it doubles with each failed probe, up to 5 s, so recovery
+    /// after an outage takes at most that long.
+    pub breaker_cooldown: Duration,
     /// Operations whose drops are tracked one by one; beyond it, drops are counted only
     /// in aggregate (`gap_overflow`).
     pub gap_capacity: usize,
@@ -121,6 +128,8 @@ impl Config {
             request_timeout: Duration::from_secs(2),
             max_send_attempts: 3,
             retry_budget: Duration::from_secs(5),
+            breaker_threshold: 3,
+            breaker_cooldown: Duration::from_millis(500),
             gap_capacity: 4_096,
             include_error_messages: false,
             opt_in_attributes: Vec::new(),
@@ -144,6 +153,8 @@ pub struct Stats {
     pub gap_reports_sent: u64,
     pub batches_sent: u64,
     pub batches_failed: u64,
+    /// Times the circuit breaker opened (sends paused for a cool-down, then probed).
+    pub breaker_opened: u64,
     pub truncated_events: u64,
     pub attributes_dropped_locally: u64,
     /// Age of the oldest event in the most recent batch at send time (queue age).
@@ -174,6 +185,7 @@ struct Counters {
     gap_reports_sent: AtomicU64,
     batches_sent: AtomicU64,
     batches_failed: AtomicU64,
+    breaker_opened: AtomicU64,
     truncated_events: AtomicU64,
     attributes_dropped_locally: AtomicU64,
     last_queue_age_us: AtomicU64,
@@ -200,6 +212,7 @@ impl Counters {
             gap_reports_sent: g(&self.gap_reports_sent),
             batches_sent: g(&self.batches_sent),
             batches_failed: g(&self.batches_failed),
+            breaker_opened: g(&self.breaker_opened),
             truncated_events: g(&self.truncated_events),
             attributes_dropped_locally: g(&self.attributes_dropped_locally),
             last_queue_age_us: g(&self.last_queue_age_us),

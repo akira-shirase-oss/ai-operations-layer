@@ -94,7 +94,8 @@ async fn fake_collector_with_limit(max_body: usize) -> (String, Arc<Fake>) {
 fn config(endpoint: &str) -> Config {
     let mut c = Config::new(endpoint, KEY, "reference-host");
     c.flush_interval = Duration::from_millis(20);
-    c.retry_budget = Duration::from_millis(500);
+    // The budget includes each attempt's timeout: room for a retry after a fast failure.
+    c.retry_budget = Duration::from_millis(1_500);
     c.request_timeout = Duration::from_millis(500);
     c
 }
@@ -525,4 +526,84 @@ async fn an_event_the_collector_refuses_is_reported_as_a_rejected_gap() {
     assert_eq!(gap["reason"], "rejected");
     assert_eq!(gap["dropped"], 1);
     assert_eq!(gap["operation_id"], refused_op);
+}
+
+// Review finding 21: the retry budget includes each attempt's own timeout, and a circuit
+// breaker stops sending to a collector that keeps failing (still counting every drop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attempt_is_not_started_when_its_timeout_would_overrun_the_retry_budget() {
+    let (endpoint, fake) = fake_collector().await;
+    fake.mode.store(HANG, Ordering::SeqCst);
+    let mut cfg = config(&endpoint);
+    cfg.request_timeout = Duration::from_millis(1_000);
+    cfg.retry_budget = Duration::from_millis(1_500);
+    let client = Client::start(&cfg).unwrap();
+    let started = Instant::now();
+    run_operation(&client, 1);
+    eventually(|| client.stats().dropped_send_failed == 4).await;
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(1_800),
+        "one batch took {took:?} against a 1.5 s budget"
+    );
+    assert_eq!(
+        fake.requests.load(Ordering::SeqCst),
+        1,
+        "a second 1 s attempt would overrun the budget"
+    );
+    client.shutdown(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_collector_that_keeps_failing_trips_the_breaker_and_every_drop_is_still_counted() {
+    let (endpoint, fake) = fake_collector().await;
+    fake.mode.store(HANG, Ordering::SeqCst);
+    let mut cfg = config(&endpoint);
+    cfg.request_timeout = Duration::from_millis(300);
+    cfg.retry_budget = Duration::from_millis(400);
+    cfg.batch_max_events = 4; // one operation per batch
+    cfg.breaker_cooldown = Duration::from_millis(1_000);
+    let client = Client::start(&cfg).unwrap();
+    for n in 0..50 {
+        run_operation(&client, n);
+    }
+    // Without a breaker, 3 s against a hanging collector is ~10 attempts of 300 ms; with
+    // it, three failures open it and the next batch waits a second to be the probe.
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let requests = fake.requests.load(Ordering::SeqCst);
+    assert!(
+        (3..=5).contains(&requests),
+        "requests to a failing collector: {requests}"
+    );
+    assert_eq!(client.stats().breaker_opened, 1);
+    let s = client.shutdown(Duration::from_millis(500)).await;
+    assert_eq!(
+        s.dropped(),
+        s.emitted,
+        "every event still accounted for: {s:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_an_outage_the_breaker_recovers_quickly_and_held_events_arrive() {
+    let (endpoint, fake) = fake_collector().await;
+    fake.mode.store(FAIL_503, Ordering::SeqCst);
+    let mut cfg = config(&endpoint);
+    cfg.max_send_attempts = 1;
+    cfg.batch_max_events = 4;
+    let client = Client::start(&cfg).unwrap();
+    for n in 0..5 {
+        run_operation(&client, n);
+    }
+    eventually(|| client.stats().breaker_opened == 1).await;
+    fake.mode.store(ACCEPT, Ordering::SeqCst);
+    run_operation(&client, 99);
+    // Held, then sent as a probe within the (short) cool-down: nothing lost after recovery.
+    eventually(|| {
+        all_events(&fake)
+            .iter()
+            .any(|e| e["request_id"] == "req-99")
+    })
+    .await;
+    client.shutdown(Duration::from_secs(2)).await;
 }

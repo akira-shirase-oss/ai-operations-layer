@@ -31,8 +31,21 @@ pub(crate) struct Flusher {
     max_attempts: u32,
     retry_budget: Duration,
     batch_max_bytes: usize,
+    request_timeout: Duration,
     pending_reports: Vec<Event>,
+    /// Circuit breaker (review finding 21): after `breaker_threshold` failed batches in a
+    /// row, the flusher holds its next batch until `open_until` and sends it as a probe, so
+    /// a failing collector gets one attempt per cool-down instead of a stream of them;
+    /// each failed probe doubles the cool-down, up to `BREAKER_MAX_COOLDOWN`. Meanwhile the
+    /// bounded queue absorbs new events (and drops, counted, only if it fills).
+    consecutive_failures: u32,
+    open_until: Option<tokio::time::Instant>,
+    cooldown: Duration,
+    breaker_threshold: u32,
+    breaker_cooldown: Duration,
 }
+
+const BREAKER_MAX_COOLDOWN: Duration = Duration::from_secs(5);
 
 enum Sent {
     Accepted(Option<IngestResponse>),
@@ -74,7 +87,13 @@ impl Flusher {
             max_attempts: config.max_send_attempts.max(1),
             retry_budget: config.retry_budget,
             batch_max_bytes: config.batch_max_bytes,
+            request_timeout: config.request_timeout,
             pending_reports: Vec::new(),
+            consecutive_failures: 0,
+            open_until: None,
+            cooldown: config.breaker_cooldown,
+            breaker_threshold: config.breaker_threshold.max(1),
+            breaker_cooldown: config.breaker_cooldown,
         }
     }
 
@@ -270,6 +289,14 @@ impl Flusher {
         let mut delivered_reports = std::collections::HashSet::new();
         let c = &self.inner.counters;
         while let Some(chunk) = stack.pop() {
+            if let Some(until) = self.open_until {
+                // Hold this batch and send it as the probe when the cool-down ends (a
+                // shutdown cuts the wait short; its deadline then bounds the rest).
+                tokio::select! {
+                    () = tokio::time::sleep_until(until) => {}
+                    () = self.inner.cancel.cancelled() => {}
+                }
+            }
             let Some(body) = self.envelope(&chunk) else {
                 self.lost(chunk, GapReason::Rejected);
                 continue;
@@ -283,6 +310,9 @@ impl Flusher {
             match outcome {
                 Sent::Accepted(answer) => {
                     self.accepted(&chunk, answer.as_ref(), &mut delivered_reports);
+                    self.consecutive_failures = 0;
+                    self.open_until = None;
+                    self.cooldown = self.breaker_cooldown;
                 }
                 Sent::Rejected(StatusCode::PAYLOAD_TOO_LARGE) if chunk.len() > 1 => {
                     let mut first = chunk;
@@ -301,6 +331,14 @@ impl Flusher {
                 Sent::Failed => {
                     add(&c.batches_failed, 1);
                     self.lost(chunk, GapReason::SendFailed);
+                    self.consecutive_failures += 1;
+                    if self.consecutive_failures >= self.breaker_threshold {
+                        if self.open_until.is_none() {
+                            add(&c.breaker_opened, 1);
+                        }
+                        self.open_until = Some(tokio::time::Instant::now() + self.cooldown);
+                        self.cooldown = (self.cooldown * 2).min(BREAKER_MAX_COOLDOWN);
+                    }
                 }
             }
         }
@@ -410,7 +448,8 @@ impl Flusher {
                 .min(BACKOFF_CAP_MS);
             let wait = retry_after
                 .unwrap_or_else(|| Duration::from_millis(self.inner.ids.jitter_ms(backoff_cap)));
-            if started.elapsed() + wait > self.retry_budget {
+            // The budget covers the next attempt's own timeout too (review finding 21).
+            if started.elapsed() + wait + self.request_timeout > self.retry_budget {
                 return Sent::Failed;
             }
             tokio::time::sleep(wait).await;
