@@ -1,11 +1,12 @@
 # AI Operations Layer
 
-> **Status — A0 reopened, fixes in progress; A1 partly (2026-11-16).** An
-> independent review found timeline-honesty and ingestion defects; A0 stays in
-> progress until they are fixed (`docs/ROADMAP.md`). Decisions D-012–D-024
-> answer OQ1–OQ6 and amend the drill before any counted run. Built and
-> tested: the pure domain crate, the PostgreSQL store, the bounded collector
-> and query API, the Rust SDK, the investigation console (checked in
+> **Status — A0 done (re-closed after review fixes); A1 partly (2026-11-17).**
+> An independent review reopened A0 on 2026-11-16; its timeline-honesty,
+> ingestion, retention, SDK and policy findings are fixed, each with a test
+> (`docs/ROADMAP.md`). Decisions D-012–D-024 answer OQ1–OQ6 and amend the
+> drill before any counted run. Built and tested: the pure domain crate, the
+> PostgreSQL store, the bounded collector and query API, the Rust SDK, the
+> investigation console (on the workspace design system, checked in
 > Chromium), and the in-repo reference host with the contract failure cases
 > as end-to-end tests. Load evidence so far is two short smokes on a heavily
 > loaded laptop (no loss; ingest latency target missed); the 1,000,000-event
