@@ -71,7 +71,7 @@ pub async fn ingest(
         received_at,
         events: prepared.into_iter().map(|(_, p)| p).collect(),
         refused: refused_count,
-        new_names: names.new,
+        new_names: names.new.clone(),
         touched_names: names.touched,
     };
     let stored =
@@ -79,11 +79,14 @@ pub async fn ingest(
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 Metrics::add(&app.metrics.store_unavailable, 1);
+                forget_names(&app, key.project_id, key.id, &names.new).await;
                 return Err(e.into());
             }
             Err(_) => {
-                // The transaction may still commit; the SDK's retry is idempotent (D-019).
+                // The transaction may still commit; the SDK's retry is idempotent (D-019),
+                // and a name stored after all is inserted again harmlessly.
                 Metrics::add(&app.metrics.store_unavailable, 1);
+                forget_names(&app, key.project_id, key.id, &names.new).await;
                 return Err(ApiError::StoreUnavailable);
             }
         };
@@ -288,6 +291,23 @@ fn visit_names(event: &mut Event, mut f: impl FnMut(&'static str, &mut String)) 
 struct NameUse {
     new: Vec<String>,
     touched: Vec<String>,
+}
+
+/// Takes back the names a batch admitted when the batch was not stored (review G1): they
+/// were never written to `known_names`, so a later batch must admit and store them, not
+/// only touch them. Rare (a failed store), so the exclusive lock is fine here.
+async fn forget_names(app: &AppState, project: Uuid, key: Uuid, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let Ok(registry) = registry(app, project).await else {
+        return;
+    };
+    if let Some(mut w) = app.names_exclusive_lock.write(&registry) {
+        for n in names {
+            w.forget(n, *key.as_bytes());
+        }
+    }
 }
 
 /// The project's name registry, loaded from the store on its first batch.

@@ -74,6 +74,16 @@ impl NameRegistry {
         Admission::New
     }
 
+    /// Takes back a name admitted for a batch that was then not stored, and refunds the
+    /// key's budget, so the next batch that uses it admits and stores it (review G1).
+    pub fn forget(&mut self, name: &str, key: KeyId) {
+        if self.names.remove(name)
+            && let Some(used) = self.per_key.get_mut(&key)
+        {
+            *used = used.saturating_sub(1);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.names.len()
     }
@@ -109,6 +119,22 @@ mod tests {
         );
         assert_eq!(r.admit("step:_overflow", [2; 16]), Admission::Known);
         assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn a_forgotten_name_is_new_again_and_its_budget_refunded() {
+        let mut r = NameRegistry::new(10, 1, std::iter::empty());
+        assert_eq!(r.admit("op:a", [1; 16]), Admission::New);
+        assert_eq!(r.admit("op:b", [1; 16]), Admission::OverBudget);
+        r.forget("op:a", [1; 16]);
+        assert!(!r.is_known("op:a"));
+        assert_eq!(
+            r.admit("op:b", [1; 16]),
+            Admission::New,
+            "the share came back"
+        );
+        r.forget("op:zz", [1; 16]); // never admitted: nothing changes
+        assert_eq!(r.len(), 1);
     }
 
     #[test]

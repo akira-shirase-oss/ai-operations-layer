@@ -302,3 +302,45 @@ fn measure_ingest_locks() {
         db.drop().await;
     });
 }
+
+/// Review G1: a name admitted in memory whose batch then fails to store must not be
+/// treated as known by the next batch (which would only touch a row that was never
+/// written, leaving the stored registry, and the budget a reload computes, behind).
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_name_whose_batch_failed_to_store_is_stored_by_the_next_batch(pool: PgPool) {
+    let e = common::env(pool.clone()).await;
+    sqlx::query(
+        "CREATE FUNCTION refuse_g1() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.name = 'release:g1-r1' THEN RAISE EXCEPTION 'g1'; END IF; RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse_g1 BEFORE INSERT ON known_names FOR EACH ROW EXECUTE FUNCTION refuse_g1()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut batch: Value = serde_json::from_str(&reference_batch(4, 0, 1)).unwrap();
+    batch["events"][0]["release"] = json!("g1-r1");
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch.to_string())).await;
+    assert!(r.status >= 500, "{:?} {:?}", r.status, r.body);
+    sqlx::query("DROP TRIGGER refuse_g1 ON known_names")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut batch: Value = serde_json::from_str(&reference_batch(4, 1, 1)).unwrap();
+    batch["events"][0]["release"] = json!("g1-r1");
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch.to_string())).await;
+    assert_eq!(r.body["accepted"], 10, "{:?}", r.body);
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM known_names WHERE name = 'release:g1-r1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored, 1,
+        "the name the failed batch admitted is stored now"
+    );
+}
