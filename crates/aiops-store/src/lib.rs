@@ -23,6 +23,16 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+/// The columns of an [`OperationRow`], in the order [`operation_row`] reads them.
+macro_rules! operation_columns {
+    () => {
+        "SELECT operation_id, name, request_id, release, first_event_time, last_event_time, last_received_at,
+                host_events, gap_reports, reported_dropped, finish_outcome, finish_detail, events_emitted,
+                failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency, finish_conflict,
+                first_received_at, multi_source"
+    };
+}
+
 /// Store failures. `Display` is safe to show; the database's own message is only reachable
 /// through `source()`, for logs.
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +114,39 @@ impl From<sqlx::Error> for StoreError {
             _ => Self::Database(e),
         }
     }
+}
+
+/// One operation's summary by primary key (`$1` project, `$2` operation); public so its plan
+/// can be checked (review N8).
+pub const OPERATION_SUMMARY_SQL: &str = concat!(
+    operation_columns!(),
+    " FROM operations WHERE project_id = $1 AND operation_id = $2"
+);
+
+fn operation_row(r: &sqlx::postgres::PgRow) -> Result<OperationRow, StoreError> {
+    let id: Uuid = r.get(0);
+    Ok(OperationRow {
+        operation_id: OperationId::from_bytes(*id.as_bytes()).ok_or(StoreError::Corrupt)?,
+        name: r.get(1),
+        request_id: r.get(2),
+        release: r.get(3),
+        first_event_time: from_odt(r.get(4)),
+        last_event_time: from_odt(r.get(5)),
+        last_received_at: from_odt(r.get(6)),
+        host_events: r.get(7),
+        gap_reports: r.get(8),
+        reported_dropped: r.get(9),
+        finish_outcome: r.get(10),
+        finish_detail: r.get(11),
+        events_emitted: r.get(12),
+        failed_attempts: r.get(13),
+        uncertain_attempts: r.get(14),
+        cost_estimate_micros: r.get(15),
+        cost_currency: r.get(16),
+        finish_conflict: r.get(17),
+        first_received_at: from_odt(r.get(18)),
+        multi_source: r.get(19),
+    })
 }
 
 #[cfg(test)]
@@ -616,19 +659,16 @@ impl Store {
         let (before_t, before_id) = filter.before.map_or((None, None), |(t, id)| {
             (Some(to_odt(t)), Some(uuid128(id.as_bytes())))
         });
-        let rows = sqlx::query(
-            "SELECT operation_id, name, request_id, release, first_event_time, last_event_time, last_received_at,
-                    host_events, gap_reports, reported_dropped, finish_outcome, finish_detail, events_emitted,
-                    failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency, finish_conflict,
-                    first_received_at, multi_source
-             FROM operations
+        let rows = sqlx::query(concat!(
+            operation_columns!(),
+            " FROM operations
              WHERE project_id = $1
                AND ($2::timestamptz IS NULL OR (first_event_time, operation_id) < ($2, $3::uuid))
                AND ($4::text IS NULL OR request_id = $4)
                AND ($6::uuid IS NULL OR operation_id = $6)
              ORDER BY first_event_time DESC, operation_id DESC
-             LIMIT $5",
-        )
+             LIMIT $5"
+        ))
         .bind(project_id)
         .bind(before_t)
         .bind(before_id)
@@ -637,34 +677,7 @@ impl Store {
         .bind(filter.operation_id.map(|o| uuid128(o.as_bytes())))
         .fetch_all(&self.query)
         .await?;
-        rows.into_iter()
-            .map(|r| {
-                let id: Uuid = r.get(0);
-                Ok(OperationRow {
-                    operation_id: OperationId::from_bytes(*id.as_bytes())
-                        .ok_or(StoreError::Corrupt)?,
-                    name: r.get(1),
-                    request_id: r.get(2),
-                    release: r.get(3),
-                    first_event_time: from_odt(r.get(4)),
-                    last_event_time: from_odt(r.get(5)),
-                    last_received_at: from_odt(r.get(6)),
-                    host_events: r.get(7),
-                    gap_reports: r.get(8),
-                    reported_dropped: r.get(9),
-                    finish_outcome: r.get(10),
-                    finish_detail: r.get(11),
-                    events_emitted: r.get(12),
-                    failed_attempts: r.get(13),
-                    uncertain_attempts: r.get(14),
-                    cost_estimate_micros: r.get(15),
-                    cost_currency: r.get(16),
-                    finish_conflict: r.get(17),
-                    first_received_at: from_odt(r.get(18)),
-                    multi_source: r.get(19),
-                })
-            })
-            .collect()
+        rows.into_iter().map(|r| operation_row(&r)).collect()
     }
 
     /// The operation's stored events, oldest event time first, at most `limit`; the flag
@@ -781,17 +794,14 @@ impl Store {
         project_id: Uuid,
         operation_id: OperationId,
     ) -> Result<Option<OperationRow>, StoreError> {
-        let mut rows = self
-            .list_operations(
-                project_id,
-                &ListFilter {
-                    limit: 1,
-                    operation_id: Some(operation_id),
-                    ..ListFilter::default()
-                },
-            )
+        // Its own primary-key lookup (review N8): the list's catch-all filter, run as a
+        // generic plan, scanned every operation of the project.
+        let row = sqlx::query(OPERATION_SUMMARY_SQL)
+            .bind(project_id)
+            .bind(uuid128(operation_id.as_bytes()))
+            .fetch_optional(&self.query)
             .await?;
-        Ok(rows.pop())
+        row.map(|r| operation_row(&r)).transpose()
     }
 
     /// Raw events received before this may have been deleted by retention (`None`: the

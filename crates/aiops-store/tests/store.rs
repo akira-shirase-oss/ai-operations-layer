@@ -710,3 +710,50 @@ async fn a_saturated_audit_path_does_not_block_revocation(pool: PgPool) {
         let _ = a.await.unwrap(); // some may time out acquiring; none may hang
     }
 }
+
+// Review N8: the timeline's summary lookup uses the primary key even as a generic plan (the
+// list's catch-all filter scanned the project's whole `operations_recent` range).
+#[sqlx::test(migrations = "./migrations")]
+async fn the_summary_lookup_uses_the_primary_key_as_a_generic_plan(pool: PgPool) {
+    // A project with a few thousand operations, analysed, so the planner sees real sizes.
+    let store = Store::from_pool(pool.clone());
+    let project = store.create_project("pilot").await.unwrap();
+    sqlx::query(
+        "INSERT INTO operations (project_id, operation_id, first_event_time, last_event_time,
+                                 first_received_at, last_received_at)
+         SELECT $1, gen_random_uuid(), now() - g * interval '1 second', now(), now(), now()
+         FROM generate_series(1, 5000) g",
+    )
+    .bind(project)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE operations")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut c = pool.acquire().await.unwrap();
+    for set in [
+        "SET enable_seqscan = off",
+        "SET plan_cache_mode = force_generic_plan",
+    ] {
+        sqlx::query(set).execute(&mut *c).await.unwrap();
+    }
+    // The statement is the crate's own constant, not input.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PREPARE summary(uuid, uuid) AS {}",
+        aiops_store::OPERATION_SUMMARY_SQL
+    )))
+    .execute(&mut *c)
+    .await
+    .unwrap();
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN EXECUTE summary('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002')",
+    )
+    .fetch_all(&mut *c)
+    .await
+    .unwrap();
+    let plan = plan.join("\n");
+    assert!(plan.contains("operations_pkey"), "{plan}");
+    assert!(plan.contains("operation_id = $2"), "{plan}");
+}
