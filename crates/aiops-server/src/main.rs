@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use aiops_server::retention::{self, SweepPlan};
+use aiops_server::serve::{self, ServeLimits};
 use aiops_server::{AppState, Config, admin, console, router, system_clock};
 use aiops_store::{Retention, Store, StoreConfig};
 use anyhow::Context;
@@ -93,6 +94,8 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
     };
     let listen = config.listen;
     let grace = config.shutdown_grace;
+    let header_read_timeout = config.header_read_timeout;
+    let max_connections = config.max_connections;
     let sweep_every = config.retention_sweep_every;
     let state = Arc::new(AppState::new(store.clone(), config, system_clock(), csp));
     let app = router(state.clone());
@@ -122,27 +125,50 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
-    tracing::info!(%listen, "collector listening");
-    let shutdown = {
+    let limits = ServeLimits {
+        header_read_timeout,
+        max_connections: fit_to_file_limit(max_connections).await,
+        drain_grace: grace,
+    };
+    tracing::info!(%listen, max_connections = limits.max_connections, "collector listening");
+    {
         let cancel = cancel.clone();
-        async move {
+        tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down: draining");
             cancel.cancel();
-        }
-    };
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
-    let drained = {
-        let cancel = cancel.clone();
-        async move {
-            cancel.cancelled().await;
-            tokio::time::sleep(grace).await;
-        }
-    };
-    tokio::select! {
-        r = server => r?,
-        () = drained => tracing::warn!("drain deadline passed; exiting with requests in flight"),
+        });
     }
+    serve::run(listener, app, limits, cancel.clone()).await?;
     tracker.wait().await;
     Ok(())
+}
+
+/// Keeps the connection cap under the process's open-file limit (with room for the
+/// database pools and files), so accepting never fails for lack of descriptors.
+async fn fit_to_file_limit(wanted: usize) -> usize {
+    let limit = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("sh")
+            .args(["-c", "ulimit -n"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<usize>().ok())
+    })
+    .await
+    .ok()
+    .flatten();
+    match limit {
+        Some(n) if n < wanted + 128 => {
+            let fitted = n.saturating_sub(128).max(16);
+            tracing::warn!(
+                open_file_limit = n,
+                wanted,
+                fitted,
+                "connection cap lowered to fit the open-file limit"
+            );
+            fitted
+        }
+        _ => wanted,
+    }
 }

@@ -32,6 +32,11 @@ pub struct Config {
     pub timeline_max_events: usize,
     pub retention_sweep_every: Option<Duration>,
     pub shutdown_grace: Duration,
+    /// A request's headers must arrive within this; idle keep-alive connections close
+    /// after it too.
+    pub header_read_timeout: Duration,
+    /// Accepted connections at most.
+    pub max_connections: usize,
 }
 
 impl Config {
@@ -56,6 +61,8 @@ impl Config {
             timeline_max_events: 5_000,
             retention_sweep_every: Some(Duration::from_secs(300)),
             shutdown_grace: Duration::from_secs(10),
+            header_read_timeout: Duration::from_secs(10),
+            max_connections: 2_048,
         }
     }
 
@@ -81,6 +88,8 @@ impl Config {
         let mut qburst = u64::from(cfg.query_burst);
         let mut ingest_conns = u64::from(cfg.ingest_connections);
         let mut sweep_secs = cfg.retention_sweep_every.map_or(0, |d| d.as_secs());
+        let mut header_secs = cfg.header_read_timeout.as_secs();
+        let mut max_conns = cfg.max_connections as u64;
         num("AIOPS_INGEST_MAX_IN_FLIGHT", &mut in_flight);
         num("AIOPS_INGEST_EVENTS_PER_SEC", &mut rate);
         num("AIOPS_INGEST_BURST_EVENTS", &mut burst);
@@ -88,6 +97,8 @@ impl Config {
         num("AIOPS_QUERY_BURST", &mut qburst);
         num("AIOPS_INGEST_CONNECTIONS", &mut ingest_conns);
         num("AIOPS_RETENTION_SWEEP_SECS", &mut sweep_secs);
+        num("AIOPS_HEADER_READ_TIMEOUT_SECS", &mut header_secs);
+        num("AIOPS_MAX_CONNECTIONS", &mut max_conns);
         let to_u32 = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
         cfg.ingest_max_in_flight = usize::try_from(in_flight).unwrap_or(usize::MAX);
         cfg.ingest_events_per_sec = to_u32(rate);
@@ -96,6 +107,8 @@ impl Config {
         cfg.query_burst = to_u32(qburst);
         cfg.ingest_connections = to_u32(ingest_conns);
         cfg.retention_sweep_every = Some(Duration::from_secs(sweep_secs));
+        cfg.header_read_timeout = Duration::from_secs(header_secs);
+        cfg.max_connections = usize::try_from(max_conns).unwrap_or(usize::MAX);
         if let Ok(v) = std::env::var("AIOPS_LISTEN") {
             match v.parse() {
                 Ok(addr) => cfg.listen = addr,

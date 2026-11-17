@@ -16,6 +16,7 @@ pub mod error;
 pub mod ingest;
 pub mod query;
 pub mod retention;
+pub mod serve;
 
 pub use app::{AppState, SharedState, router, system_clock};
 pub use config::Config;
