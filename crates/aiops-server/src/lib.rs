@@ -10,6 +10,7 @@
 pub mod admin;
 pub mod app;
 pub mod auth;
+pub mod authority;
 pub mod config;
 pub mod console;
 pub mod error;

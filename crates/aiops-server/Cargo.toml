@@ -22,6 +22,8 @@ getrandom.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+# The runner's own answer for the console (authority.rs): read-only, bounded, rustls.
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

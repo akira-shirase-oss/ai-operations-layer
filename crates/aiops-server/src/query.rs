@@ -73,7 +73,7 @@ async fn deny(
 }
 
 /// Resolves `slug` to a project the actor may read, or denies and audits.
-async fn authorize(
+pub(crate) async fn authorize(
     app: &AppState,
     actor: &Actor,
     action: &str,

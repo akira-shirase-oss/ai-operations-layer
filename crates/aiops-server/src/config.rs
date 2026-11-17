@@ -5,6 +5,26 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// A job runner whose own answer the console may show beside a timeline (D-027): Durable
+/// Runner, read with its read-only key.
+#[derive(Clone)]
+pub struct AuthoritySource {
+    /// The runner label the adapter reports under (`job.runner`).
+    pub label: String,
+    pub url: String,
+    pub read_key: String,
+}
+
+impl std::fmt::Debug for AuthoritySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthoritySource")
+            .field("label", &self.label)
+            .field("url", &self.url)
+            .field("read_key", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -38,6 +58,9 @@ pub struct Config {
     /// A request's headers must arrive within this; idle keep-alive connections close
     /// after it too.
     pub header_read_timeout: Duration,
+    /// `AIOPS_AUTHORITY_DURABLE_RUNNER=<label>=<url>` and
+    /// `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`: the runner the console may ask.
+    pub authority: Option<AuthoritySource>,
     /// Accepted connections at most.
     pub max_connections: usize,
     /// A response write making no progress for this long ends its connection (review N3).
@@ -76,6 +99,7 @@ impl Config {
             write_stall_timeout: Duration::from_secs(10),
             max_requests_per_connection: 1_000,
             connection_lifetime: Duration::from_secs(300),
+            authority: None,
         }
     }
 
@@ -143,6 +167,29 @@ impl Config {
         }
         if let Ok(v) = std::env::var("AIOPS_CONSOLE_DIR") {
             cfg.console_dir = Some(PathBuf::from(v));
+        }
+        if let Ok(v) = std::env::var("AIOPS_AUTHORITY_DURABLE_RUNNER") {
+            let key = std::env::var("AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY").unwrap_or_default();
+            match v.split_once('=') {
+                Some((label, url))
+                    if !label.is_empty()
+                        && (url.starts_with("http://") || url.starts_with("https://")) =>
+                {
+                    if key.len() < 32 {
+                        errors.push(
+                            "AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY (the runner's read-only key, at least 32 characters) is required with AIOPS_AUTHORITY_DURABLE_RUNNER".to_owned(),
+                        );
+                    }
+                    cfg.authority = Some(AuthoritySource {
+                        label: label.to_owned(),
+                        url: url.trim_end_matches('/').to_owned(),
+                        read_key: key,
+                    });
+                }
+                _ => errors.push(
+                    "AIOPS_AUTHORITY_DURABLE_RUNNER must be <label>=http(s)://host:port".to_owned(),
+                ),
+            }
         }
         if errors.is_empty() {
             Ok(cfg)

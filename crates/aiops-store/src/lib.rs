@@ -788,6 +788,33 @@ impl Store {
             .collect()
     }
 
+    /// The job-runner runs an operation's start events say it stands for (`job.runner`,
+    /// `job.id`, D-027), at most four distinct: telemetry's claim, which the caller checks
+    /// before acting on it.
+    pub async fn operation_links(
+        &self,
+        project_id: Uuid,
+        operation_id: OperationId,
+    ) -> Result<Vec<(String, i64)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT body->'attributes'->>'job.runner', (body->'attributes'->>'job.id')::bigint
+             FROM events
+             WHERE project_id = $1 AND operation_id = $2
+               AND body->>'type' = 'operation.started'
+               AND body->'attributes' ? 'job.runner'
+               AND body->'attributes'->>'job.id' ~ '^[0-9]{1,18}$'
+             LIMIT 4",
+        )
+        .bind(project_id)
+        .bind(uuid128(operation_id.as_bytes()))
+        .fetch_all(&self.query)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| Some((r.get::<Option<String>, _>(0)?, r.get::<Option<i64>, _>(1)?)))
+            .collect())
+    }
+
     /// One operation's summary (it outlives the raw events, D-016).
     pub async fn operation_summary(
         &self,

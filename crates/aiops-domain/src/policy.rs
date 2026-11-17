@@ -12,6 +12,8 @@ pub const DEFAULT_ALLOWED_ATTRIBUTES: &[&str] = &[
     "http.method",
     "http.route",
     "http.status_code",
+    "job.id",
+    "job.runner",
     "provider",
     "provider.region",
     "queue.name",

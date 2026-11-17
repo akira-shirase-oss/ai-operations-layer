@@ -18,8 +18,39 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "time",
+]
+
+[[package]]
+name = "aiops-dr-article-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "aiops-durable-runner"
+version = "0.1.0"
+dependencies = [
+ "aiops-domain",
+ "aiops-sdk",
+ "anyhow",
+ "axum",
+ "http-body",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

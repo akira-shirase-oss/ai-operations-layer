@@ -153,7 +153,14 @@ pub struct AppState {
     /// unknown slugs are not cached (they are denied and audited every time).
     pub projects: Mutex<HashMap<String, Project>>,
     pub projects_lock: LockStats,
+    /// Reads of the runner's own answer (authority.rs): no redirects, no proxy variables,
+    /// a connect timeout; at most `AUTHORITY_READS` at once.
+    pub authority_client: reqwest::Client,
+    pub authority_gate: Semaphore,
 }
+
+/// Runner reads in flight at most; past it the console is told "busy".
+const AUTHORITY_READS: usize = 8;
 
 /// Distinct projects held in the cache at most.
 const PROJECT_CACHE_CAP: usize = 1_000;
@@ -188,6 +195,13 @@ impl AppState {
             metrics: Metrics::default(),
             projects: Mutex::new(HashMap::new()),
             projects_lock: LockStats::default(),
+            authority_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .unwrap_or_default(),
+            authority_gate: Semaphore::new(AUTHORITY_READS),
             limits: Limits::default(),
             store,
             config,
@@ -306,6 +320,10 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/projects/{project}/operations/{operation_id}",
             get(query::timeline),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/authority",
+            get(crate::authority::authority),
         )
         .route("/v1/collector/stats", get(query::stats))
         .layer(SetResponseHeaderLayer::overriding(
