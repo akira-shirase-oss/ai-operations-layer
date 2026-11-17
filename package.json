@@ -3,7 +3,8 @@
   "private": true,
   "description": "AI Operations Layer: the JavaScript workspace (the investigation console).",
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "engines": {
     "node": ">=22.17"

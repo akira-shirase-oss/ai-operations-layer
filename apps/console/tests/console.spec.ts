@@ -11,6 +11,7 @@ const XSS = process.env['AIOPS_E2E_XSS'] ?? '';
 const DOWN = process.env['AIOPS_E2E_GAP'] ?? '';
 const E3 = process.env['AIOPS_E2E_E3'] ?? '';
 const E2 = process.env['AIOPS_E2E_E2'] ?? '';
+const BIG = process.env['AIOPS_E2E_BIG'] ?? '';
 
 function watch(page: Page): string[] {
 	const problems: string[] = [];
@@ -123,4 +124,30 @@ test('two services that declare different outcomes read as conflicting, in the l
 	await expect(page.locator('h1 .badge')).toHaveText('conflicting outcomes');
 	await expect(page.locator('.notice.fail').first()).toContainText('Conflicting outcomes.');
 	expect(problems).toEqual([]);
+});
+
+test('a 5,000-event timeline renders a window of rows and scrolls to the last one', async ({ page }) => {
+	const problems = watch(page);
+	await signIn(page);
+	await openByRequest(page, BIG);
+	await expect(page.locator('h1 .badge')).toHaveText('succeeded');
+	const list = page.locator('[role="rowgroup"]');
+	const rendered = await list.locator('[role="row"]').count();
+	expect(rendered).toBeGreaterThan(5);
+	expect(rendered).toBeLessThan(100); // of 5,000
+	await list.evaluate((el) => (el.scrollTop = el.scrollHeight));
+	await expect(list.getByText('operation.finished')).toBeVisible();
+	expect(problems).toEqual([]);
+});
+
+test.describe('dark mode', () => {
+	test.use({ colorScheme: 'dark' });
+	test('renders under the CSP with its static theme script', async ({ page }) => {
+		const problems = watch(page);
+		await signIn(page);
+		await expect(page.locator('html')).toHaveClass(/dark/);
+		await openByRequest(page, LOST);
+		await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: timeout_after_send');
+		expect(problems).toEqual([]);
+	});
 });

@@ -95,8 +95,29 @@ curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorizat
    "event_time": "$now", "outcome": "succeeded", "events_emitted": 1}
  ]}
 JSON
+# A 5,000-event operation (the timeline's cap), in ten batches of 500.
+big_op="e2e000000000000000000000000b1600"
+for b in $(seq 0 9); do
+  python3 - "$b" "$big_op" "$now" <<'PY' > "$work/big-$b.json"
+import json, sys
+b, op, now = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+events = []
+for i in range(b * 500 + 1, b * 500 + 501):
+    e = {"event_id": "e2eb%028x" % i, "operation_id": op, "seq": i, "op_seq": i, "event_time": now}
+    if i == 1:
+        e.update(type="operation.started", name="bulk_import", request_id="e2e-big")
+    elif i == 5000:
+        e.update(type="operation.finished", outcome="succeeded", events_emitted=5000)
+    else:
+        e.update(type="step.started", step_id="%016x" % i, kind="tool", name="copy", attempt=1)
+    events.append(e)
+print(json.dumps({"schema_version": 1, "source": {"instance_id": "e2e000000000000000000000000000cc", "service": "e2e-bulk", "sdk": "python"}, "events": events}))
+PY
+  curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" \
+    -H 'content-type: application/json' --data-binary @"$work/big-$b.json"
+done
 sleep 1 # the SDK flushes every 200 ms
 
 AIOPS_E2E_BASE="http://127.0.0.1:$port" AIOPS_E2E_TOKEN="$token" AIOPS_E2E_OTHER_TOKEN="$other_token" \
-AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
+AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_BIG=e2e-big AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
   npm run test:e2e --workspace @aiops/console

@@ -1,193 +1,66 @@
-/* A plain, legible investigation surface. Missing-data states get their own colors and
-   are never drawn as success. */
+/*
+ * The console's styles: the owned design-system copy (@aiops/ui, Tailwind CSS v4 tokens) and the
+ * investigation's own state colours. Tailwind doesn't scan dependencies, so the package's
+ * components are named with @source.
+ *
+ * The four outcome states — and "conflicting" — each have their own hue, none of them the
+ * design system's orange accent, and each badge also carries an icon and a word: colour is
+ * never the only signal. Missing-data states (no finish observed, gaps) are blue and dashed,
+ * so they never read as success or as failure.
+ */
+@import '@aiops/ui/styles.css';
+@source '../../../packages/ui/src';
+
 :root {
-	--bg: #fbfbfa;
-	--fg: #1c1c1a;
-	--muted: #6b6a65;
-	--line: #e3e2dd;
-	--panel: #ffffff;
-	--ok: #1f7a4d;
-	--fail: #b42318;
-	--uncertain: #b54708;
-	--unknown: #5b5bd6;
-	--gap-bg: #f2f0ff;
-	--warn-bg: #fff6ea;
-	--fail-bg: #fdeceb;
-	--mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-	color-scheme: light dark;
+	--state-ok: oklch(0.62 0.15 150);
+	--state-ok-soft: oklch(0.965 0.035 150);
+	--state-ok-ink: oklch(0.42 0.11 150);
+	--state-fail: oklch(0.58 0.21 25);
+	--state-fail-soft: oklch(0.965 0.03 25);
+	--state-fail-ink: oklch(0.47 0.18 25);
+	--state-uncertain: oklch(0.83 0.16 98);
+	--state-uncertain-soft: oklch(0.975 0.06 100);
+	--state-uncertain-ink: oklch(0.44 0.09 95);
+	--state-unknown: oklch(0.6 0.15 255);
+	--state-unknown-soft: oklch(0.965 0.025 255);
+	--state-unknown-ink: oklch(0.45 0.14 260);
+	--state-conflict: oklch(0.58 0.2 330);
+	--state-conflict-soft: oklch(0.965 0.03 330);
+	--state-conflict-ink: oklch(0.47 0.18 330);
 }
-@media (prefers-color-scheme: dark) {
-	:root {
-		--bg: #141413;
-		--fg: #ecebe6;
-		--muted: #9c9a92;
-		--line: #2c2b28;
-		--panel: #1c1b19;
-		--ok: #4cc38a;
-		--fail: #ff7a6b;
-		--uncertain: #f5a35c;
-		--unknown: #9e9cff;
-		--gap-bg: #24223a;
-		--warn-bg: #2e2416;
-		--fail-bg: #331b19;
-	}
+
+.dark {
+	--state-ok: oklch(0.72 0.15 150);
+	--state-ok-soft: oklch(0.3 0.06 150);
+	--state-ok-ink: oklch(0.86 0.1 150);
+	--state-fail: oklch(0.7 0.18 25);
+	--state-fail-soft: oklch(0.3 0.07 25);
+	--state-fail-ink: oklch(0.86 0.09 25);
+	--state-uncertain: oklch(0.86 0.15 98);
+	--state-uncertain-soft: oklch(0.32 0.06 98);
+	--state-uncertain-ink: oklch(0.92 0.1 98);
+	--state-unknown: oklch(0.72 0.13 255);
+	--state-unknown-soft: oklch(0.3 0.06 255);
+	--state-unknown-ink: oklch(0.86 0.08 255);
+	--state-conflict: oklch(0.72 0.17 330);
+	--state-conflict-soft: oklch(0.3 0.07 330);
+	--state-conflict-ink: oklch(0.88 0.08 330);
 }
-* {
-	box-sizing: border-box;
-}
-body {
-	margin: 0;
-	background: var(--bg);
-	color: var(--fg);
-	font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
-}
-a {
-	color: inherit;
-}
-header.top {
-	border-bottom: 1px solid var(--line);
-	padding: 0 24px;
-	height: 52px;
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-}
-header.top a.brand {
-	font-weight: 600;
-	text-decoration: none;
-}
-main {
-	max-width: 1180px;
-	margin: 0 auto;
-	padding: 24px;
-}
-h1 {
-	font-size: 22px;
-	margin: 0 0 4px;
-}
-h2 {
-	font-size: 16px;
-	margin: 28px 0 10px;
-}
-.muted {
-	color: var(--muted);
-}
-.mono {
-	font-family: var(--mono);
-	font-size: 13px;
-}
-.panel {
-	background: var(--panel);
-	border: 1px solid var(--line);
-	border-radius: 8px;
-	padding: 14px 16px;
-}
-.notice {
-	border-radius: 8px;
-	padding: 12px 14px;
-	margin: 10px 0;
-	border: 1px solid var(--line);
-}
-.notice.uncertain {
-	background: var(--warn-bg);
-	border-color: var(--uncertain);
-}
-.notice.unknown {
-	background: var(--gap-bg);
-	border-color: var(--unknown);
-}
-.notice.fail {
-	background: var(--fail-bg);
-	border-color: var(--fail);
-}
-table {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 14px;
-}
-th,
-td {
-	text-align: left;
-	padding: 7px 8px;
-	border-bottom: 1px solid var(--line);
-	vertical-align: top;
-}
-th {
-	font-weight: 600;
-	color: var(--muted);
-	font-size: 12px;
-}
-tr.gap td {
-	background: var(--gap-bg);
-}
-.badge {
-	display: inline-block;
-	border-radius: 999px;
-	padding: 1px 9px;
-	font-size: 12px;
-	font-weight: 600;
-	border: 1px solid currentColor;
-	white-space: nowrap;
-}
-.badge.succeeded {
-	color: var(--ok);
-}
-.badge.failed {
-	color: var(--fail);
-}
-.badge.uncertain {
-	color: var(--uncertain);
-}
-.badge.conflicting {
-	color: var(--fail);
-	border-style: double;
-	border-width: 3px;
-}
-.badge.no_finish_observed {
-	color: var(--unknown);
-	border-style: dashed;
-}
-.flag {
-	display: inline-block;
-	font-size: 11px;
-	padding: 0 6px;
-	border-radius: 4px;
-	background: var(--warn-bg);
-	color: var(--uncertain);
-	margin-right: 4px;
-}
-.grid {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-	gap: 12px;
-}
-.kv dt {
-	font-size: 12px;
-	color: var(--muted);
-}
-.kv dd {
-	margin: 0 0 8px;
-}
-form.inline {
-	display: flex;
-	gap: 8px;
-	margin: 12px 0;
-}
-input {
-	font: inherit;
-	padding: 6px 10px;
-	border: 1px solid var(--line);
-	border-radius: 6px;
-	background: var(--panel);
-	color: var(--fg);
-	min-width: 280px;
-}
-button {
-	font: inherit;
-	padding: 6px 14px;
-	border-radius: 6px;
-	border: 1px solid var(--line);
-	background: var(--panel);
-	color: var(--fg);
-	cursor: pointer;
+
+@theme inline {
+	--color-state-ok: var(--state-ok);
+	--color-state-ok-soft: var(--state-ok-soft);
+	--color-state-ok-ink: var(--state-ok-ink);
+	--color-state-fail: var(--state-fail);
+	--color-state-fail-soft: var(--state-fail-soft);
+	--color-state-fail-ink: var(--state-fail-ink);
+	--color-state-uncertain: var(--state-uncertain);
+	--color-state-uncertain-soft: var(--state-uncertain-soft);
+	--color-state-uncertain-ink: var(--state-uncertain-ink);
+	--color-state-unknown: var(--state-unknown);
+	--color-state-unknown-soft: var(--state-unknown-soft);
+	--color-state-unknown-ink: var(--state-unknown-ink);
+	--color-state-conflict: var(--state-conflict);
+	--color-state-conflict-soft: var(--state-conflict-soft);
+	--color-state-conflict-ink: var(--state-conflict-ink);
 }

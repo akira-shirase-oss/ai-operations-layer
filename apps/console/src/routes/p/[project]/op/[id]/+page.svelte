@@ -1,10 +1,16 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
+	import { Card, CardContent, CardHeader, CardTitle } from '@aiops/ui/ui/card';
+	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
+	import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@aiops/ui/ui/tooltip';
 	import { api, type Result } from '#lib/api.js';
 	import { micros, money, short, time, value } from '#lib/format.js';
-	import type { Timeline } from '#lib/types.js';
+	import type { EntryView, Timeline } from '#lib/types.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
+	import Notice from '#lib/components/Notice.svelte';
+	import Flag from '#lib/components/Flag.svelte';
+	import VirtualRows from '#lib/components/VirtualRows.svelte';
 
 	const project = $derived(page.params['project'] ?? '');
 	const id = $derived(page.params['id'] ?? '');
@@ -22,25 +28,29 @@
 		unknown_tail: 'Events after this point may be missing (no finish observed)',
 		expired: 'Deleted by retention (received before the cutoff)'
 	};
+	const EVENT_COLUMNS = 'grid grid-cols-[11rem_11rem_5.5rem_minmax(14rem,1fr)_3rem_12rem_minmax(10rem,14rem)] gap-3 px-3';
 </script>
 
-<p class="muted"><a href={resolve('/')}>Projects</a> / <a href={resolve('/p/[project]', { project })}>{project}</a> / operation</p>
+<p class="text-sm text-muted-foreground">
+	<a href={resolve('/')}>Projects</a> / <a href={resolve('/p/[project]', { project })}>{project}</a> / operation
+</p>
 
 {#if result === null}
-	<p class="muted">Loading…</p>
+	<p class="text-muted-foreground">Loading…</p>
 {:else if result.state === 'ok'}
 	{@const t = result.data}
-	<h1>{t.name ?? 'Operation (name not observed)'} <StatusBadge status={t.status} /></h1>
-	<p class="mono muted">
+	<h1 class="mt-1 flex flex-wrap items-center gap-3 text-2xl font-semibold tracking-tight">
+		{t.name ?? 'Operation (name not observed)'} <StatusBadge status={t.status} />
+	</h1>
+	<p class="mb-4 font-mono text-xs text-muted-foreground">
 		{t.operation_id}{t.request_id ? ` · request ${t.request_id}` : ''}{t.release ? ` · release ${t.release}` : ''}{t.deployment
 			? ` · ${t.deployment}`
 			: ''}
 	</p>
 
 	{#if t.status.state === 'uncertain' || t.flags.external_effect_unknown}
-		<div class="notice uncertain">
-			<strong>An external effect may have happened.</strong>
-			<ul>
+		<Notice kind="uncertain" title="An external effect may have happened.">
+			<ul class="list-disc pl-4">
 				{#each t.effect_unknown_steps as c (c.step_id + c.attempt)}
 					<li>
 						{c.name ?? 'A step'} (attempt {c.attempt})
@@ -54,218 +64,234 @@
 					<li>The host declared the operation's outcome unknown.</li>
 				{/if}
 			</ul>
-			This timeline is evidence, not authority: check the system that owns the effect (by business key)
-			before any retry. Do not rerun blind.
-		</div>
+			This timeline is evidence, not authority: check the system that owns the effect (by business key) before any
+			retry. Do not rerun blind.
+		</Notice>
 	{/if}
 	{#if t.status.state === 'no_finish_observed'}
-		<div class="notice unknown">
-			<strong>No finish observed.</strong> The host never reported how this operation ended. A missing
-			event is not proof that the work did not run.
-		</div>
+		<Notice kind="unknown" title="No finish observed.">
+			The host never reported how this operation ended. A missing event is not proof that the work did not run.
+		</Notice>
 	{/if}
 	{#if t.expired_by_retention}
-		<div class="notice unknown">
-			<strong>Some of this operation's detail has expired.</strong> Raw events are kept 14 days; those
-			received before {time(t.retention_cutoff)} were deleted ({t.coverage.expired} of this operation's
-			events). The outcome and counts that remain come from its summary.
-		</div>
+		<Notice kind="unknown" title="Some of this operation's detail has expired.">
+			Raw events are kept 14 days; those received before {time(t.retention_cutoff)} were deleted ({t.coverage.expired} of
+			this operation's events). The outcome and counts that remain come from its summary.
+		</Notice>
 	{/if}
 	{#if t.flags.start_not_observed && !t.expired_by_retention}
-		<div class="notice unknown">The start of this operation was not received; it is known only from later events.</div>
+		<Notice kind="unknown">The start of this operation was not received; it is known only from later events.</Notice>
 	{/if}
 	{#if t.flags.conflicting_finish}
-		<div class="notice fail">
-			<strong>Conflicting outcomes.</strong> More than one host declared how this operation ended, and the
-			declarations disagree (see the finish events below). No single outcome is shown; ask the system that owns
-			the work.
-		</div>
+		<Notice kind="fail" title="Conflicting outcomes.">
+			More than one host declared how this operation ended, and the declarations disagree (see the finish events
+			below). No single outcome is shown; ask the system that owns the work.
+		</Notice>
 	{/if}
 	{#if t.flags.clock_skew_suspected}
-		<div class="notice uncertain">
-			Clock skew suspected: some event times disagree with emission order or arrive from the future. The
-			order below is by event time; flagged rows may be out of place.
-		</div>
+		<Notice kind="uncertain">
+			Clock skew suspected: some event times disagree with emission order or arrive from the future. Each source is
+			shown in its emission order; flagged rows may be out of place across sources.
+		</Notice>
 	{/if}
 	{#if t.events_truncated}
-		<div class="notice uncertain">Only the first part of this very large operation is shown.</div>
+		<Notice kind="uncertain">Only the first part of this very large operation is shown.</Notice>
 	{/if}
 
-	<div class="grid">
-		<div class="panel">
-			<dl class="kv">
-				<dt>Events received</dt>
-				<dd>{t.coverage.events_received}{t.coverage.sdk_gap_reports ? ` + ${t.coverage.sdk_gap_reports} gap reports` : ''}</dd>
-				<dt>Missing</dt>
-				<dd>
-					{#if t.coverage.missing_known === 0 && !t.coverage.missing_unknown}none{/if}
-					{#if t.coverage.missing_known > 0}{t.coverage.missing_known} proven missing{/if}
-					{#if t.coverage.missing_unknown}{t.coverage.missing_known > 0 ? ' + ' : ''}an unknown number{/if}
-				</dd>
-				{#if t.coverage.expired > 0}
-					<dt>Expired (retention)</dt>
-					<dd>{t.coverage.expired}</dd>
-				{/if}
-				<dt>Dropped by the SDK (reported)</dt>
-				<dd>{t.coverage.reported_dropped}</dd>
-			</dl>
-		</div>
-		<div class="panel">
-			<dl class="kv">
-				<dt>Attempts</dt>
-				<dd>
-					{t.flags.failed_attempts} failed · {t.flags.uncertain_attempts} uncertain · {t.flags.retried_steps} steps retried
-				</dd>
-				<dt>Late events</dt>
-				<dd>{t.flags.late_events}</dd>
-			</dl>
-		</div>
-		<div class="panel">
-			<dl class="kv">
-				<dt>Cost (estimate, not a bill)</dt>
-				<dd class="mono">
-					{t.cost.attempts_with_estimate ? money(t.cost.estimate_micros, t.cost.currency) : 'no estimate reported'}
-					{#if t.cost.mixed_currencies}<span class="flag">mixed currencies</span>{/if}
-				</dd>
-				<dt>Tokens</dt>
-				<dd class="mono">{t.cost.input_tokens} in · {t.cost.output_tokens} out</dd>
-			</dl>
-		</div>
+	<div class="mt-4 grid gap-4 md:grid-cols-3">
+		<Card>
+			<CardHeader><CardTitle class="text-sm text-muted-foreground">Coverage</CardTitle></CardHeader>
+			<CardContent>
+				<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+					<dt class="text-muted-foreground">Events received</dt>
+					<dd>
+						{t.coverage.events_received}{t.coverage.sdk_gap_reports ? ` + ${t.coverage.sdk_gap_reports} gap reports` : ''}
+					</dd>
+					<dt class="text-muted-foreground">Missing</dt>
+					<dd>
+						{#if t.coverage.missing_known === 0 && !t.coverage.missing_unknown}none{/if}
+						{#if t.coverage.missing_known > 0}{t.coverage.missing_known} proven missing{/if}
+						{#if t.coverage.missing_unknown}{t.coverage.missing_known > 0 ? ' + ' : ''}an unknown number{/if}
+					</dd>
+					{#if t.coverage.expired > 0}
+						<dt class="text-muted-foreground">Expired (retention)</dt>
+						<dd>{t.coverage.expired}</dd>
+					{/if}
+					<dt class="text-muted-foreground">Dropped by the SDK (reported)</dt>
+					<dd>{t.coverage.reported_dropped}</dd>
+				</dl>
+			</CardContent>
+		</Card>
+		<Card>
+			<CardHeader><CardTitle class="text-sm text-muted-foreground">Attempts</CardTitle></CardHeader>
+			<CardContent class="text-sm">
+				{t.flags.failed_attempts} failed · {t.flags.uncertain_attempts} uncertain · {t.flags.retried_steps} steps retried
+				<div class="text-muted-foreground">Late events: {t.flags.late_events}</div>
+			</CardContent>
+		</Card>
+		<Card>
+			<CardHeader><CardTitle class="text-sm text-muted-foreground">Cost (estimate, not a bill)</CardTitle></CardHeader>
+			<CardContent class="font-mono text-sm">
+				{t.cost.attempts_with_estimate ? money(t.cost.estimate_micros, t.cost.currency) : 'no estimate reported'}
+				{#if t.cost.mixed_currencies}<Flag>mixed currencies</Flag>{/if}
+				<div class="text-muted-foreground">{t.cost.input_tokens} in · {t.cost.output_tokens} out (tokens)</div>
+			</CardContent>
+		</Card>
 	</div>
 
-	<h2>Steps</h2>
+	<h2 class="mt-8 mb-2 text-lg font-semibold">Steps</h2>
 	{#if t.steps.length === 0}
-		<p class="panel">No step events received.</p>
+		<p class="text-muted-foreground">No step events received.</p>
 	{:else}
-		<table>
-			<thead>
-				<tr>
-					<th>Step</th>
-					<th>Attempt</th>
-					<th>Outcome</th>
-					<th>Duration</th>
-					<th>Model / version</th>
-					<th>Error</th>
-					<th>Est. cost</th>
-				</tr>
-			</thead>
-			<tbody>
+		<Table>
+			<TableHeader>
+				<TableRow>
+					<TableHead>Step</TableHead>
+					<TableHead>Attempt</TableHead>
+					<TableHead>Outcome</TableHead>
+					<TableHead>Duration</TableHead>
+					<TableHead>Model / version</TableHead>
+					<TableHead>Error</TableHead>
+					<TableHead>Est. cost</TableHead>
+				</TableRow>
+			</TableHeader>
+			<TableBody>
 				{#each t.steps as s (s.step_id)}
 					{#each s.attempts as a (a.attempt)}
-						<tr>
-							<td>
+						<TableRow>
+							<TableCell>
 								{#if a.attempt === s.attempts[0]?.attempt}
 									<strong>{s.name ?? 'name not observed'}</strong>
-									<div class="muted">{s.kind ?? 'kind unknown'}{s.external_effect ? ' · external effect' : ''}</div>
+									<div class="text-xs text-muted-foreground">
+										{s.kind ?? 'kind unknown'}{s.external_effect ? ' · external effect' : ''}
+									</div>
 								{/if}
-							</td>
-							<td>{a.attempt}</td>
-							<td>
+							</TableCell>
+							<TableCell>{a.attempt}</TableCell>
+							<TableCell>
 								<StatusBadge status={a} />
-								{#if !a.start_observed}<span class="flag">start not received</span>{/if}
-							</td>
-							<td class="mono">{micros(a.duration_us)}</td>
-							<td class="mono">{a.model ?? ''}{a.prompt_version ? ` · ${a.prompt_version}` : ''}{a.config_version ? ` · ${a.config_version}` : ''}</td>
-							<td class="mono">{a.error_code ?? ''}{#if a.error_message}<div class="muted">{a.error_message}</div>{/if}</td>
-							<td class="mono">{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</td>
-						</tr>
+								{#if !a.start_observed}<Flag>start not received</Flag>{/if}
+							</TableCell>
+							<TableCell class="font-mono text-xs">{micros(a.duration_us)}</TableCell>
+							<TableCell class="font-mono text-xs"
+								>{a.model ?? ''}{a.prompt_version ? ` · ${a.prompt_version}` : ''}{a.config_version
+									? ` · ${a.config_version}`
+									: ''}</TableCell
+							>
+							<TableCell class="font-mono text-xs">
+								{a.error_code ?? ''}{#if a.error_message}<div class="text-muted-foreground">{a.error_message}</div>{/if}
+							</TableCell>
+							<TableCell class="font-mono text-xs"
+								>{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</TableCell
+							>
+						</TableRow>
 					{/each}
 				{/each}
-			</tbody>
-		</table>
+			</TableBody>
+		</Table>
 	{/if}
 
-	<h2>Gaps</h2>
+	<h2 class="mt-8 mb-2 text-lg font-semibold">Gaps</h2>
 	{#if t.gaps.length === 0}
-		<p class="panel">No gaps: every event this operation's SDK numbered was received{t.status.declared ? '' : ' so far'}.</p>
+		<p class="text-muted-foreground">
+			No gaps: every event this operation's SDK numbered was received{t.status.declared ? '' : ' so far'}.
+		</p>
 	{:else}
-		<table>
-			<thead><tr><th>What</th><th>How many</th><th>Where</th><th>Source</th></tr></thead>
-			<tbody>
+		<Table>
+			<TableHeader>
+				<TableRow><TableHead>What</TableHead><TableHead>How many</TableHead><TableHead>Where</TableHead><TableHead
+						>Source</TableHead
+					></TableRow
+				>
+			</TableHeader>
+			<TableBody>
 				{#each t.gaps as g, i (i)}
-					<tr class="gap">
-						<td>{GAP_TEXT[g.kind] ?? g.kind}{g.reason ? ` (${g.reason})` : ''}</td>
-						<td>{g.count ?? 'unknown'}</td>
-						<td class="mono">
+					<TableRow class="gap border-dashed bg-state-unknown-soft/60">
+						<TableCell>{GAP_TEXT[g.kind] ?? g.kind}{g.reason ? ` (${g.reason})` : ''}</TableCell>
+						<TableCell>{g.count ?? 'unknown'}</TableCell>
+						<TableCell class="font-mono text-xs">
 							{#if g.op_seq_from !== undefined}#{g.op_seq_from}{g.op_seq_to !== undefined ? `–#${g.op_seq_to}` : ' onwards'}{/if}
 							{#if g.from}{time(g.from)} – {time(g.to)}{/if}
-						</td>
-						<td class="mono">{short(g.instance_id)}</td>
-					</tr>
+						</TableCell>
+						<TableCell class="font-mono text-xs">{g.instance_id ? short(g.instance_id) : '—'}</TableCell>
+					</TableRow>
 				{/each}
-			</tbody>
-		</table>
+			</TableBody>
+		</Table>
 	{/if}
 
-	<h2>Events (event time · receive time)</h2>
-	<table>
-		<thead>
-			<tr>
-				<th>Event time</th>
-				<th>Received</th>
-				<th>Delay</th>
-				<th>Event</th>
-				<th>#</th>
-				<th>Source</th>
-				<th>Notes</th>
-			</tr>
-		</thead>
-		<tbody>
-			{#each t.entries as e (e.event_id)}
-				<tr class:gap={e.type === 'gap.reported'}>
-					<td class="mono">{time(e.event_time)}</td>
-					<td class="mono">{time(e.received_at)}</td>
-					<td class="mono">{micros(e.receive_delay_us)}</td>
-					<td>
+	<h2 class="mt-8 mb-2 text-lg font-semibold">Events (event time · receive time)</h2>
+	<TooltipProvider>
+		<div class="{EVENT_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
+			<span>Event time</span><span>Received</span><span>Delay</span><span>Event</span><span>#</span><span>Source</span
+			><span>Notes</span>
+		</div>
+		<VirtualRows rows={t.entries} key={(e: EntryView) => e.event_id}>
+			{#snippet row(e: EntryView)}
+				<div class="{EVENT_COLUMNS} h-full items-center text-sm {e.type === 'gap.reported' ? 'gap bg-state-unknown-soft/60' : ''}">
+					<span class="font-mono text-xs">{time(e.event_time)}</span>
+					<span class="font-mono text-xs">{time(e.received_at)}</span>
+					<span class="font-mono text-xs">{micros(e.receive_delay_us)}</span>
+					<span class="min-w-0 truncate">
 						{e.type}{e.name ? ` · ${e.name}` : ''}{e.attempt ? ` #${e.attempt}` : ''}
 						{#if e.outcome}<StatusBadge status={e.outcome} />{/if}
-						{#if e.dropped}<span class="flag">{e.dropped} dropped: {e.reason}</span>{/if}
+						{#if e.dropped}<Flag>{e.dropped} dropped: {e.reason}</Flag>{/if}
 						{#each e.attributes as a (a.key)}
-							<div class="mono muted">{a.key}={value(a.value)}{a.opt_in ? ' (opt-in)' : ''}</div>
+							<span class="ml-1 font-mono text-xs text-muted-foreground">{a.key}={value(a.value)}{a.opt_in ? ' (opt-in)' : ''}</span>
 						{/each}
-					</td>
-					<td class="mono">{e.op_seq || '—'}</td>
-					<td class="mono" title="instance {e.instance_id}">{e.ingest_key} · {short(e.instance_id)}</td>
-					<td>
-						{#each e.flags as f (f)}<span class="flag">{f.replaceAll('_', ' ')}</span>{/each}
-						{#if e.withheld_attributes}<span class="flag">{e.withheld_attributes} attributes withheld by policy</span>{/if}
-						{#if e.redactions}<span class="flag">{e.redactions} redacted</span>{/if}
-						{#if e.overflowed_names}<span class="flag">{e.overflowed_names} names over budget, stored as _overflow</span>{/if}
-						{#if e.truncated}<span class="flag">{e.truncated} truncated by SDK</span>{/if}
-					</td>
-				</tr>
-			{/each}
-		</tbody>
-	</table>
+					</span>
+					<span class="font-mono text-xs">{e.op_seq || '—'}</span>
+					<span class="min-w-0 truncate font-mono text-xs">
+						<Tooltip>
+							<TooltipTrigger>{e.ingest_key} · {short(e.instance_id)}</TooltipTrigger>
+							<TooltipContent>instance {e.instance_id}</TooltipContent>
+						</Tooltip>
+					</span>
+					<span class="min-w-0 truncate">
+						{#each e.flags as f (f)}<Flag>{f.replaceAll('_', ' ')}</Flag>{/each}
+						{#if e.withheld_attributes}<Flag>{e.withheld_attributes} attributes withheld by policy</Flag>{/if}
+						{#if e.redactions}<Flag>{e.redactions} redacted</Flag>{/if}
+						{#if e.overflowed_names}<Flag>{e.overflowed_names} names over budget, stored as _overflow</Flag>{/if}
+						{#if e.truncated}<Flag>{e.truncated} truncated by SDK</Flag>{/if}
+					</span>
+				</div>
+			{/snippet}
+		</VirtualRows>
+	</TooltipProvider>
 
-	<h2>Sources</h2>
-	<table>
-		<thead><tr><th>Instance</th><th>Service · SDK</th><th>Key</th><th>Seen</th><th>Loss over the instance's life</th></tr></thead>
-		<tbody>
+	<h2 class="mt-8 mb-2 text-lg font-semibold">Sources</h2>
+	<Table>
+		<TableHeader>
+			<TableRow
+				><TableHead>Instance</TableHead><TableHead>Service · SDK</TableHead><TableHead>Key</TableHead><TableHead
+					>Seen</TableHead
+				><TableHead>Loss over the instance's life</TableHead></TableRow
+			>
+		</TableHeader>
+		<TableBody>
 			{#each t.sources as s (s.instance_id)}
-				<tr>
-					<td class="mono">{short(s.instance_id, 12)}</td>
-					<td>{s.service} · <span class="mono">{s.sdk}</span></td>
-					<td class="mono">{s.ingest_key}</td>
-					<td class="mono">{time(s.first_seen)} – {time(s.last_seen)}</td>
-					<td>
-						{s.missing_by_seq} not received (by sequence), of which {s.events_refused} refused by the
-						collector; SDK reported {s.reported_dropped_queue_full} queue-full,
-						{s.reported_dropped_send_failed} send-failed, {s.reported_dropped_rejected} refused,
-						{s.reported_gap_overflow} unattributed
-					</td>
-				</tr>
+				<TableRow>
+					<TableCell class="font-mono text-xs">{short(s.instance_id, 12)}</TableCell>
+					<TableCell>{s.service} · <span class="font-mono text-xs">{s.sdk}</span></TableCell>
+					<TableCell class="font-mono text-xs">{s.ingest_key}</TableCell>
+					<TableCell class="font-mono text-xs">{time(s.first_seen)} – {time(s.last_seen)}</TableCell>
+					<TableCell class="text-sm">
+						{s.missing_by_seq} not received (by sequence), of which {s.events_refused} refused by the collector; SDK reported
+						{s.reported_dropped_queue_full} queue-full, {s.reported_dropped_send_failed} send-failed, {s.reported_dropped_rejected}
+						refused, {s.reported_gap_overflow} unattributed
+					</TableCell>
+				</TableRow>
 			{/each}
-		</tbody>
-	</table>
+		</TableBody>
+	</Table>
 {:else if result.state === 'missing'}
-	<p class="notice unknown">No events have been received for this operation. That is not proof that it did not run.</p>
+	<Notice kind="unknown">No events have been received for this operation. That is not proof that it did not run.</Notice>
 {:else if result.state === 'forbidden'}
-	<p class="notice fail">Denied: {result.message}. The denial was recorded in the audit log.</p>
+	<Notice kind="fail">Denied: {result.message}. The denial was recorded in the audit log.</Notice>
 {:else if result.state === 'rateLimited'}
-	<p class="notice uncertain">Rate limited; retry in {result.retryAfter} s.</p>
+	<Notice kind="uncertain">Rate limited; retry in {result.retryAfter} s.</Notice>
 {:else if result.state === 'needsAuth'}
-	<p class="notice fail">The token is missing, expired or revoked.</p>
+	<Notice kind="fail">The token is missing, expired or revoked.</Notice>
 {:else}
-	<p class="notice fail">The collector could not be reached: {result.message}</p>
+	<Notice kind="fail">The collector could not be reached: {result.message}</Notice>
 {/if}

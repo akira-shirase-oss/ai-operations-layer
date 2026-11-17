@@ -1,12 +1,17 @@
 import adapter from '@sveltejs/adapter-static';
+import tailwindcss from '@tailwindcss/vite';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
 // A static single-page app that aiops-server serves at /console/ (AIOPS_CONSOLE_DIR).
-// One HTML file (the fallback) answers every route; its one inline bootstrap script is
-// allowed by hash in the server's Content-Security-Policy.
+// One HTML file (the fallback) answers every route; its two inline scripts (the theme and
+// SvelteKit's bootstrap) are allowed by hash in the server's Content-Security-Policy.
 export default defineConfig({
+	// Nothing is inlined as a data: URI: the CSP allows fonts and images from 'self' only.
+	build: { assetsInlineLimit: 0 },
 	plugins: [
+		// Tailwind CSS v4 before SvelteKit, as its docs require.
+		tailwindcss(),
 		sveltekit({
 			compilerOptions: {
 				runes: ({ filename }) =>

@@ -15,6 +15,7 @@ if [ -z "${DATABASE_URL:-}" ]; then
 fi
 cargo test --workspace --locked
 scripts/check-architecture.sh
+npm run check --workspace @aiops/ui
 npm run check --workspace @aiops/console
 npm run build --workspace @aiops/console
 echo "check ok"
