@@ -22,14 +22,26 @@ export PATH="$(brew --prefix rustup)/bin:$PATH"     # macOS; elsewhere rustup's 
 cargo build --release --locked -p aiops-server -p aiops-durable-runner
 npm ci && npm run build --workspace @aiops/console
 sudo install -D target/release/aiops-server target/release/aiops-dr-adapter -t /opt/aiops/bin
-sudo cp -r apps/console/build /opt/aiops/console
-sudo useradd --system --home /nonexistent aiops
+# The console is replaced whole (never copied into an existing directory, which would
+# nest a build/ inside it); the same three lines upgrade it.
+sudo rm -rf /opt/aiops/console.new && sudo cp -R apps/console/build /opt/aiops/console.new
+sudo rm -rf /opt/aiops/console && sudo mv /opt/aiops/console.new /opt/aiops/console
+sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin aiops
 sudo install -D -m 0640 -g aiops deploy/aiops-server.env.example /etc/aiops/aiops-server.env
 sudo install -m 0644 deploy/aiops-server.service /etc/systemd/system/
 ```
 
-Edit `/etc/aiops/aiops-server.env`: the database URL (a role that owns its
-database), and nothing else unless a measurement says so. PostgreSQL 16 or later.
+The database: PostgreSQL 16 or later, with a role that owns its database (the
+collector migrates it on start):
+
+```sh
+sudo -u postgres psql -c "CREATE ROLE aiops LOGIN PASSWORD '<a long random password>'"
+sudo -u postgres createdb --owner aiops aiops
+```
+
+Edit `/etc/aiops/aiops-server.env`: set `AIOPS_DATABASE_URL` to
+`postgres://aiops:<password>@127.0.0.1:5432/aiops`, and nothing else unless a
+measurement says so. The file is readable by root and the `aiops` group only.
 
 ## First run
 
@@ -37,10 +49,13 @@ database), and nothing else unless a measurement says so. PostgreSQL 16 or later
 sudo systemctl enable --now aiops-server          # migrates, then serves
 journalctl -u aiops-server -n 20                  # "collector listening"
 curl -s http://127.0.0.1:57400/readyz             # {"ready":true,"store":"reachable"}
-# Admin commands talk to the database directly (there is no admin HTTP surface, D-015):
-set -a; . /etc/aiops/aiops-server.env; set +a
-/opt/aiops/bin/aiops-server admin create-project pilot
-/opt/aiops/bin/aiops-server admin create-token --actor you --project pilot   # for the console
+# Admin commands talk to the database directly (there is no admin HTTP surface, D-015).
+# They run as the aiops user, which can read the env file (0640 root:aiops):
+aiops_admin() {
+  sudo -u aiops sh -c 'set -a; . /etc/aiops/aiops-server.env; set +a; exec /opt/aiops/bin/aiops-server admin "$@"' aiops-admin "$@"
+}
+aiops_admin create-project pilot
+aiops_admin create-token --actor you --project pilot   # for the console
 ```
 
 Put TLS in front with `deploy/Caddyfile.example` (Caddy obtains certificates). Open
@@ -49,8 +64,8 @@ in a password manager; it expires in 30 days by default.
 
 ## Connect a host
 
-Mint one ingest key per host (`aiops-server admin create-ingest-key --project pilot
---name <host>`), then:
+Mint one ingest key per host (`aiops_admin create-ingest-key --project pilot
+--name <host>`, with the `aiops_admin` function above), then:
 
 - **A Rust host**: link `aiops-sdk`, set `AIOPS_ENDPOINT` (the proxy's URL) and
   `AIOPS_INGEST_KEY`. `cargo run -p aiops-sdk --example first_operation` is a host in
@@ -93,7 +108,8 @@ Mint one ingest key per host (`aiops-server admin create-ingest-key --project pi
 Migrations are forward-only and run on start. To upgrade:
 
 1. Back up (below).
-2. Install the new binaries and console.
+2. Build as in Install, then `sudo install` the binaries and replace the console with
+   the same three lines (the `console.new` swap), never `cp -r` onto the old one.
 3. `systemctl restart aiops-server`, which drains the old process (up to its 10 s
    grace) and migrates.
 

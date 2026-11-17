@@ -1,6 +1,8 @@
 # Reverse proxy in front of the collector (docs/OPERATING.md). Caddy terminates TLS
 # (automatic certificates) and forwards to the loopback listener. The collector bounds its
-# own bodies, connections and rates; the proxy adds TLS and a per-client limit.
+# own bodies, connections and rates (in-flight caps and a token bucket per ingest key);
+# this proxy adds TLS and a body cap. It sets no per-client rate limit (Caddy has none
+# built in): add one at your edge if clients other than your hosts can reach it.
 aiops.example.com {
 	encode zstd gzip
 	request_body {
@@ -14,6 +16,7 @@ aiops.example.com {
 		}
 	}
 	# Hosts post to /v1/ingest; people use /console/; nothing else is served.
-	@other not path /v1/* /console/* /healthz /readyz
+	redir /console /console/ 308
+	@other not path /console /v1/* /console/* /healthz /readyz
 	respond @other 404
 }
