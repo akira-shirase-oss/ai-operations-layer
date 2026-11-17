@@ -86,6 +86,24 @@ curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorizat
    "event_time": "$now", "outcome": "uncertain", "uncertain_reason": "timeout_after_send", "events_emitted": 2}
  ]}
 JSON
+# Review N4: a step with a 128-byte name whose outcome is the longest one ("outcome unknown:
+# connection_lost_after_send"); its badge must stay whole in the events list.
+long_op="e2e00000000000000000000000001049"
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" -H 'content-type: application/json' -d @- <<JSON
+{"schema_version": 1,
+ "source": {"instance_id": "e2e000000000000000000000000000dd", "service": "e2e-long", "sdk": "curl"},
+ "events": [
+  {"event_id": "e2e000000000000000000000000001a1", "type": "operation.started", "operation_id": "$long_op", "seq": 1, "op_seq": 1,
+   "event_time": "$now", "name": "publish_article", "request_id": "e2e-long", "attributes": {"retry.reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"}},
+  {"event_id": "e2e000000000000000000000000001a2", "type": "step.started", "operation_id": "$long_op", "seq": 2, "op_seq": 2,
+   "event_time": "$now", "step_id": "1049000000000001", "attempt": 1, "kind": "tool", "name": "generate_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "external_effect": true},
+  {"event_id": "e2e000000000000000000000000001a3", "type": "step.finished", "operation_id": "$long_op", "seq": 3, "op_seq": 3,
+   "event_time": "$now", "step_id": "1049000000000001", "attempt": 1, "kind": "tool", "name": "generate_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "outcome": "uncertain", "uncertain_reason": "connection_lost_after_send", "error_code": "publish_reset"},
+  {"event_id": "e2e000000000000000000000000001a4", "type": "operation.finished", "operation_id": "$long_op", "seq": 4, "op_seq": 4,
+   "event_time": "$now", "outcome": "uncertain", "uncertain_reason": "connection_lost_after_send", "events_emitted": 4}
+ ]}
+JSON
 # A second service (its own instance) declares the same operation succeeded.
 curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" -H 'content-type: application/json' -d @- <<JSON
 {"schema_version": 1,
@@ -124,5 +142,5 @@ done
 sleep 1 # the SDK flushes every 200 ms
 
 AIOPS_E2E_BASE="http://127.0.0.1:$port" AIOPS_E2E_TOKEN="$token" AIOPS_E2E_OTHER_TOKEN="$other_token" \
-AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_BIG=e2e-big AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
+AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_BIG=e2e-big AIOPS_E2E_LONG=e2e-long AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
   npm run test:e2e --workspace @aiops/console

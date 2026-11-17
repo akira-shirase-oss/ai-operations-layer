@@ -28,7 +28,20 @@
 		unknown_tail: 'Events after this point may be missing (no finish observed)',
 		expired: 'Deleted by retention (received before the cutoff)'
 	};
-	const EVENT_COLUMNS = 'grid grid-cols-[11rem_11rem_5.5rem_minmax(14rem,1fr)_3rem_12rem_minmax(10rem,14rem)] gap-3 px-3';
+	// The outcome has its own fixed column, wide enough for the longest badge ("outcome
+	// unknown: connection_lost_after_send"), ahead of the free text; the event name and the
+	// details truncate instead, with the full text on hover (review N4).
+	const EVENT_COLUMNS =
+		'grid grid-cols-[12rem_4.5rem_23rem_minmax(7rem,1fr)_2.5rem_8rem_minmax(6rem,14rem)] gap-3 px-3';
+	const eventText = (e: EntryView) =>
+		`${e.type}${e.name ? ` · ${e.name}` : ''}${e.attempt ? ` #${e.attempt}` : ''}`;
+	const detailText = (e: EntryView) =>
+		[
+			e.dropped ? `${e.dropped} dropped: ${e.reason}` : '',
+			...e.attributes.map((a) => `${a.key}=${value(a.value)}${a.opt_in ? ' (opt-in)' : ''}`)
+		]
+			.filter(Boolean)
+			.join('  ');
 </script>
 
 <p class="text-sm text-muted-foreground">
@@ -222,41 +235,52 @@
 
 	<h2 class="mt-8 mb-2 text-lg font-semibold">Events (event time · receive time)</h2>
 	<TooltipProvider>
-		<div class="{EVENT_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
-			<span>Event time</span><span>Received</span><span>Delay</span><span>Event</span><span>#</span><span>Source</span
-			><span>Notes</span>
-		</div>
-		<VirtualRows rows={t.entries} key={(e: EntryView) => e.event_id}>
-			{#snippet row(e: EntryView)}
-				<div class="{EVENT_COLUMNS} h-full items-center text-sm {e.type === 'gap.reported' ? 'gap bg-state-unknown-soft/60' : ''}">
-					<span class="font-mono text-xs">{time(e.event_time)}</span>
-					<span class="font-mono text-xs">{time(e.received_at)}</span>
-					<span class="font-mono text-xs">{micros(e.receive_delay_us)}</span>
-					<span class="min-w-0 truncate">
-						{e.type}{e.name ? ` · ${e.name}` : ''}{e.attempt ? ` #${e.attempt}` : ''}
-						{#if e.outcome}<StatusBadge status={e.outcome} />{/if}
-						{#if e.dropped}<Flag>{e.dropped} dropped: {e.reason}</Flag>{/if}
-						{#each e.attributes as a (a.key)}
-							<span class="ml-1 font-mono text-xs text-muted-foreground">{a.key}={value(a.value)}{a.opt_in ? ' (opt-in)' : ''}</span>
-						{/each}
-					</span>
-					<span class="font-mono text-xs">{e.op_seq || '—'}</span>
-					<span class="min-w-0 truncate font-mono text-xs">
-						<Tooltip>
-							<TooltipTrigger>{e.ingest_key} · {short(e.instance_id)}</TooltipTrigger>
-							<TooltipContent>instance {e.instance_id}</TooltipContent>
-						</Tooltip>
-					</span>
-					<span class="min-w-0 truncate">
-						{#each e.flags as f (f)}<Flag>{f.replaceAll('_', ' ')}</Flag>{/each}
-						{#if e.withheld_attributes}<Flag>{e.withheld_attributes} attributes withheld by policy</Flag>{/if}
-						{#if e.redactions}<Flag>{e.redactions} redacted</Flag>{/if}
-						{#if e.overflowed_names}<Flag>{e.overflowed_names} names over budget, stored as _overflow</Flag>{/if}
-						{#if e.truncated}<Flag>{e.truncated} truncated by SDK</Flag>{/if}
-					</span>
+		<div class="overflow-x-auto">
+			<div class="min-w-[69rem]">
+				<div class="{EVENT_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
+					<span>Event time · received</span><span>Delay</span><span>Outcome</span><span>Event</span><span>#</span
+					><span>Source</span><span>Details</span>
 				</div>
-			{/snippet}
-		</VirtualRows>
+				<VirtualRows rows={t.entries} key={(e: EntryView) => e.event_id}>
+					{#snippet row(e: EntryView)}
+						<div
+							class="{EVENT_COLUMNS} h-full items-center text-sm {e.type === 'gap.reported'
+								? 'gap bg-state-unknown-soft/60'
+								: ''}"
+						>
+							<span class="font-mono text-xs leading-tight">
+								{time(e.event_time)}<br /><span class="text-muted-foreground">{time(e.received_at)}</span>
+							</span>
+							<span class="font-mono text-xs">{micros(e.receive_delay_us)}</span>
+							<span data-cell="outcome" class="min-w-0">
+								{#if e.outcome}<StatusBadge status={e.outcome} />{/if}
+							</span>
+							<span data-cell="event" class="min-w-0 truncate" title={eventText(e)}>{eventText(e)}</span>
+							<span class="font-mono text-xs">{e.op_seq || '—'}</span>
+							<span class="min-w-0 truncate font-mono text-xs">
+								<Tooltip>
+									<TooltipTrigger>{e.ingest_key} · {short(e.instance_id)}</TooltipTrigger>
+									<TooltipContent>instance {e.instance_id}</TooltipContent>
+								</Tooltip>
+							</span>
+							<span data-cell="details" class="min-w-0 truncate" title={detailText(e)}>
+								{#each e.flags as f (f)}<Flag>{f.replaceAll('_', ' ')}</Flag>{/each}
+								{#if e.withheld_attributes}<Flag>{e.withheld_attributes} attributes withheld by policy</Flag>{/if}
+								{#if e.redactions}<Flag>{e.redactions} redacted</Flag>{/if}
+								{#if e.overflowed_names}<Flag>{e.overflowed_names} names over budget, stored as _overflow</Flag>{/if}
+								{#if e.truncated}<Flag>{e.truncated} truncated by SDK</Flag>{/if}
+								{#if e.dropped}<Flag>{e.dropped} dropped: {e.reason}</Flag>{/if}
+								{#each e.attributes as a (a.key)}
+									<span class="ml-1 font-mono text-xs text-muted-foreground"
+										>{a.key}={value(a.value)}{a.opt_in ? ' (opt-in)' : ''}</span
+									>
+								{/each}
+							</span>
+						</div>
+					{/snippet}
+				</VirtualRows>
+			</div>
+		</div>
 	</TooltipProvider>
 
 	<h2 class="mt-8 mb-2 text-lg font-semibold">Sources</h2>

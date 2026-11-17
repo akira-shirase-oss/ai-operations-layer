@@ -12,6 +12,7 @@ const DOWN = process.env['AIOPS_E2E_GAP'] ?? '';
 const E3 = process.env['AIOPS_E2E_E3'] ?? '';
 const E2 = process.env['AIOPS_E2E_E2'] ?? '';
 const BIG = process.env['AIOPS_E2E_BIG'] ?? '';
+const LONG = process.env['AIOPS_E2E_LONG'] ?? '';
 
 function watch(page: Page): string[] {
 	const problems: string[] = [];
@@ -151,3 +152,27 @@ test.describe('dark mode', () => {
 		expect(problems).toEqual([]);
 	});
 });
+
+for (const width of [1280, 1920]) {
+	test(`every outcome badge in the events list is whole at ${width} px, even beside a 128-byte name`, async ({
+		page
+	}) => {
+		const problems = watch(page);
+		await page.setViewportSize({ width, height: 900 });
+		await signIn(page);
+		await openByRequest(page, LONG);
+		await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: connection_lost_after_send');
+		const badges = page.locator('[role="rowgroup"] [role="row"] .badge');
+		await expect(badges).toHaveCount(2); // the step's and the operation's finish
+		for (const badge of await badges.all()) {
+			const cell = badge.locator('xpath=ancestor::*[@data-cell][1]');
+			const b = (await badge.boundingBox())!;
+			const c = (await cell.boundingBox())!;
+			expect(b.x, 'badge starts inside its cell').toBeGreaterThanOrEqual(c.x - 0.5);
+			expect(b.x + b.width, 'badge ends inside its cell').toBeLessThanOrEqual(c.x + c.width + 0.5);
+			expect(b.x + b.width, 'badge is on screen').toBeLessThanOrEqual(width);
+			expect(await badge.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), 'badge text is not cut').toBe(true);
+		}
+		expect(problems).toEqual([]);
+	});
+}
