@@ -239,8 +239,10 @@ async fn missing_events_are_counted_not_hidden(pool: PgPool) {
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn a_flooding_host_is_limited_and_another_host_is_not(pool: PgPool) {
+    // One event a second: the second batch cannot be refilled in time, however slowly the
+    // first is stored on a loaded machine.
     let e = env_with(pool, |s| {
-        s.ingest_buckets = aiops_server::auth::Buckets::new(10, 10);
+        s.ingest_buckets = aiops_server::auth::Buckets::new(1, 10);
     })
     .await;
     let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
@@ -918,10 +920,9 @@ async fn an_unknown_keys_body_is_never_read(pool: PgPool) {
 // shed (503) before its body is read.
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn bodies_beyond_the_in_flight_byte_budget_are_shed_before_reading(pool: PgPool) {
-    let e = env_with(pool, |s| {
-        s.ingest_body_budget = std::sync::Arc::new(tokio::sync::Semaphore::new(2 * 1024));
-    })
-    .await;
+    let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(2 * 1024));
+    let held = budget.clone();
+    let e = env_with(pool, move |s| s.ingest_body_budget = held).await;
     let holders: Vec<_> = (0..2)
         .map(|_| {
             let app = e.app.clone();
@@ -929,7 +930,17 @@ async fn bodies_beyond_the_in_flight_byte_budget_are_shed_before_reading(pool: P
             tokio::spawn(async move { send(&app, stalled_ingest(&key)).await })
         })
         .collect();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait until both held bodies have taken their share (977 KiB each for a 999,999-byte
+    // Content-Length; a loaded machine may be slow to start them). 94 KiB stay free, less
+    // than the third body needs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while budget.available_permits() > 2 * 1024 - 2 * 977 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held bodies never took the budget"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let r = tokio::time::timeout(
         Duration::from_secs(3),
         send(&e.app, stalled_ingest(&e.ingest_key)),
