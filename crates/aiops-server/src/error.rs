@@ -44,6 +44,15 @@ pub enum ApiError {
     StoreUnavailable,
     #[error("the audit log is unavailable, so the request was refused")]
     AuditUnavailable,
+    /// A control request the authority's current state, or an earlier plan, refuses (A3).
+    #[error("{message}")]
+    Conflict {
+        code: &'static str,
+        message: &'static str,
+    },
+    /// Something a control request must ask first could not be asked; nothing was done.
+    #[error("{0}")]
+    Unavailable(&'static str),
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
 }
@@ -78,11 +87,12 @@ impl ApiError {
             | Self::InvalidSource(_)
             | Self::UnstorableText => StatusCode::BAD_REQUEST,
             Self::TooManyEvents(_) | Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::InstanceConflict => StatusCode::CONFLICT,
+            Self::InstanceConflict | Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Self::Overloaded | Self::StoreUnavailable | Self::AuditUnavailable => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::Overloaded
+            | Self::StoreUnavailable
+            | Self::AuditUnavailable
+            | Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -104,6 +114,8 @@ impl ApiError {
             Self::Overloaded => "overloaded",
             Self::StoreUnavailable => "store_unavailable",
             Self::AuditUnavailable => "audit_unavailable",
+            Self::Conflict { code, .. } => code,
+            Self::Unavailable(_) => "unavailable",
             Self::Internal(_) => "internal",
         }
     }

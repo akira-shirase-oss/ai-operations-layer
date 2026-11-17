@@ -25,6 +25,26 @@ impl std::fmt::Debug for AuthoritySource {
     }
 }
 
+/// Controlled recovery on the authority's runner (A3, D-030): the runner's API key (an
+/// operator credential, used only to read a run's spec and submit its recovery) and the
+/// effect checks asked before any resubmit.
+#[derive(Clone)]
+pub struct ControlConfig {
+    pub api_key: String,
+    /// URL templates with `{key}` (the business key): 200 = the effect landed, 404 = it
+    /// did not, anything else = unknown.
+    pub effect_checks: Vec<String>,
+}
+
+impl std::fmt::Debug for ControlConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlConfig")
+            .field("api_key", &"<redacted>")
+            .field("effect_checks", &self.effect_checks)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -61,6 +81,9 @@ pub struct Config {
     /// `AIOPS_AUTHORITY_DURABLE_RUNNER=<label>=<url>` and
     /// `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`: the runner the console may ask.
     pub authority: Option<AuthoritySource>,
+    /// `AIOPS_CONTROL_DURABLE_RUNNER_API_KEY` and `AIOPS_CONTROL_EFFECT_CHECKS`: recovery on
+    /// the authority's runner. Needs `authority`.
+    pub control: Option<ControlConfig>,
     /// Accepted connections at most.
     pub max_connections: usize,
     /// A response write making no progress for this long ends its connection (review N3).
@@ -100,6 +123,7 @@ impl Config {
             max_requests_per_connection: 1_000,
             connection_lifetime: Duration::from_secs(300),
             authority: None,
+            control: None,
         }
     }
 
@@ -191,10 +215,42 @@ impl Config {
                 ),
             }
         }
+        control_from_env(&mut cfg, &mut errors);
         if errors.is_empty() {
             Ok(cfg)
         } else {
             Err(errors.join("; "))
         }
+    }
+}
+
+/// `AIOPS_CONTROL_DURABLE_RUNNER_API_KEY` and `AIOPS_CONTROL_EFFECT_CHECKS` (A3, D-030).
+fn control_from_env(cfg: &mut Config, errors: &mut Vec<String>) {
+    if let Ok(key) = std::env::var("AIOPS_CONTROL_DURABLE_RUNNER_API_KEY") {
+        let checks: Vec<String> = std::env::var("AIOPS_CONTROL_EFFECT_CHECKS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_end_matches('/').to_owned())
+            .collect();
+        if cfg.authority.is_none() {
+            errors.push("AIOPS_CONTROL_DURABLE_RUNNER_API_KEY needs AIOPS_AUTHORITY_DURABLE_RUNNER (control reads the same runner)".to_owned());
+        }
+        if key.len() < 32 {
+            errors.push("AIOPS_CONTROL_DURABLE_RUNNER_API_KEY must be the runner's API key (at least 32 characters)".to_owned());
+        }
+        if checks.is_empty() {
+            errors.push("AIOPS_CONTROL_EFFECT_CHECKS is required with control: a resubmit is never blind (http(s) URL templates with {key}, comma-separated)".to_owned());
+        }
+        for c in &checks {
+            if !(c.starts_with("http://") || c.starts_with("https://")) || !c.contains("{key}") {
+                errors.push(format!("AIOPS_CONTROL_EFFECT_CHECKS: {c:?} must be an http(s) URL template with {{key}}"));
+            }
+        }
+        cfg.control = Some(ControlConfig {
+            api_key: key,
+            effect_checks: checks,
+        });
     }
 }

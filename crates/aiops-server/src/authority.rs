@@ -18,7 +18,7 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 
-use crate::app::SharedState;
+use crate::app::{AppState, SharedState};
 use crate::config::AuthoritySource;
 use crate::error::ApiError;
 use crate::query::{authenticate, authorize};
@@ -75,7 +75,7 @@ const SOURCE: &str = "durable-runner";
 
 /// Which run the operation stands for, if its link holds. The configured runner's link is
 /// the one checked when the events name several.
-fn verify(
+pub(crate) fn verify(
     source: &AuthoritySource,
     operation: OperationId,
     links: &[(String, i64)],
@@ -101,7 +101,7 @@ fn verify(
 }
 
 /// Reads the runner's answer up to `max` bytes; `None` past it.
-async fn read_bounded(mut res: reqwest::Response, max: usize) -> Option<Vec<u8>> {
+pub(crate) async fn read_bounded(mut res: reqwest::Response, max: usize) -> Option<Vec<u8>> {
     let mut body = Vec::new();
     while let Some(chunk) = res.chunk().await.ok()? {
         if body.len() + chunk.len() > max {
@@ -129,15 +129,34 @@ pub async fn authority(
         Ok(run) => run,
         Err(a) => return Ok(Json(a)),
     };
-    let unavailable = |reason: &'static str| Authority::Unavailable {
-        source: SOURCE,
-        runner: source.label.clone(),
-        run_id: run,
-        reason,
-        read_at: app.now(),
-    };
+    match read_run(&app, &source, run).await {
+        (Ok(answer), read_at) => Ok(Json(Authority::Answered {
+            source: SOURCE,
+            runner: source.label,
+            run_id: run,
+            read_at,
+            answer: Box::new(answer),
+        })),
+        (Err(reason), read_at) => Ok(Json(Authority::Unavailable {
+            source: SOURCE,
+            runner: source.label,
+            run_id: run,
+            reason,
+            read_at,
+        })),
+    }
+}
+
+/// The runner's own answer for `run` (`GET /jobs/{run}` with the read key), or why it
+/// could not be had, with the time it was read: 2 s deadlines, 64 KiB, at most
+/// `AUTHORITY_READS` in flight. Shared by the console's card and the control path.
+pub(crate) async fn read_run(
+    app: &AppState,
+    source: &AuthoritySource,
+    run: u64,
+) -> (Result<RunView, &'static str>, aiops_domain::Timestamp) {
     let Ok(_permit) = app.authority_gate.try_acquire() else {
-        return Ok(Json(unavailable("busy")));
+        return (Err("busy"), app.now());
     };
     let res = app
         .authority_client
@@ -149,37 +168,31 @@ pub async fn authority(
     let read_at = app.now();
     let res = match res {
         Ok(r) => r,
-        Err(e) if e.is_timeout() => return Ok(Json(unavailable("timeout"))),
-        Err(e) if e.is_connect() => return Ok(Json(unavailable("unreachable"))),
-        Err(_) => return Ok(Json(unavailable("unreachable"))),
+        Err(e) if e.is_timeout() => return (Err("timeout"), read_at),
+        Err(_) => return (Err("unreachable"), read_at),
     };
     match res.status().as_u16() {
         200 => {}
-        404 => return Ok(Json(unavailable("not_found"))),
-        401 | 403 => return Ok(Json(unavailable("unauthorized"))),
-        _ => return Ok(Json(unavailable("bad_answer"))),
+        404 => return (Err("not_found"), read_at),
+        401 | 403 => return (Err("unauthorized"), read_at),
+        _ => return (Err("bad_answer"), read_at),
     }
     let Ok(Some(body)) =
         tokio::time::timeout(Duration::from_secs(2), read_bounded(res, 64 * 1024)).await
     else {
-        return Ok(Json(unavailable("bad_answer")));
+        return (Err("bad_answer"), read_at);
     };
     match serde_json::from_slice::<RunAnswer>(&body) {
-        Ok(a) if a.id == run && a.state.len() <= 64 && a.key.len() <= 512 => {
-            Ok(Json(Authority::Answered {
-                source: SOURCE,
-                runner: source.label,
-                run_id: run,
-                read_at,
-                answer: Box::new(RunView {
-                    state: a.state,
-                    key: a.key,
-                    steps: a.steps,
-                    finished_at_ms: a.finished_at,
-                }),
-            }))
-        }
-        _ => Ok(Json(unavailable("bad_answer"))),
+        Ok(a) if a.id == run && a.state.len() <= 64 && a.key.len() <= 512 => (
+            Ok(RunView {
+                state: a.state,
+                key: a.key,
+                steps: a.steps,
+                finished_at_ms: a.finished_at,
+            }),
+            read_at,
+        ),
+        _ => (Err("bad_answer"), read_at),
     }
 }
 

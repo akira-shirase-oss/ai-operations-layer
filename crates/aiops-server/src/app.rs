@@ -329,6 +329,14 @@ pub fn router(state: SharedState) -> Router {
             "/v1/projects/{project}/operations/{operation_id}/authority",
             get(crate::authority::authority),
         )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/recoveries",
+            get(crate::control::list).post(crate::control::plan),
+        )
+        .route(
+            "/v1/projects/{project}/recoveries/{id}/confirm",
+            post(crate::control::confirm),
+        )
         .route("/v1/collector/stats", get(query::stats))
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,

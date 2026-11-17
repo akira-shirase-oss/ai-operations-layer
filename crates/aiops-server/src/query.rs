@@ -48,7 +48,7 @@ pub async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<Actor, 
     }
 }
 
-async fn deny(
+pub(crate) async fn deny(
     app: &AppState,
     actor: &Actor,
     action: &str,
@@ -80,7 +80,19 @@ pub(crate) async fn authorize(
     slug: &str,
     target: Option<&str>,
 ) -> Result<Project, ApiError> {
-    if !actor.token.scopes.iter().any(|s| s == SCOPE_READ) {
+    authorize_scope(app, actor, SCOPE_READ, action, slug, target).await
+}
+
+/// As [`authorize`], for a scope other than `read` (`operate` for control, A3).
+pub(crate) async fn authorize_scope(
+    app: &AppState,
+    actor: &Actor,
+    scope: &str,
+    action: &str,
+    slug: &str,
+    target: Option<&str>,
+) -> Result<Project, ApiError> {
+    if !actor.token.scopes.iter().any(|s| s == scope) {
         return Err(deny(app, actor, action, Some(slug), target, "scope_missing").await);
     }
     let project = if let Some(p) = app.project_cache(slug) {

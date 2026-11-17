@@ -1454,3 +1454,241 @@ async fn find_conflicts(
         .filter_map(|u| EventId::from_bytes(*u.as_bytes()))
         .collect())
 }
+
+/// A recovery plan and what became of it (A3, D-030).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recovery {
+    pub id: Uuid,
+    pub operation_id: OperationId,
+    pub request_key: String,
+    pub planned_by: String,
+    pub runner: String,
+    pub run_id: i64,
+    pub business_key: String,
+    pub expected_state: String,
+    pub observed_state: String,
+    pub effect: String,
+    pub effect_detail: Option<String>,
+    pub recovery_number: i32,
+    pub derived_key: String,
+    pub status: String,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<Timestamp>,
+    pub new_run_id: Option<i64>,
+    pub created_at: Timestamp,
+}
+
+/// A new plan, before it is stored.
+#[derive(Debug, Clone)]
+pub struct NewRecovery<'a> {
+    pub project_id: Uuid,
+    pub operation_id: OperationId,
+    pub request_key: &'a str,
+    pub planned_by: &'a str,
+    pub runner: &'a str,
+    pub run_id: i64,
+    pub business_key: &'a str,
+    pub expected_state: &'a str,
+    pub observed_state: &'a str,
+    pub effect: &'a str,
+    pub effect_detail: Option<&'a str>,
+    pub recovery_number: i32,
+    pub derived_key: &'a str,
+    pub status: &'a str,
+}
+
+/// The columns of a [`Recovery`], in the order [`recovery_row`] reads them.
+macro_rules! recovery_columns {
+    () => {
+        "id, operation_id, request_key, planned_by, runner, run_id, business_key, expected_state,
+         observed_state, effect, effect_detail, recovery_number, derived_key, status, approved_by,
+         approved_at, new_run_id, created_at"
+    };
+}
+
+fn recovery_row(r: &sqlx::postgres::PgRow) -> Result<Recovery, StoreError> {
+    let op: Uuid = r.get(1);
+    Ok(Recovery {
+        id: r.get(0),
+        operation_id: OperationId::from_bytes(*op.as_bytes()).ok_or(StoreError::Corrupt)?,
+        request_key: r.get(2),
+        planned_by: r.get(3),
+        runner: r.get(4),
+        run_id: r.get(5),
+        business_key: r.get(6),
+        expected_state: r.get(7),
+        observed_state: r.get(8),
+        effect: r.get(9),
+        effect_detail: r.get(10),
+        recovery_number: r.get(11),
+        derived_key: r.get(12),
+        status: r.get(13),
+        approved_by: r.get(14),
+        approved_at: r.get::<Option<OffsetDateTime>, _>(15).map(from_odt),
+        new_run_id: r.get(16),
+        created_at: from_odt(r.get(17)),
+    })
+}
+
+impl Store {
+    /// The plan this request key already made, if any (a replayed plan is a no-op).
+    pub async fn recovery_by_request(
+        &self,
+        project_id: Uuid,
+        request_key: &str,
+    ) -> Result<Option<Recovery>, StoreError> {
+        let row = sqlx::query(concat!(
+            "SELECT ",
+            recovery_columns!(),
+            " FROM recoveries WHERE project_id = $1 AND request_key = $2"
+        ))
+        .bind(project_id)
+        .bind(request_key)
+        .fetch_optional(&self.control)
+        .await?;
+        row.as_ref().map(recovery_row).transpose()
+    }
+
+    pub async fn recovery(
+        &self,
+        project_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<Recovery>, StoreError> {
+        let row = sqlx::query(concat!(
+            "SELECT ",
+            recovery_columns!(),
+            " FROM recoveries WHERE project_id = $1 AND id = $2"
+        ))
+        .bind(project_id)
+        .bind(id)
+        .fetch_optional(&self.control)
+        .await?;
+        row.as_ref().map(recovery_row).transpose()
+    }
+
+    /// An operation's recoveries, oldest first (bounded: `MAX_RECOVERIES` per key).
+    pub async fn recoveries(
+        &self,
+        project_id: Uuid,
+        operation_id: OperationId,
+    ) -> Result<Vec<Recovery>, StoreError> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            recovery_columns!(),
+            " FROM recoveries WHERE project_id = $1 AND operation_id = $2
+             ORDER BY created_at, id LIMIT 50"
+        ))
+        .bind(project_id)
+        .bind(Uuid::from_bytes(*operation_id.as_bytes()))
+        .fetch_all(&self.control)
+        .await?;
+        rows.iter().map(recovery_row).collect()
+    }
+
+    /// How many plans the business key already has on this runner (the next number is
+    /// one more; the unique derived key settles a race).
+    pub async fn recovery_count(
+        &self,
+        project_id: Uuid,
+        runner: &str,
+        business_key: &str,
+    ) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM recoveries WHERE project_id = $1 AND runner = $2 AND business_key = $3",
+        )
+        .bind(project_id)
+        .bind(runner)
+        .bind(business_key)
+        .fetch_one(&self.control)
+        .await?)
+    }
+
+    /// Stores a plan. `None` when its request key or derived key is already taken (the
+    /// caller reads the existing row back).
+    pub async fn insert_recovery(
+        &self,
+        r: &NewRecovery<'_>,
+    ) -> Result<Option<Recovery>, StoreError> {
+        let row = sqlx::query(concat!(
+            "INSERT INTO recoveries (id, project_id, operation_id, request_key, planned_by, runner, run_id,
+                business_key, expected_state, observed_state, effect, effect_detail, recovery_number,
+                derived_key, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             ON CONFLICT DO NOTHING RETURNING ",
+            recovery_columns!(),
+            ""
+        ))
+        .bind(Uuid::new_v4())
+        .bind(r.project_id)
+        .bind(Uuid::from_bytes(*r.operation_id.as_bytes()))
+        .bind(r.request_key)
+        .bind(r.planned_by)
+        .bind(r.runner)
+        .bind(r.run_id)
+        .bind(r.business_key)
+        .bind(r.expected_state)
+        .bind(r.observed_state)
+        .bind(r.effect)
+        .bind(r.effect_detail)
+        .bind(r.recovery_number)
+        .bind(r.derived_key)
+        .bind(r.status)
+        .fetch_optional(&self.control)
+        .await?;
+        row.as_ref().map(recovery_row).transpose()
+    }
+
+    /// A confirm takes the plan: `planned` → `submitting`, recording who approved it.
+    /// `None` when the plan was not `planned` (already taken, blocked or submitted).
+    pub async fn claim_recovery(
+        &self,
+        project_id: Uuid,
+        id: Uuid,
+        approved_by: &str,
+    ) -> Result<Option<Recovery>, StoreError> {
+        let row = sqlx::query(concat!(
+            "UPDATE recoveries SET status = 'submitting', approved_by = $3, approved_at = now(),
+                updated_at = now()
+             WHERE project_id = $1 AND id = $2 AND status = 'planned' RETURNING ",
+            recovery_columns!(),
+            ""
+        ))
+        .bind(project_id)
+        .bind(id)
+        .bind(approved_by)
+        .fetch_optional(&self.control)
+        .await?;
+        row.as_ref().map(recovery_row).transpose()
+    }
+
+    /// The submit's outcome: `submitted` with the new run, or back to `planned` (nothing
+    /// was submitted), or `blocked` (the checks before the submit said so).
+    pub async fn settle_recovery(
+        &self,
+        project_id: Uuid,
+        id: Uuid,
+        status: &str,
+        new_run_id: Option<i64>,
+        effect: Option<(&str, Option<&str>)>,
+    ) -> Result<Option<Recovery>, StoreError> {
+        let row = sqlx::query(concat!(
+            "UPDATE recoveries SET status = $3, new_run_id = COALESCE($4, new_run_id),
+                effect = COALESCE($5, effect), effect_detail = CASE WHEN $5 IS NULL THEN effect_detail ELSE $6 END,
+                approved_by = CASE WHEN $3 = 'planned' THEN NULL ELSE approved_by END,
+                approved_at = CASE WHEN $3 = 'planned' THEN NULL ELSE approved_at END,
+                updated_at = now()
+             WHERE project_id = $1 AND id = $2 AND status = 'submitting' RETURNING ",
+            recovery_columns!(),
+            ""
+        ))
+        .bind(project_id)
+        .bind(id)
+        .bind(status)
+        .bind(new_run_id)
+        .bind(effect.map(|e| e.0))
+        .bind(effect.and_then(|e| e.1))
+        .fetch_optional(&self.control)
+        .await?;
+        row.as_ref().map(recovery_row).transpose()
+    }
+}

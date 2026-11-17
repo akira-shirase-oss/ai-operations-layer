@@ -14,6 +14,7 @@
 //! the SDK always writes the lowest version that carries what it sends.
 
 pub mod context;
+pub mod control;
 pub mod correlate;
 pub mod event;
 pub mod ids;
