@@ -198,7 +198,7 @@
 									: ''}</TableCell
 							>
 							<TableCell class="font-mono text-xs">
-								{a.error_code ?? ''}{#if a.error_message}<div class="text-muted-foreground">{a.error_message}</div>{/if}
+								{a.error_code ?? ''}{#if a.error_message}<div class="text-muted-foreground"><bdi>{a.error_message}</bdi></div>{/if}
 							</TableCell>
 							<TableCell class="font-mono text-xs"
 								>{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</TableCell
@@ -277,8 +277,10 @@
 								{#if e.truncated}<Flag>{e.truncated} truncated by SDK</Flag>{/if}
 								{#if e.dropped}<Flag>{e.dropped} dropped: {e.reason}</Flag>{/if}
 								{#each e.attributes as a (a.key)}
+									<!-- Host text is isolated (<bdi>): a bidi control in one value cannot reorder
+									     what follows it (review N9). -->
 									<span class="ml-1 font-mono text-xs text-muted-foreground"
-										>{a.key}={value(a.value)}{a.opt_in ? ' (opt-in)' : ''}</span
+										>{a.key}=<bdi>{value(a.value)}</bdi>{a.opt_in ? ' (opt-in)' : ''}</span
 									>
 								{/each}
 							</span>

@@ -176,3 +176,15 @@ for (const width of [1280, 1920]) {
 		expect(problems).toEqual([]);
 	});
 }
+
+test('host text is isolated, so a bidi control cannot reorder what follows it', async ({ page }) => {
+	const problems = watch(page);
+	await signIn(page);
+	await openByRequest(page, XSS);
+	const values = page.locator('[data-cell="details"] bdi');
+	await expect(values).toHaveCount(2); // retry.reason and http.route
+	const rlo = values.filter({ hasText: '\u202e' });
+	await expect(rlo).toHaveCount(1);
+	expect(await rlo.evaluate((el) => getComputedStyle(el).unicodeBidi)).toBe('isolate');
+	expect(problems).toEqual([]);
+});

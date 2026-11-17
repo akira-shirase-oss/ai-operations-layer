@@ -68,7 +68,7 @@ curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorizat
  "events": [
   {"event_id": "e2e00000000000000000000000000001", "type": "operation.started", "operation_id": "$xss_op", "seq": 1, "op_seq": 1,
    "event_time": "$now", "name": "publish_article", "request_id": "e2e-xss",
-   "attributes": {"retry.reason": "<img src=x onerror=alert(1)>"}},
+   "attributes": {"retry.reason": "<img src=x onerror=alert(1)>", "http.route": "/a\u202eb"}},
   {"event_id": "e2e00000000000000000000000000002", "type": "operation.finished", "operation_id": "$xss_op", "seq": 2, "op_seq": 2,
    "event_time": "$now", "outcome": "succeeded", "events_emitted": 2},
   {"event_id": "e2e00000000000000000000000000003", "type": "gap.reported", "operation_id": "$gap_op", "seq": 3, "op_seq": 0,
