@@ -2,8 +2,10 @@
 # Prints the path of a release `durable-server` (with `durable-cli` beside it) built from
 # Durable Runner's public
 # repository at the revision this layer is tested against (its D-050 handler-call headers).
-# Uses DURABLE_RUNNER_DIR (a checkout) when set, else clones into target/durable-runner-src.
-# Either way the runner is built in its own repository's target/ (never this one's).
+# Uses DURABLE_RUNNER_DIR (a checkout) when set, else a clone in DURABLE_RUNNER_SRC (default:
+# the temporary directory; never under target/, which CI's cache restores incompletely: run
+# 44093842622 got a clone whose objects were missing). A clone that cannot read the tested
+# revision is replaced. Either way the runner is built in its own repository's target/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,12 +16,14 @@ unset CARGO_TARGET_DIR
 
 dir="${DURABLE_RUNNER_DIR:-}"
 if [ -z "$dir" ]; then
-  dir=target/durable-runner-src
-  if [ ! -d "$dir/.git" ]; then
+  dir="${DURABLE_RUNNER_SRC:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/aiops-durable-runner-src}"
+  has_rev() { git -C "$dir" cat-file -e "$rev^{tree}" 2>/dev/null; }
+  has_rev || git -C "$dir" fetch --quiet origin >&2 2>/dev/null || true
+  if ! has_rev; then
+    rm -rf "$dir"
     git clone --quiet "$repo" "$dir" >&2
   fi
-  git -C "$dir" fetch --quiet origin >&2 || true
-  git -C "$dir" checkout --quiet "$rev" >&2
+  git -C "$dir" checkout --quiet --force "$rev" >&2
 elif ! git -C "$dir" merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
   echo "error: $dir does not contain Durable Runner $rev (the handler-call headers)" >&2
   exit 1
