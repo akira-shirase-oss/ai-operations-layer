@@ -480,9 +480,25 @@ async fn duplicated_and_reordered_batches_merge_without_false_chronology(pool: P
         tokio::time::sleep(Duration::from_millis(60)).await; // several batches, not one
     }
     // Flush whatever the proxy still holds by sending one more operation.
+    // The proxy holds every other batch until the next one arrives, so the last batch can
+    // stay held forever (on a loaded machine the final articles share one batch). Once the
+    // SDK has flushed, deliver whatever is still held, late and twice, like the rest.
     article(&host, "chaos-last", None).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    article(&host, "chaos-flush", None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let held = chaos.held.lock().unwrap().take();
+    if let Some((headers, body)) = held {
+        for _ in 0..2 {
+            chaos
+                .http
+                .post(format!("{}/v1/ingest", chaos.upstream))
+                .header("authorization", headers.get("authorization").unwrap())
+                .header("content-type", "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+        }
+    }
 
     for i in 0..12 {
         let t = timeline(&c, &k.reader, &format!("chaos-{i}")).await;
