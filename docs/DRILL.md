@@ -106,7 +106,51 @@ symptom. The baseline may use only what the runner ships: its server log,
 The first dry run (seeder-aware, `perf/results/drill/20261117T121345Z-dr-
 baseline.md`) needed a median of 1.5 search actions, 6/6 correct. The
 runner's state names the failed step, and the tickets' symptoms nearly
-name the class. On this catalog the comparison above cannot pass whatever
-the layer does: open question OQ8 (`DECISIONS.md`) must be answered before
-any counted run.
+name the class, so on this catalog (catalog A) the comparison turns on
+half an action. D-029 records the registered comparison as missed here,
+keeps that result as evidence, and pre-registers catalog B.
+
+## Catalog B (pre-registered 2026-11-17, D-029; not yet run)
+
+Registered before any run on it. Its generator and the worker faults it
+needs are built at A4; until a run is committed, nothing here is evidence.
+
+**Arms.** Catalog A (above) and catalog B, each in both modes. Every
+counted run reports both arms; the criterion ("What counts") is unchanged
+and applies to each arm on its own.
+
+**Incidents that share a runner state but differ in cause and recovery.**
+
+| Runner state | Class | What happened | Correct recovery |
+|---|---|---|---|
+| `failed:step:0` | `generate_refused` | the provider refused the prompt on every attempt | `fix_prompt` (the same input fails again) |
+| `failed:step:0` | `generate_timeout` | every attempt timed out after sending | `resubmit` |
+| `failed:step:0` | `generate_quota` | a 429 on every attempt exhausted the retries | `wait_or_raise_quota` |
+| `failed:step:3` | `publish_refused` | the publisher refused every attempt; nothing was recorded | `fix_and_resubmit` |
+| `failed:step:3` | `publish_landed_then_refused` | attempt 1 published and its reply was lost; later attempts were refused as duplicates | `none_published` (do not resubmit) |
+| `done` | `published_twice` | two effectful attempts each published | `report_duplicate` |
+| `failed:step:1` | `validate_after_release` | validation fails on a new release or prompt version for inputs the old one passed | `roll_back` |
+| `failed:step:1` | `validate_bad_input` | the input itself is invalid; other runs of the same release pass | `fix_input` |
+| any | `telemetry_gap` | the operation has an unknown tail or a gap; only the runner's answer decides | `ask_runner` ("unknown; ask the runner") |
+
+**Tickets.** At least 12 per run, drawn with a fixed, recorded seed and
+stratified so every runner state above appears, with at least 3 lost
+publishes (`publish_lost_response` from catalog A or
+`publish_landed_then_refused`). Each ticket gives the `op_key` and the
+user-visible symptom only ("my article did not appear", "it appeared
+twice"), written by someone who has not seen the class.
+
+**Counting, frozen per arm.** Baseline: each shell command, each
+`durable-cli` call, each publisher lookup. Layer: each console page load,
+each search or filter change, each toggle opened (details, codes), each
+publisher lookup. Copying an ID is not an action.
+
+**Performer.** Neither the seeder nor the ticket writer.
+
+**Measures.** Search actions (primary), correctness, wall time (reported,
+not gated) and **wrong-recovery risk**: per arm, the number of answers
+whose recovery could duplicate or lose an external effect (`resubmit` on
+`publish_landed_then_refused`, anything but `report_duplicate` on
+`published_twice`, anything but `ask_runner` on `telemetry_gap`). It is
+registered now and reported beside the criterion; it does not change it.
 

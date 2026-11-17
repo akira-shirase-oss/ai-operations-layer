@@ -251,7 +251,7 @@ named decision when the relevant milestone starts.
 - **OQ7 — Durable Runner hand-off shape.** *Answered by D-027
   (2026-11-17).*
 - **OQ8 — What can the ship gate's comparison measure when the authority
-  already names the failure?** Open (owner: A4, before any counted run).
+  already names the failure?** *Answered by D-029 (2026-11-17).*
   D-024 moved the deciding comparison to Durable Runner because the
   reference host's logs-only baseline needed one or two search actions.
   The first dry run on Durable Runner (D-028) needed 1.5. The runner's own
@@ -366,3 +366,36 @@ named decision when the relevant milestone starts.
   runner's log had one line ("listening"), but its state names the failed
   step. That result opens OQ8. Trade-off: the deciding comparison is still
   not runnable as registered — stated, not hidden.
+- **D-029 — The registered comparison is missed on catalog A, kept as
+  evidence; a harder catalog B is pre-registered (answers OQ8, amends
+  `docs/DRILL.md` before any counted run, 2026-11-17).** The criterion
+  registered in D-017 (median search actions at least 30% lower,
+  correctness not lower) is recorded as **missed on catalog A** (the six
+  classes of D-024/D-028): not as a layer result (no counted layer run
+  exists) but because, on this catalog, it cannot tell a good layer from a
+  bad one. The runner's own state (`failed:step:N`) or the ticket's symptom
+  names the class. The only Durable Runner evidence, a seeder-aware
+  baseline at a median of 1.5 actions (`perf/results/drill/20261117T121345Z-
+  dr-baseline.md`), stays as evidence and is not re-run. OQ8's first
+  wording overstated the case: it said the comparison "cannot pass however
+  good the layer is", assuming every console answer costs a list search
+  plus a timeline load. A request-ID search returns a list row whose badge
+  already names the class, so one action can answer most tickets, and with
+  six tickets a median of 1.0 would beat 1.5 by 33%. What holds is that
+  pass or fail would turn on half an action, a counting convention rather
+  than the layer. Decisions:
+  - The criterion is unchanged and catalog A stays as one arm. Every
+    counted run reports both arms.
+  - **Catalog B** (`docs/DRILL.md`, "Catalog B") is pre-registered now, at
+    this commit, before any run on it: incidents that share a runner state
+    but differ in cause and in the correct recovery, tickets written from
+    user-visible symptoms by someone blind to the class, frozen counting
+    rules per arm, a performer who is not the seeder, and wrong-recovery
+    risk as a registered measure. Its generator and worker faults are
+    built at A4; nothing here runs it.
+  - No silent change: any change to the criterion or the catalogs is a new
+    dated decision, stated beside the result, never substituted for it.
+
+  Trade-off: the ship gate now needs a second, larger drill (at least 12
+  tickets per arm) and a blind ticket writer, which is more people and
+  time. Accepted, because a gate that cannot discriminate measures nothing.
