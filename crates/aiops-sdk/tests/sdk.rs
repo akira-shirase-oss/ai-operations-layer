@@ -695,3 +695,22 @@ async fn a_host_can_report_under_ids_and_attempts_another_system_keys() {
     assert_eq!(events[2]["attempt"], 3, "the finish names the same attempt");
     client.shutdown(Duration::from_secs(1)).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_held_while_a_batch_fills_are_counted_when_a_shutdown_is_cut_short() {
+    // Review R2: the flusher has taken events off the queue and is still filling a batch
+    // (it waits up to the flush interval for more); a shutdown whose deadline aborts it
+    // must count them as dropped, never lose them uncounted.
+    let (endpoint, fake) = fake_collector().await;
+    let mut cfg = config(&endpoint);
+    cfg.flush_interval = Duration::from_secs(10);
+    cfg.batch_max_events = 500;
+    let client = Client::start(&cfg).unwrap();
+    for n in 0..3 {
+        run_operation(&client, n);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await; // taken off the queue, held
+    let s = client.shutdown(Duration::from_millis(100)).await;
+    assert!(all_events(&fake).is_empty(), "nothing was sent before the abort");
+    assert_eq!(s.dropped(), s.emitted, "every held event counted: {s:?}");
+}
