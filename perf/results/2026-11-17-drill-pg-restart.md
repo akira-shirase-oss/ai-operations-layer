@@ -1,6 +1,13 @@
 # Drill: PostgreSQL restarts during ingest (2026-11-17) — FAIL (the collector did not recover)
 
-Development observation on a shared laptop (review finding 8).
+Development observation on a shared laptop (review finding 8). **Annotation, added after
+the run:** the `/readyz` failure was the environment, not the collector — Docker brought the
+restarted container back *without its host port mapping* (`docker ps` showed only
+`5432/tcp`, a TCP connect to 127.0.0.1:57432 was refused, and the container had to be
+recreated), so nothing could reach PostgreSQL again. What the run does show: no non-503
+5xx during the restart, and every acknowledged event stored. It ran on the uncommitted
+tree after `e16ea6e` (the classification fix). The rerun is
+`2026-11-17-drill-pg-restart-2.md`.
 
 | | |
 |---|---|

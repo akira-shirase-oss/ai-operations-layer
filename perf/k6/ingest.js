@@ -27,6 +27,9 @@ const accepted = new Counter('events_accepted');
 const lost = new Counter('events_lost');
 const limited = new Counter('batches_rate_limited');
 const shed = new Counter('batches_shed');
+// A 5xx other than 503 tells a sender not to retry: it must never happen.
+const serverErrors = new Counter('batches_server_error');
+const acknowledged = new Counter('events_acknowledged');
 
 export const options = {
 	discardResponseBodies: false,
@@ -147,7 +150,10 @@ export default function () {
 		limited.add(1);
 	} else if (res.status === 503) {
 		shed.add(1);
+	} else if (res.status >= 500) {
+		serverErrors.add(1);
 	}
+	acknowledged.add(stored);
 	lost.add(events.length - stored);
 	check(res, {
 		'200': (r) => r.status === 200,
