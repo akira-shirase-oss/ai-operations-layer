@@ -134,7 +134,7 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
     {
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            stop_signal().await;
             tracing::info!("shutting down: draining");
             cancel.cancel();
         });
@@ -170,5 +170,21 @@ async fn fit_to_file_limit(wanted: usize) -> usize {
             fitted
         }
         _ => wanted,
+    }
+}
+
+/// SIGINT or SIGTERM (Docker and systemd stop services with SIGTERM).
+async fn stop_signal() {
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot listen for SIGTERM; SIGINT only");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
     }
 }

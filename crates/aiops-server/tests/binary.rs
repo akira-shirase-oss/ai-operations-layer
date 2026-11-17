@@ -170,3 +170,51 @@ async fn the_real_binary_ingests_serves_timelines_and_drains_on_sigint(pool: PgP
         "the token must never reach the logs"
     );
 }
+
+/// Review finding 16: Docker and systemd stop a service with SIGTERM; it must drain like
+/// SIGINT, finishing the request in flight.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn sigterm_drains_like_sigint(pool: PgPool) {
+    let url = database_url(&pool);
+    cli(&url, &["admin", "create-project", "pilot"]);
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_aiops-server"))
+            .arg("serve")
+            .env("AIOPS_DATABASE_URL", &url)
+            .env("AIOPS_LISTEN", format!("127.0.0.1:{port}"))
+            .env("AIOPS_LOG", "info")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_ready(&base).await;
+    let pid = server.0.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "did not exit after SIGTERM"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        status.success(),
+        "SIGTERM must drain and exit 0, got {status:?}"
+    );
+    let mut out = String::new();
+    std::io::Read::read_to_string(server.0.stdout.as_mut().unwrap(), &mut out).unwrap();
+    assert!(out.contains("shutting down: draining"), "no drain log line");
+}
