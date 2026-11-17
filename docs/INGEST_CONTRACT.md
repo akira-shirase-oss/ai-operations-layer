@@ -153,9 +153,11 @@ halving isolates it (the Rust SDK does this down to single events).
 ## Default attribute allowlist (v1)
 
 `business_key`, `cache.hit`, `content.kind`, `content.length`, `error.type`,
-`http.method`, `http.route`, `http.status_code`, `provider`,
+`http.method`, `http.route`, `http.status_code`, `job.id`, `job.runner`, `provider`,
 `provider.region`, `queue.name`, `retry.reason`, `sampled`, `tool.name`,
-`validation.rule`. Anything else needs a per-project opt-in
+`validation.rule`. `job.runner` and `job.id` (added 2026-11-17, D-027) name the job-runner run
+an operation stands for; the collector checks that link before it asks
+the runner. Anything else needs a per-project opt-in
 (`aiops-server admin set-opt-in`) and is labeled *opt-in* in the console.
 
 ## Context propagation

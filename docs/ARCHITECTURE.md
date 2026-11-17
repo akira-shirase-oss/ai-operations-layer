@@ -27,6 +27,7 @@
 | `aiops-domain` | Pure model: the versioned event schema, operation/step identities, outcome classification (transport / validation / uncertain-external-effect), cardinality limits, redaction rules, control-state machine. No I/O — enforced. |
 | `aiops-store` | PostgreSQL access: idempotent event upserts (dedup by event ID), operation metadata, control records, audit log, retention/rollup jobs, drop counters. |
 | `aiops-server` | Axum API: the ingest path, the query path and the control path as separately bounded, separately authenticated surfaces; health endpoints reporting ingestion and storage state honestly. |
+| `aiops-durable-runner` | The Durable Runner adapter (A2, D-027): `aiops-dr-adapter` sits where the runner calls its allowlisted handlers, forwards every call unchanged, reports each attempt and reconcile probe under the runner's own run, step and attempt, and declares a run's outcome only from the runner's `GET /jobs/{id}`. It observes; it causes nothing. |
 | `aiops-adapter-*` | Execution adapters (A3; first the reference host's publisher, then Durable Runner through its public API — D-012). An adapter is the only component allowed to effect an external action, and only inside its ownership contract. |
 | `apps/console` | SvelteKit investigation console: operation timeline, filtering, release comparison, missing-data states, control actions through the API only. |
 | `fixtures/reference-host` | The in-repo pilot host (D-012): request → generation → validation → fact-check → publish with fake model/tool/publisher, injectable faults, cost estimates and an authoritative publication record. Also the drill's incident generator (`docs/DRILL.md`). |
@@ -63,6 +64,13 @@ assembled ordered by event time with receive time displayed → explicit gap
 markers where coverage is missing → filtering/release comparison read the
 same records. The console holds no authority and renders `unknown` where the
 data is absent.
+
+**Authority beside evidence (A2, D-027):** console → `GET …/operations/{id}/
+authority` → the collector finds the run the operation's start events name
+(`job.runner`, `job.id`), believes the link only if the operation ID
+derives from that run, and reads the runner's `GET /jobs/{run}` with its
+read-only key (2 s deadline, 8 in flight) → the answer, labeled with the
+time it was read. Nothing acts on it; the trace never overrides it.
 
 **Control:** user requests retry/reconcile on an operation → API checks actor
 scope and project → adapter reads the *authoritative* execution state (not

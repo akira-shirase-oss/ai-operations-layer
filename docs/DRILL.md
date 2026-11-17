@@ -89,3 +89,24 @@ against the tickets, compares, and writes the result file under
   console needs at least two (a list search and a timeline load) plus the
   publisher lookup for a lost publish, so reference-host runs are dry runs
   of the kit only.
+
+## The Durable Runner workflow (D-028)
+
+`scripts/drill.py seed --host durable-runner --mode baseline|layer` runs the
+same article pipeline as Durable Runner jobs (`generate`, `validate`,
+`factcheck`, `publish`). The handlers are `fixtures/dr-article-worker`
+(uninstrumented, no log lines). In layer mode the runner calls the
+adapter, which forwards to the worker. The six classes and their correct
+recoveries are as above. "Resubmit" means a new job under a new `op_key`,
+because an `op_key` returns its first run. Tickets give the `op_key` and a
+symptom. The baseline may use only what the runner ships: its server log,
+`durable-cli list/inspect` with the read key, and the publisher's
+`GET /publications/{op_key}`.
+
+The first dry run (seeder-aware, `perf/results/drill/20261117T121345Z-dr-
+baseline.md`) needed a median of 1.5 search actions, 6/6 correct. The
+runner's state names the failed step, and the tickets' symptoms nearly
+name the class. On this catalog the comparison above cannot pass whatever
+the layer does: open question OQ8 (`DECISIONS.md`) must be answered before
+any counted run.
+

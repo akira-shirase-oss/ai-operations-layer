@@ -1,22 +1,22 @@
 # AI Operations Layer
 
-> **Status — A0 done (re-closed after a second review); A1 partly
-> (2026-11-17).** Two independent reviews' findings are fixed, each with a
-> test that fails without its fix; redaction remains pattern matching and
-> partial by nature (`docs/END_GOAL.md`), and what is still owed is listed
-> in `docs/ROADMAP.md`.
-> Decisions D-012–D-024 answer OQ1–OQ6 and amend the
-> drill before any counted run; D-025 defers joined services' counts to
-> schema v2. Built and tested: the pure domain crate, the
-> PostgreSQL store, the bounded collector and query API, the Rust SDK, the
-> investigation console (on the workspace design system, checked in
-> Chromium), and the in-repo reference host with the contract failure cases
-> as end-to-end tests. Load evidence so far is two short smokes on a heavily
-> loaded laptop (no loss; ingest latency target missed), and one
-> 1,000,000-event run on 2026-11-17 that missed its thresholds on a machine
-> that became busy mid-run (36,580 events shed and counted, p95 152 ms;
-> `perf/results/2026-11-17-ingest-million.md`). A quiet-machine 1M run is owed. Evidence per milestone: `docs/ROADMAP.md`. Development
-> software, no production claim. Contract:
+> **Status — A0 done; A1 done except the quiet-machine million-event run;
+> A2 partly (2026-11-17).** Two independent reviews' findings are fixed, each
+> with a test that fails without its fix; redaction remains pattern matching
+> and partial by nature (`docs/END_GOAL.md`). Durable Runner is the first
+> real host (D-027): the article workflow runs as its handlers through an
+> adapter that never changes what the runner decides, and the console shows
+> a real run end to end with the runner's own answer beside the timeline
+> (checked in Chromium against the real runner). The drill kit runs on
+> Durable Runner (D-028); its first, seeder-aware baseline shows the
+> registered comparison cannot pass on that catalog (open question OQ8).
+> Decisions D-012–D-028. Load evidence is development observation on a busy
+> laptop: two short smokes, the 1,000,000-event run that missed its
+> thresholds (36,580 events shed and counted, p95 152 ms;
+> `perf/results/2026-11-17-ingest-million.md`), and the lock measurement
+> (`perf/results/2026-11-17-ingest-locks.md`). A quiet-machine 1M run is
+> owed. Evidence per milestone: `docs/ROADMAP.md`. Development software, no
+> production claim. Contract:
 > `../../docs/Project_Guides/08_AI_Operations_Layer.docx` (extract with
 > `textutil -convert txt -stdout`).
 
@@ -33,8 +33,10 @@ it can never authorize a retry, refund or publish, and its own gaps are
 displayed as gaps.
 
 The first host is an in-repo reference workflow (`fixtures/reference-host`);
-the first real host and execution adapter is Durable Runner, integrated only
-through public APIs (D-012).
+the first real host is Durable Runner, integrated only through its public
+contracts (D-012, D-027): `aiops-dr-adapter` sits where the runner calls
+its handlers, and the collector reads the runner's own answer with its
+read-only key.
 
 - `docs/END_GOAL.md` — what done means, scope in/out, the invariants, the
   four contract failure cases, the ship gate
@@ -42,7 +44,7 @@ through public APIs (D-012).
   investigate/control paths, consistency story, layout
 - `docs/ROADMAP.md` — A0 spine → A1 one workflow, investigated → A2 first
   real host → A3 controlled recovery → A4 quality/adoption
-- `docs/DECISIONS.md` — D-001..D-025 and any open question
+- `docs/DECISIONS.md` — D-001..D-028 and the open question OQ8
 - `docs/DRILL.md` — the pre-registered diagnosis drill behind the ship gate
 - `docs/INGEST_CONTRACT.md` — the language-neutral wire contract (schema v1)
 
@@ -67,10 +69,13 @@ AIOPS_CONSOLE_DIR=apps/console/build cargo run -p aiops-server -- serve
 | `crates/aiops-store` | PostgreSQL: idempotent ingest, summaries, keys, tokens, audit, retention |
 | `crates/aiops-server` | the collector and API (`serve`, `migrate`, `admin`) |
 | `crates/aiops-sdk` | the Rust SDK for hosts |
+| `crates/aiops-durable-runner` | the Durable Runner adapter (`aiops-dr-adapter`): wraps the runner's handler calls, reports them, finishes runs from the runner's answer |
 | `apps/console` | the SvelteKit investigation console (`scripts/console-e2e.sh` runs it in Chromium) |
 | `fixtures/reference-host` | the in-repo pilot host and its end-to-end failure-case tests |
+| `fixtures/dr-article-worker` | the article workflow's steps as plain Durable Runner handlers (uninstrumented, no logs) |
 | `perf/` | k6 scenarios, `run-ingest.sh`, committed results |
-| `scripts/drill.py` | the diagnosis drill kit (`docs/DRILL.md`) |
+| `scripts/drill.py` | the diagnosis drill kit (`docs/DRILL.md`), on the reference host or Durable Runner |
+| `scripts/durable-runner.sh` | builds Durable Runner from its public repository at the tested revision |
 | `deploy/compose.yaml` | the local stack (project `ai-operations-layer`) |
 
 **What counts as done (the ship gate):** one failed AI workflow can be

@@ -248,10 +248,24 @@ OQ1 and OQ2 by D-012, OQ3 by D-014, OQ4 by D-015, OQ5 by D-016 and OQ6 by
 D-017. New questions are added here with an `OQ` number and answered by a
 named decision when the relevant milestone starts.
 
-- **OQ7 — Durable Runner hand-off shape.** Which of Durable Runner's
-  public surfaces (handler request headers, `GET /jobs/{id}` fields) carry
-  the operation ID across the boundary. Answered at A2 start, from that
-  repository's then-current public contract.
+- **OQ7 — Durable Runner hand-off shape.** *Answered by D-027
+  (2026-11-17).*
+- **OQ8 — What can the ship gate's comparison measure when the authority
+  already names the failure?** Open (owner: A4, before any counted run).
+  D-024 moved the deciding comparison to Durable Runner because the
+  reference host's logs-only baseline needed one or two search actions.
+  The first dry run on Durable Runner (D-028) needed 1.5. The runner's own
+  state names the failed step, which with this catalog names the class, and
+  the tickets' symptoms nearly name it too. The console needs at least two
+  counted actions (a list search, a timeline load), plus the publisher for
+  a lost publish. So the pre-registered criterion (median actions at least
+  30% lower, correctness not lower) cannot pass on this catalog and these
+  tickets, however good the layer is. Not resolved here. Candidate
+  directions, none chosen: incidents that share a runner state but differ in
+  cause (generate failing by refusal vs by timeout; publish refused vs a
+  reply lost on every attempt), tickets whose symptom does not name the
+  class, and a measure that also counts the wrong-recovery risk the baseline
+  carries.
 - **D-025 — Joined services' completeness waits for schema v2.** A service
   that joins an operation with `continue_operation` never sends
   `operation.started` or `operation.finished`, so schema v1 carries no count
@@ -262,3 +276,93 @@ named decision when the relevant milestone starts.
   handle ends) so a joined service can close its tail. Trade-off: multi-service
   operations keep one unknown until v2 — accepted over a guess (review N7,
   2026-11-17).
+- **D-026 — The ingest path's locks are measured; the name registry no
+  longer takes an exclusive lock in the steady state (2026-11-17).** The
+  second review flagged hot-path maps behind global mutexes, and A0 left
+  them unmeasured. Every in-process lock is now timed (wait and hold, three
+  clock reads and five relaxed atomics per acquisition) and reported with
+  the admin counters, so every load run records them. Measured
+  (`perf/results/2026-11-17-ingest-locks.md`): the one name registry for
+  all projects was held 25–35 µs per 500-event batch. At the collector's
+  cap of 64 batches in flight, single waits reached 2.2–8.0 ms on a busy
+  laptop, though only 0.03–0.11% of request time. The credential cache and
+  the rate limiter hold for under 1 µs. Each project now has its own
+  registry behind an `RwLock`. Names are formatted outside any lock, and a
+  batch whose names are all known checks them shared; the exclusive lock
+  is taken only to admit a new name, in order, so budgets are still spent
+  first come, first served. Measured after: no exclusive takes in the
+  steady state, worst wait at most 12 µs at 64 in flight. The credential
+  cache and rate limiter stay single mutexes, their cost measured as
+  negligible. Trade-off: two lock layers (the map, then the project)
+  instead of one, and new names pay a shared check before the exclusive
+  one. Accepted because new names are rare by construction (bounded
+  cardinality). Neither smoke showed an end-to-end latency change. The
+  million run's p95 miss is not the locks (their waits are a small
+  fraction of request time) and stays open.
+- **D-027 — Durable Runner hand-off: the runner's own call headers, IDs
+  derived from its runs, and an adapter that wraps its handler calls
+  (answers OQ7, amends D-012, 2026-11-17).** Read from Durable Runner's
+  contract at A2 start: a handler call carried only `{input, idem_key}`
+  (`<op_key>/<step index>`). A handler could not name the run that `GET
+  /jobs/{id}` describes, nor tell attempt 2 from attempt 1 after a restart.
+  One small change was made in Durable Runner, as its own decision (its
+  D-050, `9d240a7`), with the maintainer's leave. It is public contract,
+  backward compatible and tested there: every handler call carries
+  `x-durable-run-id`, `x-durable-step` and `x-durable-attempt`, and a probe
+  carries the attempt it reconciles. This amends D-012's "no gate waits
+  for a Durable Runner change": this one shipped first, and nothing else
+  in A2 needs one. Then:
+  - *The adapter wraps the handler calls* (`crates/aiops-durable-runner`).
+    Durable Runner calls `aiops-dr-adapter`, which forwards each call
+    unchanged to the real, uninstrumented handler. It never changes what
+    the runner decides. An unreachable handler is answered 502 (the runner
+    fails the attempt either way). A connection lost after sending reaches
+    the runner as a reply it cannot read (it reconciles, as it would
+    have). The adapter waits past the runner's step deadline, so the
+    runner's timeout decides. Each call's work runs in a tracked task: the
+    runner hanging up at its deadline must not cancel the report (found by
+    the end-to-end journey, fixed with a test).
+  - *Correlation by derivation.* An observed run's operation ID is derived
+    from the runner's label and run ID (length-prefixed SHA-256,
+    `aiops_domain::correlate`), and each step's ID from the operation and
+    step index. A restarted adapter, or a second one, reports under the
+    same operation and steps. Each instance that sees a run starts it, so
+    an earlier instance's unfinished tail stays an unknown, never closed
+    by a later one. The start carries `job.runner` and `job.id`, which join
+    the default allowlist as operational identifiers.
+  - *The outcome is the runner's.* The adapter declares an operation's
+    finish only from `GET /jobs/{id}`, read with Durable Runner's
+    read-only key: `done`, `failed:step:N` (with the class of the last
+    failed attempt it saw there), or `cancelled`. A run the runner no
+    longer knows stays unfinished.
+  - *Authority beside evidence.* The collector reads `GET /jobs/{run}` for
+    the console (`…/operations/{id}/authority`). It does so only after
+    checking that the operation ID derives from the run the events name,
+    so a forged link shows "unverified", never another run's state. The
+    read is labeled with the time it was made, under a 2 s deadline and a
+    cap of 8 in flight, with no database connection beyond one query-pool
+    lookup.
+
+  Trade-offs: the adapter is a hop on the runner's handler path (bounded:
+  256 calls in flight, 256 KiB replies). Its classification depends on the
+  operator configuring the runner's step timeout correctly (a mismatch
+  mislabels late calls). Derived IDs make operation IDs predictable from a
+  run ID, which is harmless because telemetry authorizes nothing and
+  ingest needs a key. The read key is held by the collector (read-only);
+  the runner's API key is not used at A2.
+- **D-028 — The drill on Durable Runner: same classes and recoveries, the
+  runner's shipped evidence as the baseline (amends `docs/DRILL.md` before
+  any counted run, 2026-11-17).** `scripts/drill.py seed --host
+  durable-runner` runs the article workflow on the real runner. The
+  handlers are `fixtures/dr-article-worker`, which, like Durable Runner's
+  shipped pilot handler, writes no log. The six classes and their one
+  correct recovery are unchanged. Faults come from the job input, and
+  "resubmit" means a new job under a new `op_key` (an `op_key` returns its
+  first run). The baseline's evidence is what Durable Runner ships: its
+  server log, `durable-cli list/inspect` with the read key, and the
+  publisher's record. None of it was written for the drill (D-024). The
+  first dry run (seeder-aware, `perf/results/drill/20261117T121345Z-dr-
+  baseline.md`) was 6/6 correct with a median of 1.5 search actions. The
+  runner's log had one line ("listening"), but its state names the failed
+  step. That result opens OQ8. Trade-off: the deciding comparison is still
+  not runnable as registered — stated, not hidden.
