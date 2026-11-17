@@ -38,8 +38,21 @@
 
 	{#if t.status.state === 'uncertain' || t.flags.external_effect_unknown}
 		<div class="notice uncertain">
-			<strong>An external effect may have happened.</strong> A step that can affect the outside world
-			{t.status.state === 'uncertain' ? 'ended with an unknown outcome' : 'never reported how it ended'}.
+			<strong>An external effect may have happened.</strong>
+			<ul>
+				{#each t.effect_unknown_steps as c (c.step_id + c.attempt)}
+					<li>
+						{c.name ?? 'A step'} (attempt {c.attempt})
+						{c.cause === 'uncertain' ? 'ended with an unknown outcome' : 'never reported how it ended'}{c.declared ===
+						'unknown'
+							? '; its start was not received, so whether it can affect the outside world is unknown'
+							: ''}.
+					</li>
+				{/each}
+				{#if t.effect_unknown_steps.length === 0}
+					<li>The host declared the operation's outcome unknown.</li>
+				{/if}
+			</ul>
 			This timeline is evidence, not authority: check the system that owns the effect (by business key)
 			before any retry. Do not rerun blind.
 		</div>

@@ -59,6 +59,7 @@ article e2e-lost '"publish_lost_response"'
 
 now="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))')"
 xss_op="e2e0000000000000000000000000a551"
+e3_op="e2e00000000000000000000000000e30"
 gap_op="e2e0000000000000000000000000d0e5"
 curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" -H 'content-type: application/json' -d @- <<JSON
 {"schema_version": 1,
@@ -70,11 +71,18 @@ curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorizat
   {"event_id": "e2e00000000000000000000000000002", "type": "operation.finished", "operation_id": "$xss_op", "seq": 2, "op_seq": 2,
    "event_time": "$now", "outcome": "succeeded", "events_emitted": 2},
   {"event_id": "e2e00000000000000000000000000003", "type": "gap.reported", "operation_id": "$gap_op", "seq": 3, "op_seq": 0,
-   "event_time": "$now", "dropped": 10, "reason": "send_failed", "first_dropped_at": "$now", "last_dropped_at": "$now"}
+   "event_time": "$now", "dropped": 10, "reason": "send_failed", "first_dropped_at": "$now", "last_dropped_at": "$now"},
+  {"event_id": "e2e00000000000000000000000000004", "type": "operation.started", "operation_id": "$e3_op", "seq": 4, "op_seq": 1,
+   "event_time": "$now", "name": "publish_article", "request_id": "e2e-e3"},
+  {"event_id": "e2e00000000000000000000000000006", "type": "step.finished", "operation_id": "$e3_op", "seq": 6, "op_seq": 3,
+   "event_time": "$now", "step_id": "e300000000000003", "attempt": 1, "kind": "tool", "name": "publish",
+   "outcome": "uncertain", "uncertain_reason": "timeout_after_send", "error_code": "publish_timeout"},
+  {"event_id": "e2e00000000000000000000000000007", "type": "operation.finished", "operation_id": "$e3_op", "seq": 7, "op_seq": 4,
+   "event_time": "$now", "outcome": "failed", "failure_class": "internal", "events_emitted": 4}
  ]}
 JSON
 sleep 1 # the SDK flushes every 200 ms
 
 AIOPS_E2E_BASE="http://127.0.0.1:$port" AIOPS_E2E_TOKEN="$token" AIOPS_E2E_OTHER_TOKEN="$other_token" \
-AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
+AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
   npm run test:e2e --workspace @aiops/console

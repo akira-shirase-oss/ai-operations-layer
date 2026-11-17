@@ -370,3 +370,105 @@ fn conflicting_finish_events_are_flagged() {
     let t = assemble(op(), events, &[], &Limits::default(), false);
     assert!(t.flags.conflicting_finish);
 }
+
+// --- Review finding 1: the external-effect warning must not depend on which events
+// arrived or in which order the attempts are read.
+
+fn publish_finish(attempt: u32, outcome: Outcome) -> EventBody {
+    EventBody::StepFinished(StepFinish {
+        step_id: step(3),
+        attempt,
+        kind: Some(StepKind::Tool),
+        name: Some("publish".into()),
+        outcome,
+        error_code: None,
+        error_message: None,
+        usage: None,
+        cost_estimate: None,
+    })
+}
+
+const LOST: Outcome = Outcome::Uncertain(UncertainReason::TimeoutAfterSend);
+
+#[test]
+fn e3_a_lost_publish_start_still_warns_that_the_effect_may_have_happened() {
+    let mut b = B::new();
+    let events = vec![
+        b.ev(0, 5, started()),
+        // step.started for the publish was lost
+        b.ev(10, 5, publish_finish(1, LOST)),
+        b.ev(11, 5, finished(Outcome::Failed(FailureClass::Internal), 3)),
+    ];
+    let t = assemble(op(), events, &[], &Limits::default(), false);
+    assert_eq!(t.status.state, "failed");
+    assert!(
+        t.flags.external_effect_unknown,
+        "the step's start (and its declaration) was lost; an uncertain attempt may have had an effect"
+    );
+    assert_eq!(t.effect_unknown_steps.len(), 1);
+    assert_eq!(t.effect_unknown_steps[0].cause, "uncertain");
+    assert_eq!(t.effect_unknown_steps[0].declared, "unknown");
+}
+
+#[test]
+fn e4_an_uncertain_first_attempt_with_a_lost_start_warns_even_when_a_retry_succeeded() {
+    let mut b = B::new();
+    let events = vec![
+        b.ev(0, 5, started()),
+        b.ev(10, 5, publish_finish(1, LOST)), // attempt 1's start lost
+        b.ev(20, 5, step_start(3, StepKind::Tool, "publish", 2, true)),
+        b.ev(30, 5, publish_finish(2, Outcome::Succeeded)),
+        b.ev(31, 5, finished(Outcome::Succeeded, 5)),
+    ];
+    let t = assemble(op(), events, &[], &Limits::default(), false);
+    assert_eq!(t.status.state, "succeeded");
+    assert!(t.steps[0].external_effect);
+    assert!(
+        t.flags.external_effect_unknown,
+        "attempt 1 may have published too: a possible duplicate"
+    );
+}
+
+#[test]
+fn e4b_the_same_stream_with_attempt_one_started_gives_the_same_answer() {
+    let mut b = B::new();
+    let events = vec![
+        b.ev(0, 5, started()),
+        b.ev(5, 5, step_start(3, StepKind::Tool, "publish", 1, true)),
+        b.ev(10, 5, publish_finish(1, LOST)),
+        b.ev(20, 5, step_start(3, StepKind::Tool, "publish", 2, true)),
+        b.ev(30, 5, publish_finish(2, Outcome::Succeeded)),
+        b.ev(31, 5, finished(Outcome::Succeeded, 6)),
+    ];
+    let t = assemble(op(), events, &[], &Limits::default(), false);
+    assert!(t.flags.external_effect_unknown);
+}
+
+#[test]
+fn an_uncertain_attempt_of_a_step_declared_effect_free_does_not_raise_the_effect_warning() {
+    let mut b = B::new();
+    let events = vec![
+        b.ev(0, 5, started()),
+        b.ev(5, 5, step_start(4, StepKind::Tool, "fact_check", 1, false)),
+        b.ev(
+            10,
+            5,
+            EventBody::StepFinished(StepFinish {
+                step_id: step(4),
+                attempt: 1,
+                kind: Some(StepKind::Tool),
+                name: Some("fact_check".into()),
+                outcome: LOST,
+                error_code: None,
+                error_message: None,
+                usage: None,
+                cost_estimate: None,
+            }),
+        ),
+        b.ev(11, 5, finished(Outcome::Failed(FailureClass::Internal), 4)),
+    ];
+    let t = assemble(op(), events, &[], &Limits::default(), false);
+    assert_eq!(t.flags.uncertain_attempts, 1);
+    assert!(!t.flags.external_effect_unknown, "declared effect-free");
+    assert_eq!(t.effect_unknown_steps, vec![]);
+}

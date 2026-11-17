@@ -132,6 +132,14 @@ export type SourceView = {
 	reported_gap_overflow: number;
 };
 
+export type EffectCause = {
+	step_id: string;
+	name: string | null;
+	attempt: number;
+	cause: 'uncertain' | 'no_finish_observed';
+	declared: 'yes' | 'unknown';
+};
+
 export type Timeline = {
 	operation_id: string;
 	name: string | null;
@@ -147,6 +155,7 @@ export type Timeline = {
 	entries: EntryView[];
 	gaps: GapView[];
 	sources: SourceView[];
+	effect_unknown_steps: EffectCause[];
 	events_truncated: boolean;
 };
 

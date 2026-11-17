@@ -279,6 +279,19 @@ pub struct SourceView {
     pub reported_gap_overflow: u64,
 }
 
+/// Why the timeline says an external effect may have happened (one per attempt).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EffectCause {
+    pub step_id: String,
+    pub name: Option<String>,
+    pub attempt: u32,
+    /// `uncertain` or `no_finish_observed`.
+    pub cause: &'static str,
+    /// `yes` — a start declared an external effect; `unknown` — no start of the step was
+    /// received, so its declaration is unknown and it is treated as possibly effectful.
+    pub declared: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Timeline {
     pub operation_id: String,
@@ -295,6 +308,8 @@ pub struct Timeline {
     pub entries: Vec<EntryView>,
     pub gaps: Vec<GapView>,
     pub sources: Vec<SourceView>,
+    /// Attempts whose effect outside the host is unknown (the console's warning).
+    pub effect_unknown_steps: Vec<EffectCause>,
     /// The store returned only the first part of a very large operation.
     pub events_truncated: bool,
 }
@@ -453,7 +468,12 @@ fn measure_loss(c: &mut Collected<'_>) {
     }
 }
 
-fn build_steps(c: &Collected<'_>, flags: &mut Flags, cost: &mut CostView) -> Vec<StepView> {
+fn build_steps(
+    c: &Collected<'_>,
+    flags: &mut Flags,
+    cost: &mut CostView,
+    causes: &mut Vec<EffectCause>,
+) -> Vec<StepView> {
     let mut step_views = Vec::with_capacity(c.step_order.len());
     for step_id in &c.step_order {
         let Some(attempts) = c.steps.get(step_id) else {
@@ -471,18 +491,40 @@ fn build_steps(c: &Collected<'_>, flags: &mut Flags, cost: &mut CostView) -> Vec
         if attempts.len() > 1 {
             flags.retried_steps += 1;
         }
+        // First pass: every attempt, so the step's declaration is settled over all of its
+        // starts before any flag is derived (the attempt order must not matter).
         for (n, acc) in attempts {
             let attempt = attempt_view(*n, acc, &mut view, cost);
             match attempt.state {
                 "failed" => flags.failed_attempts += 1,
-                "uncertain" => {
-                    flags.uncertain_attempts += 1;
-                    flags.external_effect_unknown |= view.external_effect;
-                }
-                "no_finish_observed" => flags.external_effect_unknown |= view.external_effect,
+                "uncertain" => flags.uncertain_attempts += 1,
                 _ => {}
             }
             view.attempts.push(attempt);
+        }
+        // A step whose starts were all lost has an unknown declaration: treat it as
+        // possibly effectful, never as effect-free.
+        let start_seen = attempts.values().any(|a| a.start.is_some());
+        let declared = if view.external_effect {
+            Some("yes")
+        } else if start_seen {
+            None // declared effect-free
+        } else {
+            Some("unknown")
+        };
+        if let Some(declared) = declared {
+            for a in &view.attempts {
+                if matches!(a.state, "uncertain" | "no_finish_observed") {
+                    flags.external_effect_unknown = true;
+                    causes.push(EffectCause {
+                        step_id: view.step_id.clone(),
+                        name: view.name.clone(),
+                        attempt: a.attempt,
+                        cause: a.state,
+                        declared,
+                    });
+                }
+            }
         }
         step_views.push(view);
     }
@@ -591,7 +633,8 @@ pub fn assemble(
         label: "estimate",
         ..CostView::default()
     };
-    let steps = build_steps(&c, &mut flags, &mut cost);
+    let mut effect_unknown_steps = Vec::new();
+    let steps = build_steps(&c, &mut flags, &mut cost, &mut effect_unknown_steps);
     let entries = build_entries(&events, &c.step_start_time, limits, &mut flags);
     let sources = source_views(instances, &events);
     let meta = c.meta;
@@ -611,6 +654,7 @@ pub fn assemble(
         entries,
         gaps: c.gaps,
         sources,
+        effect_unknown_steps,
         events_truncated,
     }
 }

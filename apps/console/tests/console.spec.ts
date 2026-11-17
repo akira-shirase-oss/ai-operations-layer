@@ -9,6 +9,7 @@ const LOST = process.env['AIOPS_E2E_LOST'] ?? '';
 const OK = process.env['AIOPS_E2E_OK'] ?? '';
 const XSS = process.env['AIOPS_E2E_XSS'] ?? '';
 const DOWN = process.env['AIOPS_E2E_GAP'] ?? '';
+const E3 = process.env['AIOPS_E2E_E3'] ?? '';
 
 function watch(page: Page): string[] {
 	const problems: string[] = [];
@@ -94,4 +95,15 @@ test('a token without the project sees a denial, not data', async ({ page }) => 
 	await expect(page.getByText(/Denied: forbidden: project_not_in_scope/)).toBeVisible();
 	// The 403 itself is logged by the browser as a failed resource; nothing else may fail.
 	expect(problems.filter((p) => !p.includes('403'))).toEqual([]);
+});
+
+test('a publish whose start was lost and whose outcome is unknown still warns, though the operation failed', async ({
+	page
+}) => {
+	const problems = watch(page);
+	await signIn(page);
+	await openByRequest(page, E3);
+	await expect(page.locator('h1 .badge')).toHaveText('failed: internal');
+	await expect(page.locator('.notice.uncertain').first()).toContainText('An external effect may have happened.');
+	expect(problems).toEqual([]);
 });
