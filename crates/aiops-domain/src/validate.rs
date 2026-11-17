@@ -129,6 +129,8 @@ pub enum Mode {
 pub struct PolicyMarks {
     pub withheld_attributes: u32,
     pub redactions: u32,
+    /// Names over the project's or the key's budget, stored as `_overflow` (finding 11).
+    pub overflowed_names: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]

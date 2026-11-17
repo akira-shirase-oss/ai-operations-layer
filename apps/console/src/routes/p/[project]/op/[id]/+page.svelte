@@ -230,6 +230,7 @@
 						{#each e.flags as f (f)}<span class="flag">{f.replaceAll('_', ' ')}</span>{/each}
 						{#if e.withheld_attributes}<span class="flag">{e.withheld_attributes} attributes withheld by policy</span>{/if}
 						{#if e.redactions}<span class="flag">{e.redactions} redacted</span>{/if}
+						{#if e.overflowed_names}<span class="flag">{e.overflowed_names} names over budget, stored as _overflow</span>{/if}
 						{#if e.truncated}<span class="flag">{e.truncated} truncated by SDK</span>{/if}
 					</td>
 				</tr>

@@ -170,6 +170,9 @@ pub struct IngestResponse {
     pub withheld_attributes: u32,
     /// Secret-shaped strings replaced with `[redacted]`, summed over the batch.
     pub redactions: u32,
+    /// Names over the project's or the key's budget, stored as `_overflow`.
+    #[serde(default)]
+    pub overflowed_names: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -74,6 +74,7 @@ export type EntryView = {
 	attributes: AttrView[];
 	withheld_attributes: number;
 	redactions: number;
+	overflowed_names: number;
 	truncated: number;
 };
 

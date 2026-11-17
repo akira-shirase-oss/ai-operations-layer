@@ -64,6 +64,7 @@ async fn ingest_aged(e: &common::Env, events: Vec<WireEvent>, days_ago: i64) {
             events: prepared,
             refused: 0,
             new_names: vec![],
+            touched_names: vec![],
         })
         .await
         .unwrap();

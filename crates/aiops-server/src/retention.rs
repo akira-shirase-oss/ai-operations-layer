@@ -35,6 +35,7 @@ pub struct SweepTotals {
     pub operations: u64,
     pub instances: u64,
     pub audit: u64,
+    pub names: u64,
     pub calls: u32,
     /// Nothing expired was left when the run stopped.
     pub complete: bool,
@@ -58,6 +59,7 @@ pub async fn run(
         totals.operations += r.operations;
         totals.instances += r.instances;
         totals.audit += r.audit;
+        totals.names += r.names;
         totals.calls += 1;
         if !r.more {
             totals.complete = true;

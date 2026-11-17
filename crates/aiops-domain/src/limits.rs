@@ -32,6 +32,8 @@ pub struct Limits {
     pub late_after_micros: i64,
     /// Distinct names (operation/step/model/release/…) one project may introduce.
     pub max_names_per_project: usize,
+    /// Of those, how many one ingest key may introduce (review finding 11).
+    pub max_names_per_key: usize,
     pub max_tokens: u64,
     pub max_cost_micros: u64,
     pub max_dropped_per_report: u64,
@@ -56,6 +58,7 @@ impl Default for Limits {
             skew_tolerance_micros: 2 * MICROS_PER_SECOND,
             late_after_micros: 10 * MICROS_PER_SECOND,
             max_names_per_project: 2_000,
+            max_names_per_key: 500,
             max_tokens: 1_000_000_000,
             max_cost_micros: 1_000_000_000_000,
             max_dropped_per_report: 1_000_000_000,

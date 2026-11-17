@@ -103,7 +103,7 @@ Per type, only the listed fields may appear (anything else is
 | Uncached key lookups in flight | 4 by default (own pool of 4 connections) | 503 `overloaded`, `Retry-After: 1` (no database query) |
 | Ingest requests in flight (whole collector, after authentication) | 64 by default | 503 `overloaded`, `Retry-After: 1` |
 | Events per second per key | 20,000 sustained, 100,000 burst by default | 429 `rate_limited`, `Retry-After: <s>` |
-| Distinct names per project (`op:`, `step:`, `model:`, `release:`, …) | 2,000 | event refused `cardinality_exceeded` |
+| Distinct names per project (`op:`, `step:`, `model:`, `release:`, …), of which per ingest key | 2,000, 500 | the name is stored as `_overflow` (counted in `overflowed_names`, labeled on the event); the event is kept. Names unused for 90 days are swept and free their budget |
 | Store transaction | 5 s | 503 `store_unavailable` (the batch may have committed; re-send — it is idempotent) |
 | Whole request | 10 s | 503 `timeout` |
 
@@ -121,11 +121,14 @@ Per type, only the listed fields may appear (anything else is
   refused as `conflicting_duplicate`; the first write wins.
 - `withheld_attributes`: attributes not in the default allowlist or the
   project's opt-in list — neither key nor value is stored (D-006).
+- `overflowed_names`: names over the project's or the key's budget, stored
+  as `_overflow`.
 - Refusal codes (stable): `malformed`, `event_too_large`,
   `unknown_event_type`, `invalid_id`, `missing_field`, `field_not_allowed`,
   `invalid_value`, `too_long`, `invalid_time`, `event_time_out_of_range`,
   `invalid_sequence`, `invalid_outcome`, `too_many_attributes`,
-  `invalid_attribute`, `cardinality_exceeded`, `conflicting_duplicate`.
+  `invalid_attribute`, `conflicting_duplicate` (`cardinality_exceeded` is no
+  longer used: an over-budget name is stored as `_overflow` instead).
 
 Errors use one envelope:
 `{"error": {"code": "…", "message": "…", "request_id": "…"}}` — `400`

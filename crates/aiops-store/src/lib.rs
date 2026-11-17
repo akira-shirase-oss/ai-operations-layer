@@ -193,6 +193,8 @@ pub struct IngestBatch<'a> {
     /// Events of this batch the collector refused (kept on the source's counters).
     pub refused: u32,
     pub new_names: Vec<String>,
+    /// Known names this batch used (their `last_seen` is refreshed, at most daily).
+    pub touched_names: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -310,6 +312,8 @@ pub struct SweepResult {
     pub operations: u64,
     pub instances: u64,
     pub audit: u64,
+    /// Names unused for the summary retention period (their budget is freed).
+    pub names: u64,
     /// The sweep stopped at its batch budget; the next run continues.
     pub more: bool,
 }
@@ -454,13 +458,21 @@ impl Store {
         &self,
         project_id: Uuid,
         cap: usize,
-    ) -> Result<Vec<String>, StoreError> {
-        let rows = sqlx::query("SELECT name FROM known_names WHERE project_id = $1 LIMIT $2")
-            .bind(project_id)
-            .bind(i64::try_from(cap).unwrap_or(i64::MAX))
-            .fetch_all(&self.ingest)
-            .await?;
-        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    ) -> Result<Vec<(String, Option<[u8; 16]>)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT name, ingest_key_id FROM known_names WHERE project_id = $1 LIMIT $2",
+        )
+        .bind(project_id)
+        .bind(i64::try_from(cap).unwrap_or(i64::MAX))
+        .fetch_all(&self.ingest)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let key: Option<Uuid> = r.get(1);
+                (r.get(0), key.map(|k| *k.as_bytes()))
+            })
+            .collect())
     }
 
     /// Stores one batch in one transaction: idempotent event inserts (dedup on
@@ -632,7 +644,8 @@ impl Store {
         limit: usize,
     ) -> Result<(Vec<StoredEvent>, bool), StoreError> {
         let rows = sqlx::query(
-            "SELECT e.instance_id, e.received_at, e.withheld_attributes, e.redactions, e.body::text, k.name
+            "SELECT e.instance_id, e.received_at, e.withheld_attributes, e.redactions, e.body::text, k.name,
+                    e.overflowed_names
              FROM events e JOIN ingest_keys k ON k.id = e.ingest_key_id
              WHERE e.project_id = $1 AND e.operation_id = $2
              ORDER BY e.event_time, e.seq
@@ -679,6 +692,7 @@ impl Store {
                 marks: PolicyMarks {
                     withheld_attributes: u32::try_from(r.get::<i16, _>(2)).unwrap_or(0),
                     redactions: u32::try_from(r.get::<i16, _>(3)).unwrap_or(0),
+                    overflowed_names: u32::try_from(r.get::<i16, _>(6)).unwrap_or(0),
                 },
             });
         }
@@ -922,7 +936,7 @@ impl Store {
         };
         let mut result = SweepResult::default();
         // Literal statements only (no SQL is built from strings).
-        let tables: [(&'static str, Duration); 4] = [
+        let tables: [(&'static str, Duration); 5] = [
             (
                 "DELETE FROM events WHERE ctid = ANY(ARRAY(SELECT ctid FROM events WHERE received_at < $1 LIMIT $2))",
                 retention.raw_events,
@@ -939,6 +953,10 @@ impl Store {
                 "DELETE FROM audit_log WHERE ctid = ANY(ARRAY(SELECT ctid FROM audit_log WHERE at < $1 LIMIT $2))",
                 retention.audit,
             ),
+            (
+                "DELETE FROM known_names WHERE ctid = ANY(ARRAY(SELECT ctid FROM known_names WHERE last_seen < $1 LIMIT $2))",
+                retention.summaries,
+            ),
         ];
         // Record the cutoff before deleting anything, so a timeline never calls a deleted
         // event "never received" (review finding 10). It only moves forward.
@@ -950,7 +968,7 @@ impl Store {
         .bind(cutoff(retention.raw_events))
         .execute(&self.maintenance)
         .await?;
-        let mut counts = [0u64; 4];
+        let mut counts = [0u64; 5];
         for (i, (sql, keep)) in tables.into_iter().enumerate() {
             let mut rounds = 0;
             loop {
@@ -976,6 +994,7 @@ impl Store {
             result.operations,
             result.instances,
             result.audit,
+            result.names,
         ] = counts;
         Ok(result)
     }
@@ -1007,13 +1026,18 @@ async fn insert_events(
         .iter()
         .map(|p| i16::try_from(p.marks.redactions).unwrap_or(i16::MAX))
         .collect();
+    let overflowed: Vec<i16> = events
+        .iter()
+        .map(|p| i16::try_from(p.marks.overflowed_names).unwrap_or(i16::MAX))
+        .collect();
     let bodies: Vec<&str> = events.iter().map(|p| p.body.as_str()).collect();
     Ok(sqlx::query_scalar(
         "INSERT INTO events (project_id, event_id, operation_id, instance_id, ingest_key_id, seq, op_seq,
-                             event_time, received_at, withheld_attributes, redactions, body)
-         SELECT $1, e.id, e.op, $2, $3, e.seq, e.op_seq, e.t, $4, e.w, e.r, e.body::jsonb
-         FROM UNNEST($5::uuid[], $6::uuid[], $7::int8[], $8::int4[], $9::timestamptz[], $10::int2[], $11::int2[], $12::text[])
-              AS e(id, op, seq, op_seq, t, w, r, body)
+                             event_time, received_at, withheld_attributes, redactions, body, overflowed_names)
+         SELECT $1, e.id, e.op, $2, $3, e.seq, e.op_seq, e.t, $4, e.w, e.r, e.body::jsonb, e.o
+         FROM UNNEST($5::uuid[], $6::uuid[], $7::int8[], $8::int4[], $9::timestamptz[], $10::int2[], $11::int2[],
+                     $12::text[], $13::int2[])
+              AS e(id, op, seq, op_seq, t, w, r, body, o)
          ON CONFLICT (project_id, event_id) DO NOTHING
          RETURNING event_id",
     )
@@ -1029,6 +1053,7 @@ async fn insert_events(
     .bind(&withheld)
     .bind(&redactions)
     .bind(&bodies)
+    .bind(&overflowed)
     .fetch_all(&mut *tx)
     .await?
     .into_iter()
@@ -1142,8 +1167,14 @@ async fn upsert_summaries(
             WHERE s.ingest_key_id = EXCLUDED.ingest_key_id
             RETURNING 1
         ), names AS (
-            INSERT INTO known_names (project_id, name) SELECT $1, n FROM UNNEST($31::text[]) AS n
+            INSERT INTO known_names (project_id, name, ingest_key_id, last_seen)
+            SELECT $1, n, $20, $2 FROM UNNEST($31::text[]) AS n
             ON CONFLICT DO NOTHING RETURNING 1
+        ), touched AS (
+            -- At most one write per name per day keeps last_seen current for the sweep.
+            UPDATE known_names SET last_seen = $2
+            WHERE project_id = $1 AND name = ANY($33::text[]) AND last_seen < $2 - interval '1 day'
+            RETURNING 1
         )
         SELECT (SELECT count(*) FROM ops), (SELECT count(*) FROM src), (SELECT count(*) FROM names)",
     )
@@ -1179,6 +1210,7 @@ async fn upsert_summaries(
     .bind(sat_i64(batch.stats.truncated_events))
     .bind(&batch.new_names)
     .bind(&conflicts)
+    .bind(&batch.touched_names)
     .fetch_one(&mut *tx)
     .await?;
     let src_rows: i64 = counts.get(1);

@@ -69,6 +69,7 @@ async fn one_scheduled_run_removes_everything_that_expired_not_one_budget(pool: 
                 events,
                 refused: 0,
                 new_names: vec![],
+                touched_names: vec![],
             })
             .await
             .unwrap();

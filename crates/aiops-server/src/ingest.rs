@@ -3,7 +3,7 @@
 //! store transaction under a deadline. Nothing here touches control records or hosts.
 
 use aiops_domain::event::EventBody;
-use aiops_domain::names::{Admission, NameRegistry};
+use aiops_domain::names::{Admission, NameRegistry, OVERFLOW_NAME};
 use aiops_domain::policy::Policy;
 use aiops_domain::validate::{Refusal, RefusalCode, validate_source};
 use aiops_domain::wire::{IngestResponse, RawBatch, RefusedEvent, SCHEMA_VERSION};
@@ -53,7 +53,7 @@ pub async fn ingest(
 
     let (mut prepared, mut response) = validate_all(&app, &key, &raw, received_at)?;
 
-    let new_names = admit_names(&app, key.project_id, &mut prepared, &mut response).await?;
+    let names = admit_names(&app, key.project_id, key.id, &mut prepared, &mut response).await?;
     let refused_count = u32::try_from(response.refused.len()).unwrap_or(u32::MAX);
     let index_of: Vec<(aiops_domain::EventId, usize)> = prepared
         .iter()
@@ -67,7 +67,8 @@ pub async fn ingest(
         received_at,
         events: prepared.into_iter().map(|(_, p)| p).collect(),
         refused: refused_count,
-        new_names,
+        new_names: names.new,
+        touched_names: names.touched,
     };
     let stored =
         match tokio::time::timeout(app.config.store_deadline, app.store.ingest(batch)).await {
@@ -199,55 +200,81 @@ async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<IngestKey, 
     }
 }
 
-/// The names an event introduces, prefixed by kind so the cap counts each dimension.
-fn names_of(event: &Event) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut push = |kind: &str, v: Option<&String>| {
-        if let Some(v) = v {
-            out.push(format!("{kind}:{v}"));
-        }
-    };
-    match &event.body {
+/// Visits every name an event carries, by kind, mutably (an over-budget one is rewritten).
+fn visit_names(event: &mut Event, mut f: impl FnMut(&'static str, &mut String)) {
+    match &mut event.body {
         EventBody::OperationStarted(m) => {
-            push("op", Some(&m.name));
-            push("release", m.release.as_ref());
-            push("deploy", m.deployment.as_ref());
+            f("op", &mut m.name);
+            if let Some(v) = m.release.as_mut() {
+                f("release", v);
+            }
+            if let Some(v) = m.deployment.as_mut() {
+                f("deploy", v);
+            }
         }
-        EventBody::OperationFinished(f) => push("error", f.error_code.as_ref()),
-        EventBody::StepStarted(s) => {
-            push("step", Some(&s.name));
-            push("model", s.model.as_ref());
-            push("prompt", s.prompt_version.as_ref());
-            push("config", s.config_version.as_ref());
+        EventBody::OperationFinished(fin) => {
+            if let Some(v) = fin.error_code.as_mut() {
+                f("error", v);
+            }
         }
-        EventBody::StepFinished(f) => {
-            push("step", f.name.as_ref());
-            push("error", f.error_code.as_ref());
-            push("basis", f.cost_estimate.as_ref().map(|c| &c.basis));
+        EventBody::StepStarted(st) => {
+            f("step", &mut st.name);
+            for (kind, v) in [
+                ("model", st.model.as_mut()),
+                ("prompt", st.prompt_version.as_mut()),
+                ("config", st.config_version.as_mut()),
+            ] {
+                if let Some(v) = v {
+                    f(kind, v);
+                }
+            }
+        }
+        EventBody::StepFinished(fin) => {
+            if let Some(v) = fin.name.as_mut() {
+                f("step", v);
+            }
+            if let Some(v) = fin.error_code.as_mut() {
+                f("error", v);
+            }
+            if let Some(c) = fin.cost_estimate.as_mut() {
+                f("basis", &mut c.basis);
+            }
         }
         EventBody::GapReported(_) => {}
     }
-    out
 }
 
-/// Bounded cardinality (D-014): events that would introduce a name past the project's
-/// cap are refused by name; everything else goes on.
+/// What a batch did to the project's names.
+struct NameUse {
+    new: Vec<String>,
+    touched: Vec<String>,
+}
+
+/// Bounded cardinality (D-014, review finding 11): a name over the project's or the key's
+/// budget is stored as `_overflow`, labeled and counted, so a noisy host can never cost an
+/// honest host its events, and no event is refused for its name.
 async fn admit_names(
     app: &AppState,
     project: Uuid,
-    prepared: &mut Vec<(usize, PreparedEvent)>,
+    key: Uuid,
+    prepared: &mut [(usize, PreparedEvent)],
     response: &mut IngestResponse,
-) -> Result<Vec<String>, ApiError> {
+) -> Result<NameUse, ApiError> {
     let loaded = app.names.lock().is_ok_and(|m| m.contains_key(&project));
     if !loaded {
-        let cap = app.limits.max_names_per_project;
+        let (cap, per_key) = (
+            app.limits.max_names_per_project,
+            app.limits.max_names_per_key,
+        );
         let known = app.store.known_names(project, cap).await?;
         if let Ok(mut map) = app.names.lock() {
             map.entry(project)
-                .or_insert_with(|| NameRegistry::new(cap, known));
+                .or_insert_with(|| NameRegistry::new(cap, per_key, known));
         }
     }
     let mut new_names = Vec::new();
+    let mut touched = std::collections::HashSet::new();
+    let key_bytes = *key.as_bytes();
     let Ok(mut map) = app.names.lock() else {
         return Err(ApiError::Internal(anyhow::anyhow!(
             "name registry lock poisoned"
@@ -256,26 +283,30 @@ async fn admit_names(
     let Some(registry) = map.get_mut(&project) else {
         return Err(ApiError::Internal(anyhow::anyhow!("name registry missing")));
     };
-    prepared.retain(|(index, p)| {
-        let names = names_of(&p.event);
-        let mut fresh = Vec::new();
-        for name in &names {
-            match registry.admit(name) {
-                Admission::Known => {}
-                Admission::New => fresh.push(name.clone()),
-                Admission::Refused => {
-                    response.refused.push(refused(
-                        *index,
-                        Some(p.event.event_id.to_string()),
-                        Refusal::on(RefusalCode::CardinalityExceeded, "name"),
-                    ));
-                    new_names.extend(fresh);
-                    return false;
+    for (_, p) in prepared.iter_mut() {
+        let mut overflowed = 0u32;
+        visit_names(&mut p.event, |kind, value| {
+            let name = format!("{kind}:{value}");
+            match registry.admit(&name, key_bytes) {
+                Admission::Known => {
+                    touched.insert(name);
+                }
+                Admission::New => new_names.push(name),
+                Admission::OverBudget => {
+                    OVERFLOW_NAME.clone_into(value);
+                    overflowed += 1;
                 }
             }
+        });
+        if overflowed > 0 {
+            p.marks.overflowed_names += overflowed;
+            response.overflowed_names += overflowed;
+            p.body = serde_json::to_string(&p.event.to_wire())
+                .map_err(|e| ApiError::Internal(e.into()))?;
         }
-        new_names.extend(fresh);
-        true
-    });
-    Ok(new_names)
+    }
+    Ok(NameUse {
+        new: new_names,
+        touched: touched.into_iter().collect(),
+    })
 }

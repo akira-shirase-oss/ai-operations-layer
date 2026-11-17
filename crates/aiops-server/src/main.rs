@@ -74,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
             let t = retention::run(&store, (system_clock())(), Retention::default(), plan).await?;
             let secs = started.elapsed().as_secs_f64();
             println!(
-                "{{\"events\":{},\"operations\":{},\"instances\":{},\"audit\":{},\"calls\":{},\"complete\":{},\"seconds\":{secs:.3}}}",
-                t.events, t.operations, t.instances, t.audit, t.calls, t.complete
+                "{{\"events\":{},\"operations\":{},\"instances\":{},\"audit\":{},\"names\":{},\"calls\":{},\"complete\":{},\"seconds\":{secs:.3}}}",
+                t.events, t.operations, t.instances, t.audit, t.names, t.calls, t.complete
             );
             Ok(())
         }
@@ -112,7 +112,15 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
                     () = cancel.cancelled() => break,
                     _ = tick.tick() => {
                         match retention::run(&state.store, state.now(), Retention::default(), SweepPlan::default()).await {
-                            Ok(t) => tracing::info!(events = t.events, operations = t.operations, instances = t.instances, audit = t.audit, calls = t.calls, complete = t.complete, "retention sweep"),
+Ok(t) => {
+                                tracing::info!(events = t.events, operations = t.operations, instances = t.instances, audit = t.audit, names = t.names, calls = t.calls, complete = t.complete, "retention sweep");
+                                if t.names > 0 {
+                                    // Swept names free their budget: reload the registries.
+                                    if let Ok(mut names) = state.names.lock() {
+                                        names.clear();
+                                    }
+                                }
+                            }
                             Err(e) => tracing::warn!(error = %e, "retention sweep failed; will retry"),
                         }
                     }

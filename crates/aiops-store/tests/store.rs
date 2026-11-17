@@ -137,6 +137,7 @@ fn batch<'a>(
         events,
         refused: 0,
         new_names: vec!["publish_article".into(), "generate".into()],
+        touched_names: vec![],
     }
 }
 
@@ -604,4 +605,46 @@ async fn an_in_batch_twin_is_counted_once_and_a_differing_twin_is_a_conflict(poo
         .await
         .unwrap();
     assert_eq!(inst[0].events_received, 4);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn names_unused_for_the_summary_period_are_swept_and_free_their_budget(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let src = source(1);
+    f.store
+        .ingest(batch(
+            &f,
+            &src,
+            prepare(journey(1, 1)),
+            WireStats::default(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(f.store.known_names(f.project, 100).await.unwrap().len(), 2);
+    sqlx::query(
+        "UPDATE known_names SET last_seen = to_timestamp(1779000000) - interval '100 days' WHERE name = 'generate'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let r = f
+        .store
+        .sweep(
+            now().plus_micros(60 * 1_000_000),
+            Retention::default(),
+            100,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.names, 1);
+    let left: Vec<String> = f
+        .store
+        .known_names(f.project, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(left, vec!["publish_article".to_owned()]);
 }

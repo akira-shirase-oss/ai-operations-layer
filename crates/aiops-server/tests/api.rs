@@ -264,14 +264,34 @@ async fn a_host_inventing_names_hits_the_cardinality_cap(pool: PgPool) {
     let mut fresh = journey(2, 100);
     fresh[1].name = Some("step-0001".into());
     let r = send(&e.app, post_ingest(&e.ingest_key, batch(&fresh))).await;
-    let refused = r.body["refused"].as_array().unwrap();
-    assert_eq!(refused.len(), 1);
-    assert_eq!(refused[0]["code"], "cardinality_exceeded");
-    assert_eq!(r.body["accepted"], 7, "known names still flow");
+    // Past the cap the new name is stored as _overflow, labeled; the event is kept.
+    assert_eq!(r.body["refused"], json!([]));
+    assert_eq!(r.body["overflowed_names"], 1);
+    assert_eq!(r.body["accepted"], 8, "every event still flows");
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(2)),
+            &e.reader,
+        ),
+    )
+    .await;
+    let started = t.body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["type"] == "step.started")
+        .unwrap();
+    assert_eq!(started["name"], "_overflow");
+    assert_eq!(
+        started["overflowed_names"], 1,
+        "the rewrite is labeled per event"
+    );
     // Another project's cap is its own: its first operation is not affected.
     let other = batch_from("22222222222222222222222222222222", &journey(3, 0));
     let r = send(&e.app, post_ingest(&e.other_ingest_key, other)).await;
     assert_eq!(r.body["accepted"], 8);
+    assert_eq!(r.body["overflowed_names"], 0);
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
@@ -664,4 +684,63 @@ async fn e5_another_key_cannot_fill_a_hosts_gaps_or_inflate_its_counters(pool: P
         "counters untouched"
     );
     assert_eq!(t.body["sources"][0]["ingest_key"], "reference-host");
+}
+
+// Review finding 11: one key cannot exhaust the project's name budget, and a name over
+// budget never costs the event.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_noisy_key_cannot_exhaust_the_projects_names_and_over_budget_names_keep_their_event(
+    pool: PgPool,
+) {
+    let e = env_with(pool, |s| {
+        s.limits.max_names_per_project = 50;
+        s.limits.max_names_per_key = 20;
+    })
+    .await;
+    // The noisy host invents 60 step names.
+    let noisy: Vec<WireEvent> = (0..60u64)
+        .map(|i| {
+            let mut w = journey(9, i * 10)[1].clone();
+            w.event_id = format!("{:032x}", 0x00ab_c000 + i);
+            w.operation_id = format!("{:032x}", 0x00de_f000 + i);
+            w.seq = i + 1;
+            w.op_seq = 1;
+            w.name = Some(format!("junk-{i}"));
+            w.model = None;
+            w
+        })
+        .collect();
+    let r = send(
+        &e.app,
+        post_ingest(
+            &e.other_ingest_key_same_project,
+            batch_from("22222222222222222222222222222222", &noisy),
+        ),
+    )
+    .await;
+    assert_eq!(
+        r.body["accepted"], 60,
+        "no event is refused for its name: {}",
+        r.body
+    );
+    assert_eq!(r.body["refused"], serde_json::json!([]));
+    assert_eq!(
+        r.body["overflowed_names"], 40,
+        "past the key's budget, names are stored as _overflow"
+    );
+
+    // The honest host's new names still fit the project.
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    assert_eq!(r.body["accepted"], 8, "{}", r.body);
+    assert_eq!(r.body["overflowed_names"], 0, "{}", r.body);
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(t.body["name"], "publish_article");
+    assert_eq!(t.body["steps"][0]["name"], "generate");
 }

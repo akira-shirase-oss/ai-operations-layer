@@ -205,6 +205,8 @@ pub struct EntryView {
     pub attributes: Vec<AttrView>,
     pub withheld_attributes: u32,
     pub redactions: u32,
+    /// Names over budget, stored as `_overflow`.
+    pub overflowed_names: u32,
     pub truncated: u32,
 }
 
@@ -887,6 +889,7 @@ fn entry_view(stored: &StoredEvent, delay: i64, flags: Vec<&'static str>) -> Ent
             .collect(),
         withheld_attributes: stored.marks.withheld_attributes,
         redactions: stored.marks.redactions,
+        overflowed_names: stored.marks.overflowed_names,
         truncated: e.truncated,
     };
     match &e.body {
