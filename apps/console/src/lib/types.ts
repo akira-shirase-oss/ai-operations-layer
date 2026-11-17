@@ -196,3 +196,26 @@ export type ProjectsView = {
 	scopes: string[];
 	projects: { slug: string }[];
 };
+
+/** The runner's own answer beside a timeline (GET …/authority, D-027). */
+export type Authority =
+	| { state: 'not_configured' }
+	| { state: 'not_linked' }
+	| { state: 'unknown_runner'; runner: string }
+	| { state: 'link_unverified'; runner: string; run_id: number }
+	| {
+			state: 'unavailable';
+			source: string;
+			runner: string;
+			run_id: number;
+			reason: string;
+			read_at: string;
+	  }
+	| {
+			state: 'answered';
+			source: string;
+			runner: string;
+			run_id: number;
+			read_at: string;
+			answer: { state: string; key: string; steps: number; finished_at_ms: number | null };
+	  };

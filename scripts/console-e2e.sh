@@ -3,11 +3,16 @@
 # collector serving the built console under its CSP, the reference host instrumented with
 # the SDK, and data that exercises the honest states (a lost publish response, a complete
 # operation, an operation known only from gap reports, hostile event text, a denial).
+# Then the first real host (A2): Durable Runner (scripts/durable-runner.sh) running the
+# article workflow through the adapter, with the collector reading the runner's answer.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 port=57420
 host_port=57421
+dr_port=53331
+adapter_port=53332
+worker_port=53333
 db="aiops_e2e_$(date -u +%Y%m%d%H%M%S)"
 work="$(mktemp -d)"
 command -v brew >/dev/null && export PATH="$(brew --prefix rustup)/bin:$PATH"
@@ -23,6 +28,9 @@ else
 fi
 psql_admin -c "CREATE DATABASE $db" >/dev/null
 cleanup() {
+  for pid in "${adapter_pid:-}" "${worker_pid:-}" "${dr_pid:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
   [ -n "${host_pid:-}" ] && kill "$host_pid" 2>/dev/null
   [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null
   wait 2>/dev/null || true
@@ -31,8 +39,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cargo build --release --locked -p aiops-server -p aiops-reference-host --quiet
+cargo build --release --locked -p aiops-server -p aiops-reference-host -p aiops-durable-runner \
+  -p aiops-dr-article-worker --quiet
 npm run build --workspace @aiops/console >/dev/null
+durable_server="$(scripts/durable-runner.sh)"
+DURABLE_API_KEY="$(openssl rand -hex 32)"
+DURABLE_READ_KEY="$(openssl rand -hex 32)"
+export DURABLE_API_KEY DURABLE_READ_KEY
 export AIOPS_DATABASE_URL="$db_base/$db"
 bin=target/release/aiops-server
 "$bin" admin create-project pilot >/dev/null
@@ -42,8 +55,13 @@ probe_key="$("$bin" admin create-ingest-key --project pilot --name e2e-probe)"
 token="$("$bin" admin create-token --actor e2e --project pilot 2>/dev/null)"
 other_token="$("$bin" admin create-token --actor outsider --project other 2>/dev/null)"
 
+dr_key="$("$bin" admin create-ingest-key --project pilot --name durable-runner-adapter)"
+
 AIOPS_LISTEN="127.0.0.1:$port" AIOPS_CONSOLE_DIR="apps/console/build" AIOPS_LOG=warn \
-  AIOPS_RETENTION_SWEEP_SECS=86400 "$bin" serve >"$work/server.log" 2>&1 &
+  AIOPS_RETENTION_SWEEP_SECS=86400 \
+  AIOPS_AUTHORITY_DURABLE_RUNNER="dr-e2e=http://127.0.0.1:$dr_port" \
+  AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY="$DURABLE_READ_KEY" \
+  "$bin" serve >"$work/server.log" 2>&1 &
 server_pid=$!
 REFHOST_LISTEN="127.0.0.1:$host_port" AIOPS_ENDPOINT="http://127.0.0.1:$port" AIOPS_INGEST_KEY="$key" \
   REFHOST_ALLOW_FAULTS=1 REFHOST_LOG_FILE=/dev/null target/release/reference-host >/dev/null 2>&1 &
@@ -149,6 +167,87 @@ for req in e2e-ok e2e-lost; do
   done
 done
 
+# --- The first real host (A2): the article workflow as Durable Runner handlers. ---------
+# The worker is uninstrumented; Durable Runner calls the adapter, which forwards to it.
+WORKER_LISTEN="127.0.0.1:$worker_port" WORKER_HANG_MS=3000 target/release/dr-article-worker \
+  >"$work/worker.log" 2>&1 &
+worker_pid=$!
+cat >"$work/adapter.json" <<JSON
+{"listen": "127.0.0.1:$adapter_port",
+ "runner": {"label": "dr-e2e", "url": "http://127.0.0.1:$dr_port", "step_timeout_ms": 1000},
+ "workflow": "publish_article",
+ "routes": [
+  {"route": "generate", "kind": "model", "upstream": "http://127.0.0.1:$worker_port/generate", "model": "fake-model-1",
+   "price": {"input_micros_per_token": 1, "output_micros_per_token": 4, "currency": "USD", "basis": "fake-list-price-2026-11"}},
+  {"route": "validate", "kind": "validation", "upstream": "http://127.0.0.1:$worker_port/validate"},
+  {"route": "factcheck", "kind": "tool", "upstream": "http://127.0.0.1:$worker_port/factcheck"},
+  {"route": "publish", "kind": "tool", "external_effect": true, "upstream": "http://127.0.0.1:$worker_port/publish"}
+ ]}
+JSON
+start_adapter() {
+  AIOPS_DR_ADAPTER_CONFIG="$work/adapter.json" AIOPS_ENDPOINT="http://127.0.0.1:$port" AIOPS_INGEST_KEY="$dr_key" \
+    target/release/aiops-dr-adapter >>"$work/adapter.log" 2>&1 &
+  adapter_pid=$!
+  for _ in $(seq 1 100); do curl -fsS "http://127.0.0.1:$adapter_port/healthz" >/dev/null 2>&1 && return; sleep 0.05; done
+  echo "the adapter did not start" >&2; tail -5 "$work/adapter.log" >&2; exit 1
+}
+start_adapter
+handlers=()
+for h in generate validate factcheck publish; do handlers+=(--handler "$h=http://127.0.0.1:$adapter_port/h/$h"); done
+"$durable_server" --journal "$work/journal" --listen "127.0.0.1:$dr_port" --step-timeout-ms 1000 "${handlers[@]}" \
+  >"$work/durable.log" 2>&1 &
+dr_pid=$!
+for _ in $(seq 1 100); do curl -fsS "http://127.0.0.1:$dr_port/health" >/dev/null 2>&1 && break; sleep 0.1; done
+submit() { # op_key fault → run id
+  local input; input="$(printf '{"topic":"e2e","fault":%s}' "$2" | base64 | tr -d '\n')"
+  curl -fsS -X POST "http://127.0.0.1:$dr_port/jobs" -H "authorization: Bearer $DURABLE_API_KEY" \
+    -H 'content-type: application/json' \
+    -d "{\"op_key\":\"$1\",\"spec\":{\"version\":1,\"steps\":[{\"name\":\"generate\",\"handler\":\"generate\"},{\"name\":\"validate\",\"handler\":\"validate\"},{\"name\":\"factcheck\",\"handler\":\"factcheck\"},{\"name\":\"publish\",\"handler\":\"publish\"}],\"input_b64\":\"$input\"}}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])'
+}
+op_of() { # run id → operation ID (aiops_domain::correlate)
+  python3 -c 'import hashlib,sys
+p=lambda b: len(b).to_bytes(8,"big")+b
+print(hashlib.sha256(b"aiops/job-runner/v1\0"+p(b"operation")+p(b"dr-e2e")+p(int(sys.argv[1]).to_bytes(8,"big"))).hexdigest()[:32])' "$1"
+}
+settle() { # run id… : wait until the runner says each is terminal and its finish is stored
+  for run in "$@"; do
+    for _ in $(seq 1 300); do
+      state="$(curl -fsS "http://127.0.0.1:$dr_port/jobs/$run" -H "authorization: Bearer $DURABLE_READ_KEY" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+      case "$state" in done|failed:*|cancelled) break ;; esac
+      sleep 0.1
+    done
+    op="$(op_of "$run")"
+    for _ in $(seq 1 100); do # the adapter's finish, declared from the runner's answer
+      curl -fsS "http://127.0.0.1:$port/v1/projects/pilot/operations/$op" -H "authorization: Bearer $token" \
+        | grep -q '"type":"operation.finished"' && break
+      sleep 0.1
+    done
+    echo "durable runner run $run: $state"
+  done
+}
+run_ok="$(submit article/e2e-dr-ok null)"
+run_lost="$(submit article/e2e-dr-lost '"publish_lost_response"')"
+run_invalid="$(submit article/e2e-dr-invalid '"validation_failed"')"
+settle "$run_ok" "$run_lost" "$run_invalid"
+# An adapter restart in the middle of a step, once nothing else is in flight: kill it as
+# soon as its start of the run is stored, while the slow generate call is in flight. The
+# runner reconciles and retries into a new adapter instance, so the first instance's tail
+# is unknown while the runner says done: missing telemetry, not a failure.
+run_restart="$(submit article/e2e-dr-restart '"slow_generate"')"
+op_restart="$(op_of "$run_restart")"
+for _ in $(seq 1 30); do
+  curl -fsS -o /dev/null "http://127.0.0.1:$port/v1/projects/pilot/operations/$op_restart" -H "authorization: Bearer $token" && break
+  sleep 0.05
+done
+kill -9 "$adapter_pid"; wait "$adapter_pid" 2>/dev/null || true
+sleep 0.2
+start_adapter
+settle "$run_restart"
+
+AIOPS_E2E_DR_OK=article/e2e-dr-ok AIOPS_E2E_DR_LOST=article/e2e-dr-lost AIOPS_E2E_DR_INVALID=article/e2e-dr-invalid \
+AIOPS_E2E_DR_RESTART=article/e2e-dr-restart \
 AIOPS_E2E_BASE="http://127.0.0.1:$port" AIOPS_E2E_TOKEN="$token" AIOPS_E2E_OTHER_TOKEN="$other_token" \
 AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_BIG=e2e-big AIOPS_E2E_LONG=e2e-long AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
   npm run test:e2e --workspace @aiops/console

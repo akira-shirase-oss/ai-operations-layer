@@ -209,3 +209,73 @@ test('host text is isolated, so a bidi control cannot reorder what follows it', 
 	expect(await rlo.evaluate((el) => getComputedStyle(el).unicodeBidi)).toBe('isolate');
 	expect(problems).toEqual([]);
 });
+
+// --- The first real host (A2): Durable Runner runs the article workflow through the adapter.
+const DR_OK = process.env['AIOPS_E2E_DR_OK'] ?? '';
+const DR_LOST = process.env['AIOPS_E2E_DR_LOST'] ?? '';
+const DR_INVALID = process.env['AIOPS_E2E_DR_INVALID'] ?? '';
+const DR_RESTART = process.env['AIOPS_E2E_DR_RESTART'] ?? '';
+
+test.describe('Durable Runner, the first real host', () => {
+	test('a run that finished is complete, and the runner says done beside it', async ({ page }) => {
+		const problems = watch(page);
+		await signIn(page);
+		await openByRequest(page, DR_OK);
+		await expect(page.locator('h1 .badge')).toHaveText('succeeded');
+		await expect(page.getByText(/^No gaps: every event/)).toBeVisible();
+		await expect(page.getByTestId('authority-state')).toHaveText('done');
+		await expect(page.getByTestId('authority')).toContainText('Read ');
+		const steps = page.getByRole('rowgroup', { name: 'Steps' });
+		for (const name of ['generate', 'validate', 'factcheck', 'publish']) {
+			await expect(steps.getByRole('row').filter({ hasText: name }).first()).toBeVisible();
+		}
+		expect(problems).toEqual([]);
+	});
+
+	test('a lost publish reply: the attempt is uncertain, the runner reconciled it, and it says done', async ({
+		page
+	}) => {
+		const problems = watch(page);
+		await signIn(page);
+		await openByRequest(page, DR_LOST);
+		await expect(page.locator('h1 .badge')).toHaveText('succeeded');
+		await expect(page.getByText('An external effect may have happened.')).toBeVisible();
+		const steps = page.getByRole('rowgroup', { name: 'Steps' });
+		const publish = steps.getByRole('row').filter({ hasText: 'external effect' });
+		await expect(publish.locator('.badge')).toHaveText('outcome unknown: timeout_after_send');
+		await expect(publish).toContainText('runner_deadline_passed');
+		await expect(steps.getByRole('row').filter({ hasText: 'publish.reconcile' }).locator('.badge')).toHaveText(
+			'succeeded'
+		);
+		await expect(page.getByTestId('authority-state')).toHaveText('done');
+		expect(problems).toEqual([]);
+	});
+
+	test('a real failure: every validate attempt failed, and the runner says failed at that step', async ({ page }) => {
+		const problems = watch(page);
+		await signIn(page);
+		await openByRequest(page, DR_INVALID);
+		await expect(page.locator('h1 .badge')).toHaveText('failed: validation');
+		await expect(page.getByTestId('authority-state')).toHaveText('failed:step:1');
+		const validate = page.getByRole('rowgroup', { name: 'Steps' }).getByRole('row').filter({ hasText: 'validate' });
+		await expect(validate).toHaveCount(5); // the runner's five attempts, numbered by the runner
+		await expect(validate.locator('.badge').first()).toHaveText('failed: validation');
+		expect(problems).toEqual([]);
+	});
+
+	test('missing telemetry, not a failure: an adapter restart leaves an unknown tail while the runner says done', async ({
+		page
+	}) => {
+		const problems = watch(page);
+		await signIn(page);
+		await openByRequest(page, DR_RESTART);
+		await expect(page.locator('h1 .badge')).toHaveText('succeeded');
+		await expect(page.getByText(/an unknown number/)).toBeVisible();
+		await expect(page.getByText('Events after this point may be missing (no finish observed)')).toBeVisible();
+		await expect(page.getByText(/^No gaps/)).toHaveCount(0);
+		await expect(page.getByTestId('authority-state')).toHaveText('done');
+		const generate = page.getByRole('rowgroup', { name: 'Steps' }).getByRole('row').filter({ hasText: 'generate' });
+		await expect(generate.first().locator('.badge')).toHaveText('no finish observed');
+		expect(problems).toEqual([]);
+	});
+});

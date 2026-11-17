@@ -6,7 +6,7 @@
 	import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@aiops/ui/ui/tooltip';
 	import { api, type Result } from '#lib/api.js';
 	import { micros, money, short, time, value } from '#lib/format.js';
-	import type { AttemptView, EntryView, StepView, Timeline } from '#lib/types.js';
+	import type { AttemptView, Authority, EntryView, StepView, Timeline } from '#lib/types.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import Notice from '#lib/components/Notice.svelte';
 	import Flag from '#lib/components/Flag.svelte';
@@ -15,12 +15,21 @@
 	const project = $derived(page.params['project'] ?? '');
 	const id = $derived(page.params['id'] ?? '');
 	let result = $state<Result<Timeline> | null>(null);
+	let authority = $state<Result<Authority> | null>(null);
 
 	$effect(() => {
-		api<Timeline>(`/v1/projects/${encodeURIComponent(project)}/operations/${encodeURIComponent(id)}`).then(
-			(r) => (result = r)
-		);
+		const path = `/v1/projects/${encodeURIComponent(project)}/operations/${encodeURIComponent(id)}`;
+		api<Timeline>(path).then((r) => (result = r));
+		api<Authority>(`${path}/authority`).then((r) => (authority = r));
 	});
+	const REASON_TEXT: Record<string, string> = {
+		timeout: 'it did not answer within 2 s',
+		unreachable: 'it could not be reached',
+		unauthorized: 'it refused the read key',
+		not_found: 'it does not know this run (expired after a compaction, or another journal)',
+		bad_answer: 'its answer could not be read',
+		busy: 'too many reads were in flight; reload to ask again'
+	};
 
 	const GAP_TEXT: Record<string, string> = {
 		sdk_reported: 'The SDK reported dropping events',
@@ -133,6 +142,43 @@
 	{/if}
 	{#if t.events_truncated}
 		<Notice kind="uncertain">Only the first part of this very large operation is shown.</Notice>
+	{/if}
+
+	{#if authority?.state === 'ok' && !['not_configured', 'not_linked'].includes(authority.data.state)}
+		{@const a = authority.data}
+		<Card class="mt-4" data-testid="authority">
+			<CardHeader>
+				<CardTitle class="text-sm text-muted-foreground">The runner's own answer (the authority, not telemetry)</CardTitle>
+			</CardHeader>
+			<CardContent class="text-sm">
+				{#if a.state === 'answered'}
+					<p>
+						Durable Runner says <strong class="font-mono" data-testid="authority-state">{a.answer.state}</strong> for run
+						{a.run_id} ({a.answer.steps} steps; key <bdi class="font-mono">{a.answer.key}</bdi>){a.answer.finished_at_ms
+							? `, finished ${time(new Date(a.answer.finished_at_ms).toISOString())}`
+							: ''}.
+					</p>
+					<p class="text-muted-foreground">
+						Read {time(a.read_at)} from runner {a.runner}. Where the timeline and this disagree, this is the record; the
+						timeline is evidence of what was observed.
+					</p>
+				{:else if a.state === 'unavailable'}
+					<p data-testid="authority-state">
+						Durable Runner (run {a.run_id} on {a.runner}) could not be asked at {time(a.read_at)}: {REASON_TEXT[a.reason] ??
+							a.reason}. Nothing is inferred from that.
+					</p>
+				{:else if a.state === 'link_unverified'}
+					<p data-testid="authority-state">
+						The events say this operation is run {a.run_id} on {a.runner}, but its ID is not the one derived from that run,
+						so the link is not believed and the runner was not asked.
+					</p>
+				{:else if a.state === 'unknown_runner'}
+					<p data-testid="authority-state">
+						The events name runner <bdi>{a.runner}</bdi>, which this collector is not configured to ask.
+					</p>
+				{/if}
+			</CardContent>
+		</Card>
 	{/if}
 
 	<div class="mt-4 grid gap-4 md:grid-cols-3">
