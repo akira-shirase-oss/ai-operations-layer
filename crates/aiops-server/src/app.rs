@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use aiops_domain::names::NameRegistry;
@@ -82,11 +82,14 @@ pub struct MetricsView {
     pub locks: LocksView,
 }
 
-/// The in-process locks: the ingest path's (the global name registry, the ingest-key
+/// The in-process locks: the ingest path's (the name registries — the map of projects,
+/// then each project's registry, shared to check and exclusive to admit — the ingest-key
 /// cache, the per-key rate limiter) and the query path's.
 #[derive(Serialize)]
 pub struct LocksView {
-    pub names: LockView,
+    pub names_map: LockView,
+    pub names_shared: LockView,
+    pub names_exclusive: LockView,
     pub ingest_key_cache: LockView,
     pub ingest_rate_limit: LockView,
     pub token_cache: LockView,
@@ -136,10 +139,14 @@ pub struct AppState {
     pub tokens: CredentialCache<Token>,
     pub ingest_buckets: Buckets<Uuid>,
     pub query_buckets: Buckets<Uuid>,
-    /// Per project, loaded lazily from `known_names`. One lock for every project, held
-    /// while a batch's names are admitted; its cost is measured (D-026).
-    pub names: Mutex<HashMap<Uuid, NameRegistry>>,
-    pub names_lock: LockStats,
+    /// Per project, loaded lazily from `known_names`, each behind its own lock (D-026): a
+    /// batch checks its names shared and takes its project's registry exclusively only to
+    /// admit a name the project has not seen. The map itself is read on every batch and
+    /// written only when a project's registry is loaded or the retention sweep reloads all.
+    pub names: RwLock<HashMap<Uuid, Arc<RwLock<NameRegistry>>>>,
+    pub names_map_lock: LockStats,
+    pub names_shared_lock: LockStats,
+    pub names_exclusive_lock: LockStats,
     pub metrics: Metrics,
     pub console_csp: Option<HeaderValue>,
     /// Slug → project. Projects are never renamed or deleted, so entries never go stale;
@@ -174,8 +181,10 @@ impl AppState {
             tokens: CredentialCache::new(Duration::from_secs(30), Duration::from_secs(5), 10_000),
             ingest_buckets: Buckets::new(config.ingest_events_per_sec, config.ingest_burst_events),
             query_buckets: Buckets::new(config.query_requests_per_sec, config.query_burst),
-            names: Mutex::new(HashMap::new()),
-            names_lock: LockStats::default(),
+            names: RwLock::new(HashMap::new()),
+            names_map_lock: LockStats::default(),
+            names_shared_lock: LockStats::default(),
+            names_exclusive_lock: LockStats::default(),
             metrics: Metrics::default(),
             projects: Mutex::new(HashMap::new()),
             projects_lock: LockStats::default(),
@@ -230,7 +239,9 @@ impl AppState {
     /// Every counter, with the locks' wait and hold times.
     pub fn metrics_view(&self) -> MetricsView {
         self.metrics.view(LocksView {
-            names: self.names_lock.view(),
+            names_map: self.names_map_lock.view(),
+            names_shared: self.names_shared_lock.view(),
+            names_exclusive: self.names_exclusive_lock.view(),
             ingest_key_cache: self.ingest_keys.lock_stats.view(),
             ingest_rate_limit: self.ingest_buckets.lock_stats.view(),
             token_cache: self.tokens.lock_stats.view(),

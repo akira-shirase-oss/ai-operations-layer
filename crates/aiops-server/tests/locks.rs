@@ -103,7 +103,9 @@ async fn the_collector_reports_its_locks_wait_and_hold(pool: PgPool) {
     assert_eq!(stats.status, 200);
     let locks = &stats.body["locks"];
     for lock in [
-        "names",
+        "names_map",
+        "names_shared",
+        "names_exclusive",
         "ingest_key_cache",
         "ingest_rate_limit",
         "token_cache",
@@ -121,10 +123,60 @@ async fn the_collector_reports_its_locks_wait_and_hold(pool: PgPool) {
             assert!(locks[lock][field].is_u64(), "{lock}.{field}: {locks}");
         }
     }
-    // The name registry is taken three times for a project's first batch (is it loaded?
-    // load it; admit), and held while the batch's names are admitted.
-    assert_eq!(locks["names"]["acquisitions"], 3, "{locks}");
-    assert!(locks["names"]["hold_ns_total"].as_u64().unwrap() > 0);
+    // A project's first batch: the map is read (missing) and written (loaded), and its new
+    // names are checked shared, then admitted exclusively.
+    let count = |l: &Value, name: &str| l[name]["acquisitions"].as_u64().unwrap();
+    assert_eq!(count(locks, "names_map"), 2, "{locks}");
+    assert_eq!(count(locks, "names_shared"), 1, "{locks}");
+    assert_eq!(count(locks, "names_exclusive"), 1, "{locks}");
+    assert!(locks["names_exclusive"]["hold_ns_total"].as_u64().unwrap() > 0);
+
+    // A batch whose names are all known never takes the registry exclusively (D-026).
+    let r = send(&e.app, post_ingest(&e.ingest_key, reference_batch(1, 3, 3))).await;
+    assert_eq!(r.body["accepted"], 30, "{:?}", r.body);
+    let after = send(&e.app, get("/v1/collector/stats", &e.admin))
+        .await
+        .body;
+    let locks = &after["locks"];
+    assert_eq!(count(locks, "names_map"), 3, "{locks}");
+    assert_eq!(count(locks, "names_shared"), 2, "{locks}");
+    assert_eq!(count(locks, "names_exclusive"), 1, "{locks}");
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_new_name_over_budget_is_still_stored_as_overflow_on_the_exclusive_path(pool: PgPool) {
+    // The shared fast path must not change admission: a known batch, then one that brings a
+    // new release name to a project whose budget is spent, which is stored as `_overflow`.
+    let e = common::env_with(pool, |s| {
+        s.limits.max_names_per_project = 7;
+        s.limits.max_names_per_key = 7;
+    })
+    .await;
+    let r = send(&e.app, post_ingest(&e.ingest_key, reference_batch(2, 0, 1))).await;
+    assert_eq!(r.body["accepted"], 10, "{:?}", r.body);
+    assert_eq!(
+        r.body["overflowed_names"], 0,
+        "op, release, four steps and the cost basis fit: {:?}",
+        r.body
+    );
+    let mut batch: Value = serde_json::from_str(&reference_batch(2, 1, 1)).unwrap();
+    batch["events"][0]["release"] = json!("locks-r2");
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch.to_string())).await;
+    assert_eq!(r.body["accepted"], 10, "{:?}", r.body);
+    assert_eq!(r.body["overflowed_names"], 1, "{:?}", r.body);
+    let list = send(
+        &e.app,
+        get(
+            "/v1/projects/pilot/operations?request_id=locks-2-1",
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(
+        list.body["operations"][0]["release"], "_overflow",
+        "{:?}",
+        list.body
+    );
 }
 
 /// An ingest request with its `Content-Length`, as an HTTP sender declares it (without one
@@ -208,7 +260,9 @@ async fn measure(store: &Store, key: &str, tasks: u32, batches: u32, offset: u32
         "request_ms": {"p50": pct(0.5), "p95": pct(0.95), "p99": pct(0.99), "max": pct(1.0)},
         "request_ms_total": ms.iter().sum::<f64>(),
         "locks": {
-            "names": delta("names"),
+            "names_map": delta("names_map"),
+            "names_shared": delta("names_shared"),
+            "names_exclusive": delta("names_exclusive"),
             "ingest_key_cache": delta("ingest_key_cache"),
             "ingest_rate_limit": delta("ingest_rate_limit"),
         },

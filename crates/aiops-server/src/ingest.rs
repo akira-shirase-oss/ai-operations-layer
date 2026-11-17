@@ -14,6 +14,7 @@ use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::HeaderMap;
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 use crate::app::{AppState, Metrics, SharedState};
@@ -289,9 +290,38 @@ struct NameUse {
     touched: Vec<String>,
 }
 
+/// The project's name registry, loaded from the store on its first batch.
+async fn registry(app: &AppState, project: Uuid) -> Result<Arc<RwLock<NameRegistry>>, ApiError> {
+    let found = app
+        .names_map_lock
+        .read(&app.names)
+        .and_then(|m| m.get(&project).cloned());
+    if let Some(r) = found {
+        return Ok(r);
+    }
+    let (cap, per_key) = (
+        app.limits.max_names_per_project,
+        app.limits.max_names_per_key,
+    );
+    let known = app.store.known_names(project, cap).await?;
+    let mut map = app
+        .names_map_lock
+        .write(&app.names)
+        .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("name registry lock poisoned")))?;
+    Ok(map
+        .entry(project)
+        .or_insert_with(|| Arc::new(RwLock::new(NameRegistry::new(cap, per_key, known))))
+        .clone())
+}
+
 /// Bounded cardinality (D-014, review finding 11): a name over the project's or the key's
 /// budget is stored as `_overflow`, labeled and counted, so a noisy host can never cost an
 /// honest host its events, and no event is refused for its name.
+///
+/// The batch's names are formatted before any lock is taken. In the steady state every
+/// one is already known, which a shared lock can tell: batches then never wait for each
+/// other. Only a batch that carries a new name takes its project's registry exclusively,
+/// and admits every name in order, so budgets are spent first come, first served (D-026).
 async fn admit_names(
     app: &AppState,
     project: Uuid,
@@ -299,52 +329,57 @@ async fn admit_names(
     prepared: &mut [(usize, PreparedEvent)],
     response: &mut IngestResponse,
 ) -> Result<NameUse, ApiError> {
-    let loaded = app
-        .names_lock
-        .lock(&app.names)
-        .is_some_and(|m| m.contains_key(&project));
-    if !loaded {
-        let (cap, per_key) = (
-            app.limits.max_names_per_project,
-            app.limits.max_names_per_key,
-        );
-        let known = app.store.known_names(project, cap).await?;
-        if let Some(mut map) = app.names_lock.lock(&app.names) {
-            map.entry(project)
-                .or_insert_with(|| NameRegistry::new(cap, per_key, known));
-        }
+    let registry = registry(app, project).await?;
+    let poisoned = || ApiError::Internal(anyhow::anyhow!("name registry lock poisoned"));
+    let mut names = Vec::with_capacity(prepared.len() * 2);
+    for (_, p) in prepared.iter_mut() {
+        visit_names(&mut p.event, |kind, value| {
+            names.push(format!("{kind}:{value}"));
+        });
     }
+    let all_known = {
+        let r = app.names_shared_lock.read(&registry).ok_or_else(poisoned)?;
+        names.iter().all(|n| r.is_known(n))
+    };
+    let verdicts: Vec<Admission> = if all_known {
+        vec![Admission::Known; names.len()]
+    } else {
+        let key_bytes = *key.as_bytes();
+        let mut w = app
+            .names_exclusive_lock
+            .write(&registry)
+            .ok_or_else(poisoned)?;
+        names.iter().map(|n| w.admit(n, key_bytes)).collect()
+    };
     let mut new_names = Vec::new();
     let mut touched = std::collections::HashSet::new();
-    let key_bytes = *key.as_bytes();
-    let Some(mut map) = app.names_lock.lock(&app.names) else {
-        return Err(ApiError::Internal(anyhow::anyhow!(
-            "name registry lock poisoned"
-        )));
-    };
-    let Some(registry) = map.get_mut(&project) else {
-        return Err(ApiError::Internal(anyhow::anyhow!("name registry missing")));
-    };
-    for (_, p) in prepared.iter_mut() {
-        let mut overflowed = 0u32;
-        visit_names(&mut p.event, |kind, value| {
-            let name = format!("{kind}:{value}");
-            match registry.admit(&name, key_bytes) {
-                Admission::Known => {
-                    touched.insert(name);
-                }
-                Admission::New => new_names.push(name),
-                Admission::OverBudget => {
+    let mut over_budget = false;
+    for (name, verdict) in names.into_iter().zip(&verdicts) {
+        match verdict {
+            Admission::Known => {
+                touched.insert(name);
+            }
+            Admission::New => new_names.push(name),
+            Admission::OverBudget => over_budget = true,
+        }
+    }
+    if over_budget {
+        // The same visiting order, so the n-th name visited is the n-th verdict.
+        let mut verdict = verdicts.iter();
+        for (_, p) in prepared.iter_mut() {
+            let mut overflowed = 0u32;
+            visit_names(&mut p.event, |_, value| {
+                if verdict.next() == Some(&Admission::OverBudget) {
                     OVERFLOW_NAME.clone_into(value);
                     overflowed += 1;
                 }
+            });
+            if overflowed > 0 {
+                p.marks.overflowed_names += overflowed;
+                response.overflowed_names += overflowed;
+                p.body = serde_json::to_string(&p.event.to_wire())
+                    .map_err(|e| ApiError::Internal(e.into()))?;
             }
-        });
-        if overflowed > 0 {
-            p.marks.overflowed_names += overflowed;
-            response.overflowed_names += overflowed;
-            p.body = serde_json::to_string(&p.event.to_wire())
-                .map_err(|e| ApiError::Internal(e.into()))?;
         }
     }
     Ok(NameUse {

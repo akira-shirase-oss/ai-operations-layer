@@ -121,7 +121,7 @@ Ok(t) => {
                                 tracing::info!(events = t.events, operations = t.operations, instances = t.instances, audit = t.audit, names = t.names, calls = t.calls, complete = t.complete, "retention sweep");
                                 if t.names > 0 {
                                     // Swept names free their budget: reload the registries.
-                                    if let Some(mut names) = state.names_lock.lock(&state.names) {
+                                    if let Some(mut names) = state.names_map_lock.write(&state.names) {
                                         names.clear();
                                     }
                                 }

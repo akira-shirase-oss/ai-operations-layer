@@ -54,9 +54,15 @@ impl NameRegistry {
         r
     }
 
+    /// Whether [`NameRegistry::admit`] would answer [`Admission::Known`]: a read-only check,
+    /// so a batch whose names are all known needs no exclusive access (D-026).
+    pub fn is_known(&self, name: &str) -> bool {
+        self.names.contains(name) || name.rsplit(':').next() == Some(OVERFLOW_NAME)
+    }
+
     /// `name` is `kind:value`; the reserved overflow value is always known.
     pub fn admit(&mut self, name: &str, key: KeyId) -> Admission {
-        if self.names.contains(name) || name.rsplit(':').next() == Some(OVERFLOW_NAME) {
+        if self.is_known(name) {
             return Admission::Known;
         }
         let used = self.per_key.get(&key).copied().unwrap_or(0);
@@ -103,5 +109,16 @@ mod tests {
         );
         assert_eq!(r.admit("step:_overflow", [2; 16]), Admission::Known);
         assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn is_known_agrees_with_admit_and_changes_nothing() {
+        let mut r = NameRegistry::new(2, 2, [("op:a".to_owned(), None)]);
+        for name in ["op:a", "op:b", "step:_overflow", "op:"] {
+            let known = r.is_known(name);
+            let before = r.len();
+            assert_eq!(r.len(), before, "is_known is read-only");
+            assert_eq!(known, r.admit(name, [1; 16]) == Admission::Known, "{name}");
+        }
     }
 }
