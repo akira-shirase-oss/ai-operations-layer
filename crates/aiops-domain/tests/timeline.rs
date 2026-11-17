@@ -572,3 +572,32 @@ fn n7_a_joined_services_tail_is_an_undeclared_count_not_a_missing_finish() {
         "still unknown: v1 has no count to check"
     );
 }
+
+// Review N10: finishes that straddle the retention cutoff. One finish survives, but the
+// summary recorded that the declared finishes conflicted: the timeline must say conflicting,
+// not the one that happens to survive.
+#[test]
+fn n10_a_conflict_the_summary_recorded_survives_expiry_of_one_finish() {
+    let mut b = B::new();
+    let events = vec![
+        b.ev(0, 5, started()),
+        b.ev(20, 5, finished(Outcome::Succeeded, 3)),
+    ];
+    let first = events[0].received_at;
+    let retention = aiops_domain::timeline::RetentionContext {
+        cutoff: first.plus_micros(1),
+        first_received_at: first,
+        finish: Some(Outcome::Succeeded),
+        finish_conflict: true,
+        events_received: 3,
+    };
+    let t = assemble(
+        op(),
+        events,
+        &[],
+        &Limits::default(),
+        false,
+        Some(&retention),
+    );
+    assert_eq!(t.status.state, "conflicting");
+}

@@ -690,6 +690,12 @@ pub fn assemble(
     };
     let expired = retention.filter(|r| r.first_received_at < r.cutoff);
     let status = match expired {
+        // Finishes may straddle the cutoff: when the summary recorded a conflict, it stands
+        // whichever finish survived (review N10).
+        Some(r) if r.finish_conflict => {
+            flags.conflicting_finish = true;
+            Status::conflicting()
+        }
         // The finish may itself have expired: the summary kept the declaration.
         Some(r) if status.state == "no_finish_observed" => match r.finish {
             Some(_) if r.finish_conflict => Status::conflicting(),
