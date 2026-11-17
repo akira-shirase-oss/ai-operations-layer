@@ -129,16 +129,24 @@ Per type, only the listed fields may appear (anything else is
   `invalid_sequence`, `invalid_outcome`, `too_many_attributes`,
   `invalid_attribute`, `conflicting_duplicate` (`cardinality_exceeded` is no
   longer used: an over-budget name is stored as `_overflow` instead).
+- Free text (`error_message`, string attribute values) must not contain
+  U+0000, which the store cannot keep: such an event is refused alone as
+  `invalid_value` on that field; the rest of the batch is stored. The Rust
+  SDK replaces U+0000 with U+FFFD before sending.
 
 Errors use one envelope:
 `{"error": {"code": "…", "message": "…", "request_id": "…"}}` — `400`
-`malformed_batch`, `unsupported_schema_version`, `invalid_source`; `401`
+`malformed_batch`, `unsupported_schema_version`, `invalid_source`,
+`unstorable_text` (the store could not keep one event's text; nothing was
+written; split the batch and resend the halves); `401`
 `unauthenticated`; `409` `instance_owned_by_another_key`; `413`; `429`;
 `503`.
 
 **What a sender should retry:** 429 (after `Retry-After`), 503, and
 connection errors — with the same events (same `event_id`s). Never retry
-400 or 401 unchanged.
+400 or 401 unchanged. Split and resend on `413` and on `400
+unstorable_text`: they are caused by the batch's size or by one event, and
+halving isolates it (the Rust SDK does this down to single events).
 
 ## Default attribute allowlist (v1)
 

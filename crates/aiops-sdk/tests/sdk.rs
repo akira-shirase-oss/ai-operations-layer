@@ -28,6 +28,9 @@ const HANG: u8 = 3;
 const STORE_THEN_503: u8 = 4;
 /// Accept the batch but refuse its second event by name.
 const REFUSE_SECOND: u8 = 5;
+/// Answer 400 `unstorable_text` to any batch holding an event whose step is named
+/// "poison" (a store that cannot keep one event's text), and accept the rest.
+const POISON_400: u8 = 6;
 
 #[derive(Default)]
 struct Fake {
@@ -57,6 +60,10 @@ async fn ingest(State(fake): State<Arc<Fake>>, body: String) -> (StatusCode, Str
                     .to_string(),
             )
         }
+        POISON_400 if body.contains("\"poison\"") => (
+            StatusCode::BAD_REQUEST,
+            json!({"error": {"code": "unstorable_text", "message": "one event's text cannot be stored"}}).to_string(),
+        ),
         STORE_THEN_503 => {
             fake.batches.lock().unwrap().push(batch);
             fake.mode.store(ACCEPT, Ordering::SeqCst);
@@ -606,4 +613,50 @@ async fn after_an_outage_the_breaker_recovers_quickly_and_held_events_arrive() {
     })
     .await;
     client.shutdown(Duration::from_secs(2)).await;
+}
+
+// Review N1: a NUL in an error message or an attribute is replaced before sending, so the
+// collector never refuses the event for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nul_in_host_text_is_replaced_before_sending() {
+    let (endpoint, fake) = fake_collector().await;
+    let mut cfg = config(&endpoint);
+    cfg.include_error_messages = true;
+    let client = Client::start(&cfg).unwrap();
+    let op = client
+        .operation("x")
+        .attribute("retry.reason", "a\u{0}b")
+        .start();
+    op.step(StepKind::Model, "m")
+        .start()
+        .finish(Finish::failed(FailureClass::Rejected, "http_500").message("said \u{0}"));
+    client.shutdown(Duration::from_secs(2)).await;
+    let events = all_events(&fake);
+    assert_eq!(events[0]["attributes"]["retry.reason"], "a\u{fffd}b");
+    assert_eq!(events[2]["error_message"], "said \u{fffd}");
+}
+
+// Review N1: a 400 the collector gives for one event's content splits the batch until the
+// one event is isolated; every other event is delivered and only that one is counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_refused_for_one_events_content_is_split_not_dropped() {
+    let (endpoint, fake) = fake_collector().await;
+    fake.mode.store(POISON_400, Ordering::SeqCst);
+    let mut cfg = config(&endpoint);
+    cfg.flush_interval = Duration::from_millis(500);
+    let client = Client::start(&cfg).unwrap();
+    for n in 0..20 {
+        run_operation(&client, n);
+    }
+    let poisoned = client.operation("y").start();
+    let _step = poisoned.step(StepKind::Tool, "poison").start();
+    client.shutdown(Duration::from_secs(5)).await;
+    let s = client.stats();
+    assert_eq!(s.dropped_rejected, 1, "{s:?}");
+    assert_eq!(s.dropped_send_failed, 0, "{s:?}");
+    let delivered = all_events(&fake)
+        .iter()
+        .filter(|e| e["type"] != "gap.reported")
+        .count();
+    assert_eq!(delivered as u64, s.emitted - 1, "{s:?}");
 }

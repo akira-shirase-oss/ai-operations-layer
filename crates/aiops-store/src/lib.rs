@@ -35,6 +35,9 @@ pub enum StoreError {
     Database(#[source] sqlx::Error),
     #[error("a record with that name already exists")]
     AlreadyExists,
+    /// The batch held text the database cannot store; nothing of it was written.
+    #[error("the batch holds text the store cannot keep")]
+    Unstorable(#[source] sqlx::Error),
     #[error("not found: {0}")]
     NotFound(&'static str),
     /// The batch's source instance was first used by another ingest key (review finding
@@ -61,6 +64,9 @@ pub enum SqlStateClass {
     Unavailable,
     /// A unique constraint: the record exists.
     AlreadyExists,
+    /// Text the database cannot store (U+0000 in jsonb, an unencodable character): the
+    /// request is refused as invalid, never a 500 (review N1).
+    Unstorable,
     /// Anything else: not retryable as-is.
     Other,
 }
@@ -69,6 +75,8 @@ pub enum SqlStateClass {
 pub fn classify_sqlstate(code: &str) -> SqlStateClass {
     match code {
         "23505" => SqlStateClass::AlreadyExists,
+        // 22P05 untranslatable character (U+0000 in jsonb), 22021 character not in repertoire.
+        "22P05" | "22021" => SqlStateClass::Unstorable,
         // 57014 statement timeout; 53300 too many connections; 57P01 admin shutdown (a
         // restart), 57P02 crash shutdown, 57P03 cannot connect now (review finding 8).
         "57014" | "53300" | "57P01" | "57P02" | "57P03" => SqlStateClass::Unavailable,
@@ -89,6 +97,7 @@ impl From<sqlx::Error> for StoreError {
             | sqlx::Error::WorkerCrashed => Self::Unavailable(e),
             sqlx::Error::Database(db) => match db.code().as_deref().map(classify_sqlstate) {
                 Some(SqlStateClass::AlreadyExists) => Self::AlreadyExists,
+                Some(SqlStateClass::Unstorable) => Self::Unstorable(e),
                 Some(SqlStateClass::Unavailable) => Self::Unavailable(e),
                 _ => Self::Database(e),
             },
@@ -100,6 +109,13 @@ impl From<sqlx::Error> for StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_the_database_cannot_store_is_its_own_class() {
+        // Review N1: U+0000 in jsonb (22P05) must not surface as a 500.
+        assert_eq!(classify_sqlstate("22P05"), SqlStateClass::Unstorable);
+        assert_eq!(classify_sqlstate("22021"), SqlStateClass::Unstorable);
+    }
 
     #[test]
     fn a_database_restart_or_lost_connection_is_retryable() {

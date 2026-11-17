@@ -413,6 +413,7 @@ impl Validator<'_> {
         if text.len() > self.limits.max_error_message_bytes {
             return Err(Refusal::on(RefusalCode::TooLong, "error_message"));
         }
+        storable(text, "error_message")?;
         Ok(Some(redacted(text, marks)))
     }
 
@@ -481,6 +482,7 @@ impl Validator<'_> {
                     if s.len() > self.limits.max_attribute_string_bytes {
                         return Err(Refusal::on(RefusalCode::TooLong, "attributes"));
                     }
+                    storable(&s, "attributes")?;
                     AttrValue::Str(redacted(&s, marks))
                 }
                 _ => return Err(Refusal::on(RefusalCode::InvalidAttribute, "attributes")),
@@ -489,6 +491,15 @@ impl Validator<'_> {
         }
         Ok(out)
     }
+}
+
+/// Free text must be storable: PostgreSQL's `jsonb` cannot hold U+0000, so an event carrying
+/// it is refused alone, by name, rather than failing its whole batch at the store (review N1).
+fn storable(text: &str, field: &'static str) -> Result<(), Refusal> {
+    if text.contains('\0') {
+        return Err(Refusal::on(RefusalCode::InvalidValue, field));
+    }
+    Ok(())
 }
 
 fn redacted(text: &str, marks: &mut PolicyMarks) -> String {

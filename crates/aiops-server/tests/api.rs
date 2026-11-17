@@ -833,3 +833,39 @@ async fn the_list_does_not_claim_completeness_for_an_operation_with_several_sour
         "one source's count cannot speak for two: {row}"
     );
 }
+
+// Review N1: one event carrying U+0000 used to fail the whole batch at the jsonb cast (500,
+// every operation lost). It is refused alone, by name; the rest of the batch is stored.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn one_event_with_a_nul_is_refused_alone_and_the_batch_is_stored(pool: PgPool) {
+    let e = env(pool).await;
+    let mut events = journey(1, 0);
+    let mut poisoned = journey(2, 100);
+    poisoned[2].error_message = Some("upstream said \u{0}".into());
+    events.extend(poisoned);
+    events.extend(journey(3, 200));
+    let n = events.len();
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.body["accepted"], n - 1, "{}", r.body);
+    let refused = r.body["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{}", r.body);
+    assert_eq!(refused[0]["code"], "invalid_value");
+    assert_eq!(refused[0]["field"], "error_message");
+    for req in ["req-1", "req-2", "req-3"] {
+        let list = send(
+            &e.app,
+            get(
+                &format!("/v1/projects/pilot/operations?request_id={req}"),
+                &e.reader,
+            ),
+        )
+        .await;
+        assert_eq!(
+            list.body["operations"].as_array().map(Vec::len),
+            Some(1),
+            "{req}: {}",
+            list.body
+        );
+    }
+}

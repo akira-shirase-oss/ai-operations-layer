@@ -615,13 +615,23 @@ impl From<f64> for AttrValueArg {
 }
 impl From<&str> for AttrValueArg {
     fn from(v: &str) -> Self {
-        Self(AttrValue::Str(v.to_owned()))
+        Self(AttrValue::Str(storable(v)))
     }
 }
 impl From<String> for AttrValueArg {
     fn from(v: String) -> Self {
-        Self(AttrValue::Str(v))
+        Self(AttrValue::Str(if v.contains('\0') {
+            storable(&v)
+        } else {
+            v
+        }))
     }
+}
+
+/// The collector refuses free text holding U+0000 (its store cannot keep it), so the SDK
+/// replaces it with U+FFFD before the event is queued (review N1).
+fn storable(text: &str) -> String {
+    text.replace('\0', "\u{fffd}")
 }
 
 struct OpCore {
@@ -998,7 +1008,7 @@ impl Finish {
     /// `include_error_messages`, redacted and clipped to 512 bytes.
     #[must_use]
     pub fn message(mut self, text: &str) -> Self {
-        self.error_message = Some(text.to_owned());
+        self.error_message = Some(storable(text));
         self
     }
 

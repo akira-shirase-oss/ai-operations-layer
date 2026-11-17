@@ -472,3 +472,35 @@ fn a_gap_reports_drop_window_must_be_inside_the_event_time_window() {
         (RefusalCode::EventTimeOutOfRange, Some("last_dropped_at"))
     );
 }
+
+// Review N1: PostgreSQL cannot store U+0000 in jsonb, so free text carrying it is refused
+// per event, by name, instead of failing the whole batch at the store.
+#[test]
+fn free_text_with_a_nul_is_refused_by_name() {
+    assert_eq!(
+        refused(WireEvent {
+            failure_class: Some("rejected".into()),
+            error_message: Some("upstream said \u{0} then stopped".into()),
+            ..step_finished("failed")
+        }),
+        (RefusalCode::InvalidValue, Some("error_message"))
+    );
+    let mut attrs = serde_json::Map::new();
+    attrs.insert("retry.reason".into(), "a\u{0}b".into());
+    assert_eq!(
+        refused(WireEvent {
+            attributes: Some(attrs),
+            ..started()
+        }),
+        (RefusalCode::InvalidValue, Some("attributes"))
+    );
+    // Other control characters (tab, newline) are ordinary text.
+    assert!(
+        check(WireEvent {
+            failure_class: Some("rejected".into()),
+            error_message: Some("line one\n\tline two".into()),
+            ..step_finished("failed")
+        })
+        .is_ok()
+    );
+}

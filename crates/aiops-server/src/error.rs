@@ -28,6 +28,10 @@ pub enum ApiError {
     InvalidSource(&'static str),
     #[error("the batch has more events than the collector accepts ({0})")]
     TooManyEvents(usize),
+    /// The store could not keep one event's text; nothing was written. A sender splits the
+    /// batch to isolate the event (review N1).
+    #[error("the batch holds text the store cannot keep; split it and resend")]
+    UnstorableText,
     #[error("the batch's source instance belongs to another ingest key")]
     InstanceConflict,
     #[error("rate limit exceeded")]
@@ -69,7 +73,8 @@ impl ApiError {
             Self::BadRequest(_)
             | Self::MalformedBatch
             | Self::UnsupportedSchema
-            | Self::InvalidSource(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidSource(_)
+            | Self::UnstorableText => StatusCode::BAD_REQUEST,
             Self::TooManyEvents(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InstanceConflict => StatusCode::CONFLICT,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -90,6 +95,7 @@ impl ApiError {
             Self::UnsupportedSchema => "unsupported_schema_version",
             Self::InvalidSource(_) => "invalid_source",
             Self::TooManyEvents(_) => "too_many_events",
+            Self::UnstorableText => "unstorable_text",
             Self::InstanceConflict => "instance_owned_by_another_key",
             Self::RateLimited { .. } => "rate_limited",
             Self::Overloaded => "overloaded",
@@ -112,8 +118,13 @@ impl ApiError {
 
 impl From<aiops_store::StoreError> for ApiError {
     fn from(e: aiops_store::StoreError) -> Self {
-        if matches!(e, aiops_store::StoreError::InstanceOwnedByAnotherKey) {
-            return Self::InstanceConflict;
+        match e {
+            aiops_store::StoreError::InstanceOwnedByAnotherKey => return Self::InstanceConflict,
+            aiops_store::StoreError::Unstorable(_) => {
+                tracing::warn!(error = %e, "a batch held text the store cannot keep");
+                return Self::UnstorableText;
+            }
+            _ => {}
         }
         if e.is_retryable() {
             tracing::warn!(error = %e, cause = ?std::error::Error::source(&e).map(ToString::to_string), "store unavailable");

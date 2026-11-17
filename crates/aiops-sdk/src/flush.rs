@@ -49,10 +49,20 @@ const BREAKER_MAX_COOLDOWN: Duration = Duration::from_secs(5);
 
 enum Sent {
     Accepted(Option<IngestResponse>),
-    /// A definitive refusal of the whole batch (400, 401, 413): never retried unchanged.
-    Rejected(StatusCode),
+    /// A definitive refusal of the whole batch (400, 401, 413), with the collector's error
+    /// code when it gave one: never retried unchanged.
+    Rejected(StatusCode, Option<String>),
     /// Retries exhausted or out of budget.
     Failed,
+}
+
+/// A refusal caused by the batch's size or by one event's content, which splitting the
+/// batch can isolate: 413, or 400 `unstorable_text` (review N1). Auth, ownership, schema
+/// and source refusals apply to every batch alike, so splitting them would only multiply
+/// requests.
+fn splittable(status: StatusCode, code: Option<&str>) -> bool {
+    status == StatusCode::PAYLOAD_TOO_LARGE
+        || (status == StatusCode::BAD_REQUEST && code == Some("unstorable_text"))
 }
 
 impl Flusher {
@@ -314,13 +324,17 @@ impl Flusher {
                     self.open_until = None;
                     self.cooldown = self.breaker_cooldown;
                 }
-                Sent::Rejected(StatusCode::PAYLOAD_TOO_LARGE) if chunk.len() > 1 => {
+                // Too large, or one event's text the store cannot keep (review N1): split and
+                // resend the halves until the cause is isolated, never drop the batch.
+                Sent::Rejected(status, code)
+                    if chunk.len() > 1 && splittable(status, code.as_deref()) =>
+                {
                     let mut first = chunk;
                     let second = first.split_off(first.len() / 2);
                     stack.push(second);
                     stack.push(first);
                 }
-                Sent::Rejected(status) => {
+                Sent::Rejected(status, _) => {
                     add(&c.batches_failed, 1);
                     tracing::warn!(
                         status = status.as_u16(),
@@ -402,7 +416,7 @@ impl Flusher {
 
     async fn send(&self, body: Vec<u8>) -> Sent {
         let Some(auth) = &self.auth else {
-            return Sent::Rejected(StatusCode::UNAUTHORIZED);
+            return Sent::Rejected(StatusCode::UNAUTHORIZED, None);
         };
         let started = Instant::now();
         let mut attempt = 0u32;
@@ -435,7 +449,16 @@ impl Flusher {
                         .and_then(|v| v.parse::<u64>().ok())
                         .map(Duration::from_secs)
                 }
-                Ok(r) => return Sent::Rejected(r.status()),
+                Ok(r) => {
+                    let status = r.status();
+                    let code = r
+                        .bytes()
+                        .await
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                        .and_then(|v| v["error"]["code"].as_str().map(str::to_owned));
+                    return Sent::Rejected(status, code);
+                }
                 // Connection refused, DNS, timeouts: retryable. A timeout after sending may
                 // mean the batch was stored; re-sending is idempotent (same event IDs).
                 Err(_) => None,
