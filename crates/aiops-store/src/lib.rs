@@ -54,22 +54,69 @@ impl StoreError {
     }
 }
 
+/// How a PostgreSQL error code (SQLSTATE) is treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlStateClass {
+    /// The database is temporarily unable to serve: retry (503).
+    Unavailable,
+    /// A unique constraint: the record exists.
+    AlreadyExists,
+    /// Anything else: not retryable as-is.
+    Other,
+}
+
+/// Classifies a SQLSTATE.
+pub fn classify_sqlstate(code: &str) -> SqlStateClass {
+    match code {
+        "23505" => SqlStateClass::AlreadyExists,
+        // 57014 statement timeout; 53300 too many connections; 57P01 admin shutdown (a
+        // restart), 57P02 crash shutdown, 57P03 cannot connect now (review finding 8).
+        "57014" | "53300" | "57P01" | "57P02" | "57P03" => SqlStateClass::Unavailable,
+        // Class 08: connection exceptions.
+        c if c.starts_with("08") => SqlStateClass::Unavailable,
+        _ => SqlStateClass::Other,
+    }
+}
+
 impl From<sqlx::Error> for StoreError {
     fn from(e: sqlx::Error) -> Self {
         match &e {
-            sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_) => {
-                Self::Unavailable(e)
-            }
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
-                Self::AlreadyExists
-            }
-            // 57014: statement timeout (query_canceled); 53300: too many connections.
-            sqlx::Error::Database(db)
-                if matches!(db.code().as_deref(), Some("57014" | "53300" | "57P03")) =>
-            {
-                Self::Unavailable(e)
-            }
+            // A connection that died mid-statement surfaces as I/O or a protocol error.
+            sqlx::Error::PoolTimedOut
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::Io(_)
+            | sqlx::Error::Protocol(_)
+            | sqlx::Error::WorkerCrashed => Self::Unavailable(e),
+            sqlx::Error::Database(db) => match db.code().as_deref().map(classify_sqlstate) {
+                Some(SqlStateClass::AlreadyExists) => Self::AlreadyExists,
+                Some(SqlStateClass::Unavailable) => Self::Unavailable(e),
+                _ => Self::Database(e),
+            },
             _ => Self::Database(e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_database_restart_or_lost_connection_is_retryable() {
+        // 57P01 admin_shutdown (a restart), 57P02 crash_shutdown, class 08 connection errors.
+        for code in [
+            "57P01", "57P02", "57P03", "08000", "08003", "08006", "08001", "08004", "57014",
+            "53300",
+        ] {
+            assert_eq!(
+                classify_sqlstate(code),
+                SqlStateClass::Unavailable,
+                "{code}"
+            );
+        }
+        assert_eq!(classify_sqlstate("23505"), SqlStateClass::AlreadyExists);
+        for code in ["42601", "23503", "22P02"] {
+            assert_eq!(classify_sqlstate(code), SqlStateClass::Other, "{code}");
         }
     }
 }
