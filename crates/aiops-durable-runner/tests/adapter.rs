@@ -276,3 +276,38 @@ async fn a_lost_handler_connection_reaches_the_runner_as_an_unreadable_reply() {
         .unwrap();
     assert_eq!(finished["uncertain_reason"], "connection_lost_after_send");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connect_timeout_reaches_the_runner_as_lost_not_failed() {
+    // Review R1: the runner reads its own connect timeout as lost (it checks is_timeout
+    // first) and reconciles; through the adapter it must not become a 502 (failed, retried
+    // without reconciling). A non-routable address makes connecting time out (5 s).
+    let (collector_url, _) = collector().await;
+    let (_, runner) = handler_and_runner(Duration::ZERO, 200, "reconciling:step:0").await;
+    let file: File = serde_json::from_value(json!({
+        "listen": "127.0.0.1:0",
+        "runner": {"label": "dr-test", "url": runner, "step_timeout_ms": 10_000},
+        "workflow": "publish_article",
+        "routes": [{"route": "publish", "kind": "tool", "upstream": "http://10.255.255.1:9/step"}]
+    }))
+    .unwrap();
+    let config = Config {
+        file,
+        read_key: READ_KEY.into(),
+        endpoint: None,
+        ingest_key: None,
+        release: None,
+    };
+    let _ = collector_url;
+    let a = Adapter::new(config, Client::disabled()).unwrap();
+    let url = serve(router(a)).await;
+    let lost = match runner_call(&url, 1, Duration::from_secs(9)).await {
+        Ok(r) if r.status().is_success() => r.bytes().await.is_err(),
+        Ok(r) => {
+            eprintln!("answered {}", r.status());
+            false
+        }
+        Err(e) => !e.is_timeout() && !e.is_connect(),
+    };
+    assert!(lost, "the runner must reconcile this call, not fail it");
+}

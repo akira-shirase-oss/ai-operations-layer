@@ -238,8 +238,10 @@ impl Adapter {
         }
         let res = match req.send().await {
             Ok(r) => r,
-            Err(e) if e.is_connect() => return (Seen::Unreachable, None),
+            // Timeout first, as the runner checks it: a connect that timed out is lost to
+            // the runner (it reconciles), not a refused connection (review R1).
             Err(e) if e.is_timeout() => return (Seen::NoAnswer, None),
+            Err(e) if e.is_connect() => return (Seen::Unreachable, None),
             Err(_) => return (Seen::ConnectionLost, None),
         };
         let status = res.status();
@@ -328,9 +330,9 @@ fn answer(seen: &Seen, reply: Option<(StatusCode, HeaderValue, Bytes)>) -> Respo
         (Seen::Unreachable | Seen::ReplyOverLimit { .. }, None) => {
             StatusCode::BAD_GATEWAY.into_response()
         }
-        // Past the runner's deadline: it has given up; this answer is never read.
-        (Seen::NoAnswer, None) => StatusCode::GATEWAY_TIMEOUT.into_response(),
-        (Seen::ConnectionLost | Seen::Answered { .. }, None) => {
+        // A timeout is lost to the runner too (it reconciles); a status here would make it
+        // retry without reconciling (review R1).
+        (Seen::NoAnswer | Seen::ConnectionLost | Seen::Answered { .. }, None) => {
             (StatusCode::OK, Body::new(Unreadable)).into_response()
         }
     }
