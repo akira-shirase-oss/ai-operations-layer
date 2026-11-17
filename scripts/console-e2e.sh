@@ -13,7 +13,7 @@ work="$(mktemp -d)"
 command -v brew >/dev/null && export PATH="$(brew --prefix rustup)/bin:$PATH"
 unset CARGO_TARGET_DIR
 # CI provides a PostgreSQL service through DATABASE_URL; locally the compose stack is used.
-if [ -n "${DATABASE_URL:-}" ]; then
+if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null; then
   psql_admin() { psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qtA "$@"; }
   db_base="${DATABASE_URL%/*}"
 else

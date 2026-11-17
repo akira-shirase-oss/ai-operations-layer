@@ -127,27 +127,38 @@ impl Drop for Host {
 }
 
 async fn start_host(collector: &str, key: &str) -> Host {
-    let addr = free_addr();
-    let child = Command::new(env!("CARGO_BIN_EXE_reference-host"))
-        .env("REFHOST_LISTEN", addr.to_string())
-        .env("AIOPS_ENDPOINT", collector)
-        .env("AIOPS_INGEST_KEY", key)
-        .env("REFHOST_ALLOW_FAULTS", "1")
-        .env("REFHOST_MODEL_LATENCY_MS", "4")
-        .env("REFHOST_TIMEOUT_MS", "40")
-        .env("REFHOST_LOG_FILE", "/dev/null")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let base = format!("http://{addr}");
-    let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while client.get(format!("{base}/healthz")).send().await.is_err() {
-        assert!(Instant::now() < deadline, "reference host did not start");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // A port released by free_addr() can be taken by another socket before the child
+    // binds it (parallel tests, a loaded machine): if the child exits, try a fresh port.
+    for _ in 0..5 {
+        let addr = free_addr();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reference-host"))
+            .env("REFHOST_LISTEN", addr.to_string())
+            .env("AIOPS_ENDPOINT", collector)
+            .env("AIOPS_INGEST_KEY", key)
+            .env("REFHOST_ALLOW_FAULTS", "1")
+            .env("REFHOST_MODEL_LATENCY_MS", "4")
+            .env("REFHOST_TIMEOUT_MS", "40")
+            .env("REFHOST_LOG_FILE", "/dev/null")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if client.get(format!("{base}/healthz")).send().await.is_ok() {
+                return Host { child, base };
+            }
+            if child.try_wait().unwrap().is_some() || Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
-    Host { child, base }
+    panic!("reference host did not start on any of five ports");
 }
 
 async fn article(host: &Host, request_id: &str, fault: Option<&str>) -> (u16, Value) {
@@ -513,8 +524,10 @@ async fn duplicated_and_reordered_batches_merge_without_false_chronology(pool: P
 #[sqlx::test(migrations = "../../crates/aiops-store/migrations")]
 async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected(pool: PgPool) {
     let c = collector_on(&pool, free_addr(), |cfg| {
-        cfg.ingest_events_per_sec = 2_000;
-        cfg.ingest_burst_events = 2_000;
+        // Small enough that the second 500-event batch is over the limit at any machine
+        // speed; the pilot's own key has the same bucket and needs ~150 events.
+        cfg.ingest_events_per_sec = 200;
+        cfg.ingest_burst_events = 600;
     })
     .await;
     let k = keys(&c.store).await;
@@ -527,7 +540,10 @@ async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected(po
         let (mut ok, mut limited) = (0u32, 0u32);
         let started = Instant::now();
         let mut seq = 0u64;
-        while started.elapsed() < Duration::from_secs(2) {
+        // Flood for at least 2 s and until the limiter has answered at least once (≤ 20 s).
+        while started.elapsed() < Duration::from_secs(2)
+            || (limited == 0 && started.elapsed() < Duration::from_secs(20))
+        {
             let events: Vec<Value> = (0..500)
                 .map(|_| {
                     seq += 1;
