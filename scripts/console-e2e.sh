@@ -139,7 +139,15 @@ PY
   curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" \
     -H 'content-type: application/json' --data-binary @"$work/big-$b.json"
 done
-sleep 1 # the SDK flushes every 200 ms
+# Wait until the reference host's operations (sent by its SDK) are listed, rather than for a
+# fixed time: on a loaded machine the SDK's flush and the store can take longer than a second.
+for req in e2e-ok e2e-lost; do
+  for _ in $(seq 1 150); do
+    curl -fsS "http://127.0.0.1:$port/v1/projects/pilot/operations?request_id=$req" -H "authorization: Bearer $token" \
+      | grep -q '"finish_outcome"\|"state":"\(succeeded\|uncertain\|failed\)"' && break
+    sleep 0.2
+  done
+done
 
 AIOPS_E2E_BASE="http://127.0.0.1:$port" AIOPS_E2E_TOKEN="$token" AIOPS_E2E_OTHER_TOKEN="$other_token" \
 AIOPS_E2E_OK=e2e-ok AIOPS_E2E_LOST=e2e-lost AIOPS_E2E_E3=e2e-e3 AIOPS_E2E_E2=e2e-e2 AIOPS_E2E_BIG=e2e-big AIOPS_E2E_LONG=e2e-long AIOPS_E2E_XSS=e2e-xss AIOPS_E2E_GAP="$gap_op" \
