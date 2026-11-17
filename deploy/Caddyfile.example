@@ -1,0 +1,19 @@
+# Reverse proxy in front of the collector (docs/OPERATING.md). Caddy terminates TLS
+# (automatic certificates) and forwards to the loopback listener. The collector bounds its
+# own bodies, connections and rates; the proxy adds TLS and a per-client limit.
+aiops.example.com {
+	encode zstd gzip
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy 127.0.0.1:57400 {
+		header_up X-Request-Id {http.request.uuid}
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 15s
+		}
+	}
+	# Hosts post to /v1/ingest; people use /console/; nothing else is served.
+	@other not path /v1/* /console/* /healthz /readyz
+	respond @other 404
+}

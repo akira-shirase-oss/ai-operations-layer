@@ -48,6 +48,9 @@ read-only key.
 - `docs/DECISIONS.md` — D-001..D-028 and the open question OQ8
 - `docs/DRILL.md` — the pre-registered diagnosis drill behind the ship gate
 - `docs/INGEST_CONTRACT.md` — the language-neutral wire contract (schema v1)
+- `docs/OPERATING.md` — install, first run, connecting a host (Durable Runner too),
+  upgrade, backup/restore, troubleshooting; `deploy/` holds the env example, systemd
+  units and a reverse-proxy example, tested by `scripts/production-smoke.sh`
 
 ## Run it locally
 

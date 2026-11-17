@@ -1,0 +1,32 @@
+# systemd unit for the collector (docs/OPERATING.md). Install the binary at
+# /opt/aiops/bin/aiops-server and the configuration at /etc/aiops/aiops-server.env.
+[Unit]
+Description=AI Operations Layer collector
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=aiops
+Group=aiops
+EnvironmentFile=/etc/aiops/aiops-server.env
+ExecStart=/opt/aiops/bin/aiops-server serve
+# SIGTERM drains: the listener closes, requests in flight finish within the 10 s grace.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=8192
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

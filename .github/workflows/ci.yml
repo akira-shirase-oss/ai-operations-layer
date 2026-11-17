@@ -103,3 +103,5 @@ jobs:
       - run: npm ci
       - run: npx -w @aiops/console playwright install --with-deps chromium
       - run: scripts/console-e2e.sh
+      - name: The production path (env-only config, migrate, admin, console, a host, SIGTERM)
+        run: scripts/production-smoke.sh

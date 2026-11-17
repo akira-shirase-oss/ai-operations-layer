@@ -1,0 +1,27 @@
+# systemd unit for the Durable Runner adapter (docs/OPERATING.md, "Connect Durable Runner").
+# It must be up before Durable Runner calls it: order it before the runner's unit.
+[Unit]
+Description=AI Operations Layer adapter for Durable Runner
+Wants=network-online.target
+After=network-online.target
+Before=durable-runner.service
+
+[Service]
+Type=simple
+User=aiops
+Group=aiops
+# AIOPS_DR_ADAPTER_CONFIG, AIOPS_ENDPOINT, AIOPS_INGEST_KEY, DURABLE_READ_KEY
+EnvironmentFile=/etc/aiops/aiops-dr-adapter.env
+ExecStart=/opt/aiops/bin/aiops-dr-adapter
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

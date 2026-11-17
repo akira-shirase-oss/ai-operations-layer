@@ -1,0 +1,10 @@
+{
+  "listen": "127.0.0.1:53400",
+  "runner": { "label": "dr-prod", "url": "http://127.0.0.1:58300", "step_timeout_ms": 20000 },
+  "workflow": "publish_article",
+  "routes": [
+    { "route": "generate", "kind": "model", "upstream": "http://127.0.0.1:8081/generate", "model": "your-model" },
+    { "route": "validate", "kind": "validation", "upstream": "http://127.0.0.1:8081/validate" },
+    { "route": "publish", "kind": "tool", "external_effect": true, "upstream": "http://127.0.0.1:8081/publish" }
+  ]
+}
