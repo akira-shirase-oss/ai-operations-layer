@@ -39,7 +39,7 @@ through public APIs (D-012).
   investigate/control paths, consistency story, layout
 - `docs/ROADMAP.md` — A0 spine → A1 one workflow, investigated → A2 first
   real host → A3 controlled recovery → A4 quality/adoption
-- `docs/DECISIONS.md` — D-001..D-024 and any open question
+- `docs/DECISIONS.md` — D-001..D-025 and any open question
 - `docs/DRILL.md` — the pre-registered diagnosis drill behind the ship gate
 - `docs/INGEST_CONTRACT.md` — the language-neutral wire contract (schema v1)
 

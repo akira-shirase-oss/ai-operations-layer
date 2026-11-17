@@ -267,7 +267,8 @@ pub struct StepView {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GapView {
-    /// `sdk_reported`, `op_seq_hole` or `unknown_tail`.
+    /// `sdk_reported`, `op_seq_hole`, `unknown_tail`, `undeclared_count` (a joined service,
+    /// which schema v1 gives no count) or `expired`.
     pub kind: &'static str,
     pub instance_id: String,
     /// `None` means the size is unknown.
@@ -374,6 +375,8 @@ struct Collected<'a> {
     step_start_time: HashMap<StepId, Timestamp>,
     /// Per instance: the host `op_seq` numbers seen and the declared emitted count.
     per_instance: BTreeMap<InstanceId, (BTreeSet<u32>, Option<u32>)>,
+    /// Instances that sent an `operation.started`.
+    starters: BTreeSet<InstanceId>,
     gaps: Vec<GapView>,
     coverage: Coverage,
 }
@@ -386,6 +389,7 @@ fn collect(events: &[StoredEvent]) -> Collected<'_> {
         steps: HashMap::new(),
         step_start_time: HashMap::new(),
         per_instance: BTreeMap::new(),
+        starters: BTreeSet::new(),
         gaps: Vec::new(),
         coverage: Coverage::default(),
     };
@@ -394,6 +398,7 @@ fn collect(events: &[StoredEvent]) -> Collected<'_> {
         match &e.body {
             EventBody::OperationStarted(m) => {
                 c.meta.get_or_insert(m);
+                c.starters.insert(stored.instance_id);
             }
             EventBody::OperationFinished(f) => {
                 c.finishes.push((stored, f.outcome, f.events_emitted));
@@ -482,9 +487,17 @@ fn measure_loss(c: &mut Collected<'_>) {
             c.gaps.push(hole(*instance, a, b));
         }
         let tail_unknown = emitted.is_none();
+        // A service joined with `continue_operation` neither starts nor finishes the
+        // operation, so schema v1 has no count for it (review N7): say so, rather than
+        // "no finish observed", once another source declared the finish.
+        let joined = !c.starters.contains(instance) && !c.finishes.is_empty();
         if tail_unknown {
             c.gaps.push(GapView {
-                kind: "unknown_tail",
+                kind: if joined {
+                    "undeclared_count"
+                } else {
+                    "unknown_tail"
+                },
                 instance_id: instance.to_string(),
                 count: None,
                 reason: None,

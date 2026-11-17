@@ -26,6 +26,8 @@
 		sdk_reported: 'The SDK reported dropping events',
 		op_seq_hole: 'Events missing (proven by sequence numbers)',
 		unknown_tail: 'Events after this point may be missing (no finish observed)',
+		undeclared_count:
+			'A joined service sent these; it does not declare how many it sent (schema v1), so whether any are missing is unknown',
 		expired: 'Deleted by retention (received before the cutoff)'
 	};
 	// The outcome has its own fixed column, wide enough for the longest badge ("outcome

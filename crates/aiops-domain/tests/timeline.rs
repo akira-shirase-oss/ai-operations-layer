@@ -548,3 +548,27 @@ fn n6_events_proven_missing_may_hide_an_external_effect() {
     );
     assert!(t.flags.missing_events_may_hide_effects);
 }
+
+// Review N7: a service joined with `continue_operation` never starts or finishes the
+// operation, so schema v1 gives it no count. Its tail is labelled for what it is, a count
+// the service does not declare, not as an operation whose finish was never observed.
+#[test]
+fn n7_a_joined_services_tail_is_an_undeclared_count_not_a_missing_finish() {
+    let mut up = B::new();
+    let mut joined = B::new();
+    joined.instance = instance(2);
+    let events = vec![
+        up.ev(0, 5, started()),
+        joined.ev(5, 5, step_start(7, StepKind::Tool, "index", 1, false)),
+        joined.ev(9, 5, step_finish(7, 1, Outcome::Succeeded, None)),
+        up.ev(20, 5, finished(Outcome::Succeeded, 2)),
+    ];
+    let t = assemble(op(), events, &[], &Limits::default(), false, None);
+    assert_eq!(t.status.state, "succeeded");
+    let kinds: Vec<&str> = t.gaps.iter().map(|g| g.kind).collect();
+    assert_eq!(kinds, ["undeclared_count"], "{:?}", t.gaps);
+    assert!(
+        t.coverage.missing_unknown,
+        "still unknown: v1 has no count to check"
+    );
+}

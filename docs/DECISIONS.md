@@ -252,3 +252,13 @@ named decision when the relevant milestone starts.
   public surfaces (handler request headers, `GET /jobs/{id}` fields) carry
   the operation ID across the boundary. Answered at A2 start, from that
   repository's then-current public contract.
+- **D-025 — Joined services' completeness waits for schema v2.** A service
+  that joins an operation with `continue_operation` never sends
+  `operation.started` or `operation.finished`, so schema v1 carries no count
+  for its events and its tail can never be proven complete. Until v2, the
+  timeline labels that tail `undeclared_count` ("does not declare how many it
+  sent") instead of "no finish observed", and still counts it as unknown.
+  Schema v2 adds a per-instance contribution count (sent when the continued
+  handle ends) so a joined service can close its tail. Trade-off: multi-service
+  operations keep one unknown until v2 — accepted over a guess (review N7,
+  2026-11-17).
