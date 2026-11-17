@@ -69,6 +69,9 @@ pub struct Config {
     /// Events held while the collector is slow or down. Full → drop newest, counted.
     pub queue_capacity: usize,
     pub batch_max_events: usize,
+    /// A batch's body at most (the collector refuses more than 1 MiB). Events are also cut
+    /// to the collector's 8 KiB per-event cap before sending.
+    pub batch_max_bytes: usize,
     pub flush_interval: Duration,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
@@ -112,6 +115,7 @@ impl Config {
             deployment: None,
             queue_capacity: 8_192,
             batch_max_events: 500,
+            batch_max_bytes: 900 * 1024,
             flush_interval: Duration::from_millis(200),
             connect_timeout: Duration::from_millis(500),
             request_timeout: Duration::from_secs(2),
@@ -384,6 +388,9 @@ impl Client {
             return Err(SdkError::Config(
                 "queue_capacity ≥ 1 and 1 ≤ batch_max_events ≤ 500",
             ));
+        }
+        if !(16 * 1024..=1024 * 1024).contains(&config.batch_max_bytes) {
+            return Err(SdkError::Config("16 KiB ≤ batch_max_bytes ≤ 1 MiB"));
         }
         if !config.ingest_key.starts_with("aiops_ik_") {
             return Err(SdkError::Config("ingest_key must be an aiops_ik_ key"));

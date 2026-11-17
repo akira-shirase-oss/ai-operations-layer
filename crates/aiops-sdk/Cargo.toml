@@ -13,6 +13,7 @@ publish.workspace = true
 aiops-domain.workspace = true
 getrandom.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

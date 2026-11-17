@@ -62,9 +62,15 @@ async fn ingest(State(fake): State<Arc<Fake>>, body: String) -> (StatusCode, Str
 }
 
 async fn fake_collector() -> (String, Arc<Fake>) {
+    fake_collector_with_limit(2 * 1024 * 1024).await
+}
+
+/// A fake with a real request-body cap (the collector's is 1 MiB): over it, 413.
+async fn fake_collector_with_limit(max_body: usize) -> (String, Arc<Fake>) {
     let fake = Arc::new(Fake::default());
     let app = Router::new()
         .route("/v1/ingest", post(ingest))
+        .layer(axum::extract::DefaultBodyLimit::max(max_body))
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -392,5 +398,96 @@ async fn a_continued_operation_contributes_steps_but_never_its_own_start_or_fini
     assert_eq!(
         events[0]["parent_step_id"], "00f067aa0ba902b7",
         "steps hang under the caller's span"
+    );
+}
+
+// Review finding 6: batches must fit the collector's body cap; a 413 must not lose a batch.
+const ALLOWED: [&str; 15] = [
+    "business_key",
+    "cache.hit",
+    "content.kind",
+    "content.length",
+    "error.type",
+    "http.method",
+    "http.route",
+    "http.status_code",
+    "provider",
+    "provider.region",
+    "queue.name",
+    "retry.reason",
+    "sampled",
+    "tool.name",
+    "validation.rule",
+];
+
+fn big_operation(client: &Client, n: usize) {
+    let mut b = client
+        .operation("publish_article")
+        .request_id(&format!("big-{n}"));
+    for k in ALLOWED {
+        b = b.attribute(k, "v".repeat(250).as_str());
+    }
+    let op = b.start();
+    op.succeed();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_events_are_batched_under_the_collectors_body_cap() {
+    let (endpoint, fake) = fake_collector_with_limit(1024 * 1024).await;
+    let client = Client::start(&config(&endpoint)).unwrap();
+    for n in 0..400 {
+        big_operation(&client, n);
+    }
+    let s = client.shutdown(Duration::from_secs(10)).await;
+    assert_eq!(s.emitted, 800);
+    assert_eq!(s.dropped(), 0, "{s:?}");
+    assert_eq!(s.accepted, 800, "{s:?}");
+    let _ = fake;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_413_splits_the_batch_and_resends_instead_of_dropping_it() {
+    // The collector's cap is far below the SDK's batch size.
+    let (endpoint, fake) = fake_collector_with_limit(64 * 1024).await;
+    let client = Client::start(&config(&endpoint)).unwrap();
+    for n in 0..100 {
+        big_operation(&client, n);
+    }
+    let s = client.shutdown(Duration::from_secs(10)).await;
+    assert_eq!(s.dropped(), 0, "{s:?}");
+    assert_eq!(s.accepted, 200, "{s:?}");
+    // ~450 KB of events cannot pass a 64 KiB cap in fewer than 8 accepted batches: the
+    // SDK's 900 KiB batch was refused 413 and split until each half fitted.
+    assert!(s.batches_sent >= 8, "{s:?}");
+    assert_eq!(s.batches_failed, 0, "{s:?}");
+    assert_eq!(fake.batches.lock().unwrap().len() as u64, s.batches_sent);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_event_over_8_kib_is_cut_in_the_sdk_and_marked() {
+    let (endpoint, fake) = fake_collector().await;
+    let mut cfg = config(&endpoint);
+    cfg.opt_in_attributes = (0..32).map(|i| format!("custom.k{i:02}")).collect();
+    let client = Client::start(&cfg).unwrap();
+    let mut b = client.operation("x");
+    for i in 0..32 {
+        b = b.attribute(&format!("custom.k{i:02}"), "w".repeat(256).as_str());
+    }
+    b.start().succeed();
+    client.shutdown(Duration::from_secs(5)).await;
+    let batches = fake.batches.lock().unwrap();
+    let started = batches
+        .iter()
+        .flat_map(|b| b["events"].as_array().cloned().unwrap_or_default())
+        .find(|e| e["type"] == "operation.started")
+        .unwrap();
+    assert!(
+        started.to_string().len() <= 8 * 1024,
+        "{} bytes",
+        started.to_string().len()
+    );
+    assert!(
+        started["truncated"].as_u64().unwrap() >= 1,
+        "the cut is marked"
     );
 }

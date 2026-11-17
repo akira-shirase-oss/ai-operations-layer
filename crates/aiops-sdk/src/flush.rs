@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use aiops_domain::event::{Event, EventBody, GapReason, GapReport};
-use aiops_domain::wire::{IngestResponse, OutgoingBatch, SCHEMA_VERSION, WireSource, WireStats};
+use aiops_domain::wire::{IngestResponse, SCHEMA_VERSION, WireSource, WireStats};
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use tokio::sync::mpsc;
@@ -30,6 +30,7 @@ pub(crate) struct Flusher {
     flush_interval: Duration,
     max_attempts: u32,
     retry_budget: Duration,
+    batch_max_bytes: usize,
     pending_reports: Vec<Event>,
 }
 
@@ -72,6 +73,7 @@ impl Flusher {
             flush_interval: config.flush_interval,
             max_attempts: config.max_send_attempts.max(1),
             retry_budget: config.retry_budget,
+            batch_max_bytes: config.batch_max_bytes,
             pending_reports: Vec::new(),
         }
     }
@@ -178,6 +180,49 @@ impl Flusher {
         }
     }
 
+    /// One event's JSON, under the per-event cap: an event over it loses its attributes
+    /// and is marked `truncated` (so the collector never refuses it for size).
+    fn encode(&self, e: &Event) -> Option<Vec<u8>> {
+        let json = serde_json::to_vec(&e.to_wire()).ok()?;
+        if json.len() <= self.inner.limits.max_event_bytes {
+            return Some(json);
+        }
+        let mut slim = e.clone();
+        slim.attributes.clear();
+        if slim.truncated == 0 {
+            add(&self.inner.counters.truncated_events, 1);
+        }
+        slim.truncated += 1;
+        let json = serde_json::to_vec(&slim.to_wire()).ok()?;
+        (json.len() <= self.inner.limits.max_event_bytes).then_some(json)
+    }
+
+    /// The batch envelope around already-encoded events.
+    fn envelope(&self, items: &[Encoded]) -> Option<Vec<u8>> {
+        #[derive(serde::Serialize)]
+        struct Head<'a> {
+            schema_version: u16,
+            source: &'a WireSource,
+            stats: WireStats,
+        }
+        let mut body = serde_json::to_vec(&Head {
+            schema_version: SCHEMA_VERSION,
+            source: &self.source,
+            stats: self.stats(),
+        })
+        .ok()?;
+        body.pop(); // the closing brace
+        body.extend_from_slice(b",\"events\":[");
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                body.push(b',');
+            }
+            body.extend_from_slice(&item.json);
+        }
+        body.extend_from_slice(b"]}");
+        Some(body)
+    }
+
     async fn flush(&mut self, buf: &mut Vec<Event>) {
         self.collect_gap_reports();
         let reports = self
@@ -193,63 +238,105 @@ impl Flusher {
             c.last_queue_age_us.store(age, Ordering::Relaxed);
             c.max_queue_age_us.fetch_max(age, Ordering::Relaxed);
         }
-        let wire: Vec<_> = self.pending_reports[..reports]
-            .iter()
-            .chain(buf.iter())
-            .map(Event::to_wire)
-            .collect();
-        let Ok(body) = serde_json::to_vec(&OutgoingBatch {
-            schema_version: SCHEMA_VERSION,
-            source: &self.source,
-            stats: self.stats(),
-            events: &wire,
-        }) else {
-            self.dropped(buf, GapReason::Rejected);
-            return;
-        };
-        let c = &self.inner.counters;
-        self.inner
-            .in_flight
-            .store(buf.len() as u64, Ordering::Relaxed);
-        let outcome = self.send(body).await;
-        self.inner.in_flight.store(0, Ordering::Relaxed);
-        match outcome {
-            Sent::Accepted(answer) => {
-                add(&c.batches_sent, 1);
-                add(&c.gap_reports_sent, reports as u64);
-                if let Some(a) = answer {
-                    add(&c.accepted, u64::from(a.accepted));
-                    add(&c.duplicates, u64::from(a.duplicates));
-                    add(&c.refused, a.refused.len() as u64);
-                }
-                self.pending_reports.drain(..reports);
-                buf.clear();
-            }
-            Sent::Rejected(status) => {
-                add(&c.batches_failed, 1);
-                tracing::warn!(
-                    status = status.as_u16(),
-                    "aiops collector refused a batch; dropping it"
-                );
-                self.dropped(buf, GapReason::Rejected);
-            }
-            Sent::Failed => {
-                add(&c.batches_failed, 1);
-                self.dropped(buf, GapReason::SendFailed);
+        // Encode every event once; an event that cannot fit even without attributes is
+        // lost as refused (it cannot happen within the schema's field caps).
+        let mut items = Vec::with_capacity(reports + buf.len());
+        for e in &self.pending_reports[..reports] {
+            if let Some(json) = self.encode(e) {
+                items.push(Encoded {
+                    json,
+                    event: None,
+                    report: Some(e.event_id),
+                });
             }
         }
+        let mut unencodable = Vec::new();
+        for e in buf.drain(..) {
+            match self.encode(&e) {
+                Some(json) => items.push(Encoded {
+                    json,
+                    event: Some(e),
+                    report: None,
+                }),
+                None => unencodable.push(e),
+            }
+        }
+        self.dropped(unencodable, GapReason::Rejected);
+
+        // Pack by bytes as well as by count (review finding 6), then send each batch; a
+        // 413 splits the batch and resends the halves instead of dropping it.
+        let mut stack: Vec<Vec<Encoded>> = pack(items, self.batch_max, self.batch_max_bytes);
+        stack.reverse();
+        let mut delivered_reports = std::collections::HashSet::new();
+        let c = &self.inner.counters;
+        while let Some(chunk) = stack.pop() {
+            let Some(body) = self.envelope(&chunk) else {
+                self.lost(chunk, GapReason::Rejected);
+                continue;
+            };
+            let events_in_chunk = chunk.iter().filter(|i| i.event.is_some()).count() as u64;
+            self.inner
+                .in_flight
+                .store(events_in_chunk, Ordering::Relaxed);
+            let outcome = self.send(body).await;
+            self.inner.in_flight.store(0, Ordering::Relaxed);
+            match outcome {
+                Sent::Accepted(answer) => {
+                    add(&c.batches_sent, 1);
+                    if let Some(a) = answer {
+                        add(&c.accepted, u64::from(a.accepted));
+                        add(&c.duplicates, u64::from(a.duplicates));
+                        add(&c.refused, a.refused.len() as u64);
+                    }
+                    for item in chunk {
+                        if let Some(id) = item.report {
+                            delivered_reports.insert(id);
+                        }
+                    }
+                }
+                Sent::Rejected(StatusCode::PAYLOAD_TOO_LARGE) if chunk.len() > 1 => {
+                    let mut first = chunk;
+                    let second = first.split_off(first.len() / 2);
+                    stack.push(second);
+                    stack.push(first);
+                }
+                Sent::Rejected(status) => {
+                    add(&c.batches_failed, 1);
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        "aiops collector refused a batch; dropping it"
+                    );
+                    self.lost(chunk, GapReason::Rejected);
+                }
+                Sent::Failed => {
+                    add(&c.batches_failed, 1);
+                    self.lost(chunk, GapReason::SendFailed);
+                }
+            }
+        }
+        add(&c.gap_reports_sent, delivered_reports.len() as u64);
+        self.pending_reports
+            .retain(|r| !delivered_reports.contains(&r.event_id));
     }
 
-    /// Counts a lost batch and records its drops per operation (reports stay pending).
-    fn dropped(&self, buf: &mut Vec<Event>, reason: GapReason) {
+    /// The events of a lost batch (its gap reports stay pending and are retried).
+    fn lost(&self, chunk: Vec<Encoded>, reason: GapReason) {
+        self.dropped(chunk.into_iter().filter_map(|i| i.event).collect(), reason);
+    }
+
+    /// Counts lost events and records their drops per operation.
+    fn dropped(&self, events: Vec<Event>, reason: GapReason) {
+        if events.is_empty() {
+            return;
+        }
         let c = &self.inner.counters;
         let counter = match reason {
             GapReason::Rejected => &c.dropped_rejected,
             GapReason::Shutdown => &c.dropped_shutdown,
             _ => &c.dropped_send_failed,
         };
-        add(counter, buf.len() as u64);
-        for e in buf.drain(..) {
+        add(counter, events.len() as u64);
+        for e in events {
             self.inner
                 .record_gap(e.operation_id, reason, e.event_time, 1);
         }
@@ -309,4 +396,35 @@ impl Flusher {
             tokio::time::sleep(wait).await;
         }
     }
+}
+
+/// One encoded event: a host event (lost with its batch) or a pending gap report (kept and
+/// retried until a batch carrying it is accepted).
+struct Encoded {
+    json: Vec<u8>,
+    event: Option<Event>,
+    report: Option<aiops_domain::EventId>,
+}
+
+/// Envelope bytes besides the events (source, stats, keys): a generous allowance.
+const ENVELOPE_ALLOWANCE: usize = 2 * 1024;
+
+/// Splits encoded events into batches of at most `max_events` and `max_bytes`.
+fn pack(items: Vec<Encoded>, max_events: usize, max_bytes: usize) -> Vec<Vec<Encoded>> {
+    let mut out = Vec::new();
+    let mut current = Vec::new();
+    let mut bytes = ENVELOPE_ALLOWANCE;
+    for item in items {
+        let size = item.json.len() + 1;
+        if !current.is_empty() && (current.len() >= max_events || bytes + size > max_bytes) {
+            out.push(std::mem::take(&mut current));
+            bytes = ENVELOPE_ALLOWANCE;
+        }
+        bytes += size;
+        current.push(item);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
