@@ -166,6 +166,9 @@ pub struct OperationSummary {
     /// Some raw events were received before the retention cutoff and may be deleted; the
     /// summary still stands.
     pub detail_expired: bool,
+    /// Events came from several source instances: completeness is per source (see the
+    /// timeline), so `events_missing` is not given.
+    pub multi_source: bool,
 }
 
 #[derive(Serialize)]
@@ -241,13 +244,17 @@ pub async fn list_operations(
             last_received_at: r.last_received_at,
             events_received: r.host_events,
             events_emitted: r.events_emitted,
-            events_missing: r.events_emitted.map(|e| (e - r.host_events).max(0)),
+            events_missing: r
+                .events_emitted
+                .filter(|_| !r.multi_source)
+                .map(|e| (e - r.host_events).max(0)),
             reported_dropped: r.reported_dropped,
             failed_attempts: r.failed_attempts,
             uncertain_attempts: r.uncertain_attempts,
             cost_estimate_micros: r.cost_estimate_micros,
             cost_currency: r.cost_currency.clone(),
             detail_expired: cutoff.is_some_and(|c| r.first_received_at < c),
+            multi_source: r.multi_source,
         })
         .collect();
     Ok(Json(OperationList { operations, next }))

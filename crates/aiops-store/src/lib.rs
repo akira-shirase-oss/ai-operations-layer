@@ -249,6 +249,8 @@ pub struct OperationRow {
     pub finish_detail: Option<String>,
     /// Hosts declared different outcomes.
     pub finish_conflict: bool,
+    /// Events came from more than one source instance.
+    pub multi_source: bool,
     pub events_emitted: Option<i32>,
     pub failed_attempts: i32,
     pub uncertain_attempts: i32,
@@ -589,7 +591,7 @@ impl Store {
             "SELECT operation_id, name, request_id, release, first_event_time, last_event_time, last_received_at,
                     host_events, gap_reports, reported_dropped, finish_outcome, finish_detail, events_emitted,
                     failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency, finish_conflict,
-                    first_received_at
+                    first_received_at, multi_source
              FROM operations
              WHERE project_id = $1
                AND ($2::timestamptz IS NULL OR (first_event_time, operation_id) < ($2, $3::uuid))
@@ -630,6 +632,7 @@ impl Store {
                     cost_currency: r.get(16),
                     finish_conflict: r.get(17),
                     first_received_at: from_odt(r.get(18)),
+                    multi_source: r.get(19),
                 })
             })
             .collect()
@@ -1116,9 +1119,9 @@ async fn upsert_summaries(
                 first_event_time, last_event_time, first_received_at, last_received_at,
                 host_events, gap_reports, reported_dropped, finish_outcome, finish_detail,
                 events_emitted, failed_attempts, uncertain_attempts, cost_estimate_micros, cost_currency,
-                finish_conflict)
+                finish_conflict, first_instance_id)
             SELECT $1, d.op, d.name, d.req, d.rel, d.tmin, d.tmax, $2, $2, d.host, d.gaps, d.dropped,
-                   d.fin, d.detail, d.emitted, d.failed, d.unc, d.cost, d.cur, d.conflict
+                   d.fin, d.detail, d.emitted, d.failed, d.unc, d.cost, d.cur, d.conflict, $19
             FROM UNNEST($3::uuid[], $4::text[], $5::text[], $6::text[], $7::timestamptz[], $8::timestamptz[],
                         $9::int4[], $10::int4[], $11::int8[], $12::text[], $13::text[], $14::int4[],
                         $15::int4[], $16::int4[], $17::int8[], $18::text[], $32::bool[])
@@ -1135,6 +1138,8 @@ async fn upsert_summaries(
                 host_events = o.host_events + EXCLUDED.host_events,
                 gap_reports = o.gap_reports + EXCLUDED.gap_reports,
                 reported_dropped = o.reported_dropped + EXCLUDED.reported_dropped,
+                multi_source = o.multi_source OR o.first_instance_id IS DISTINCT FROM EXCLUDED.first_instance_id,
+                first_instance_id = COALESCE(o.first_instance_id, EXCLUDED.first_instance_id),
                 -- Finishes that disagree make the operation conflicting (SET reads the old row).
                 finish_conflict = o.finish_conflict OR EXCLUDED.finish_conflict OR (
                     o.finish_outcome IS NOT NULL AND EXCLUDED.finish_outcome IS NOT NULL

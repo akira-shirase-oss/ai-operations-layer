@@ -794,3 +794,42 @@ async fn collector_wide_counters_need_the_admin_scope(pool: PgPool) {
         3
     );
 }
+
+// Review finding 15: an operation with events from several sources has no single emitted
+// count, so the list must not claim "nothing missing" from one source's count.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn the_list_does_not_claim_completeness_for_an_operation_with_several_sources(pool: PgPool) {
+    let e = env(pool).await;
+    send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    // A downstream service (its own instance, the same key) adds two steps to the operation.
+    let mut downstream = journey(1, 500);
+    let mut a = downstream.remove(1);
+    let mut b = downstream.remove(1);
+    for (w, n) in [(&mut a, 1u32), (&mut b, 2u32)] {
+        w.event_id = format!("dd{n:030x}");
+        w.seq = u64::from(n);
+        w.op_seq = n;
+        w.step_id = Some("3333333333333333".into());
+    }
+    send(
+        &e.app,
+        post_ingest(
+            &e.ingest_key,
+            batch_from("33333333333333333333333333333333", &[a, b]),
+        ),
+    )
+    .await;
+    let list = send(
+        &e.app,
+        get("/v1/projects/pilot/operations?request_id=req-1", &e.reader),
+    )
+    .await;
+    let row = &list.body["operations"][0];
+    assert_eq!(row["events_received"], 10);
+    assert_eq!(row["multi_source"], true, "{row}");
+    assert_eq!(
+        row["events_missing"],
+        serde_json::Value::Null,
+        "one source's count cannot speak for two: {row}"
+    );
+}

@@ -182,6 +182,7 @@ export type OperationSummary = {
 	cost_estimate_micros: number;
 	cost_currency: string | null;
 	detail_expired: boolean;
+	multi_source: boolean;
 };
 
 export type OperationList = {

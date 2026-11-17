@@ -80,7 +80,8 @@
 						<TableCell>
 							{op.events_received}{#if op.events_emitted !== null}/{op.events_emitted}{/if}
 							{#if op.events_missing}<Flag>{op.events_missing} missing</Flag>{/if}
-							{#if op.events_emitted === null}<Flag>total unknown</Flag>{/if}
+							{#if op.multi_source}<Flag>several sources: see timeline</Flag>
+							{:else if op.events_emitted === null}<Flag>total unknown</Flag>{/if}
 							{#if op.reported_dropped > 0}<Flag>{op.reported_dropped} dropped by SDK</Flag>{/if}
 							{#if op.detail_expired}<Flag>detail expired</Flag>{/if}
 						</TableCell>
