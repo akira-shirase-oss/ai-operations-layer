@@ -128,7 +128,10 @@ are listed at the end, not guessed.
   closed (503). Unauthenticated requests (401) are counted, not audited
   one by one, so a flood cannot become an audit-table write flood. Keys
   and tokens are minted by `aiops-server admin` with direct database
-  access; there is no admin HTTP surface. Trade-off: no SSO/user accounts
+  access; there is no admin HTTP surface. Revocation takes effect within the
+  30 s credential cache lifetime, or up to 5½ minutes while a flood has
+  spent the lookup budget (a recently valid credential is then served from
+  the cache rather than locked out; `docs/INGEST_CONTRACT.md`). Trade-off: no SSO/user accounts
   yet — accepted until the console has more than one operator.
 - **D-016 — Retention values (answers OQ5).** Raw events: 14 days by
   receive time. Operation summaries and source counters (including drop

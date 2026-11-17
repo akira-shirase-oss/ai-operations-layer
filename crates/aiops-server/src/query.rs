@@ -27,13 +27,9 @@ pub async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<Actor, 
         return Err(ApiError::Unauthenticated);
     };
     let digest = hash(secret);
-    let found = if let Some(cached) = app.tokens.get(&digest) {
-        cached
-    } else {
-        let found = app.store.find_token(&digest).await?;
-        app.tokens.put(digest, found.clone());
-        found
-    };
+    let found = app
+        .resolve(&app.tokens, digest, || app.store.find_token(&digest))
+        .await?;
     let now = app.now();
     match found {
         Some(token) if !token.revoked && token.expires_at > now => {

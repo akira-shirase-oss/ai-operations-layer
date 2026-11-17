@@ -511,12 +511,12 @@ async fn a_saturated_query_pool_does_not_block_ingest_or_audit(pool: PgPool) {
     // A slow query: another session holds a lock the query path needs, so the query
     // pool's only connection waits (up to its statement timeout).
     let mut locker = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE api_tokens IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE projects IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *locker)
         .await
         .unwrap();
     let blocked = store.clone();
-    let slow = tokio::spawn(async move { blocked.find_token(&[1; 32]).await });
+    let slow = tokio::spawn(async move { blocked.projects_by_ids(&[project]).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let src = source(1);
@@ -553,10 +553,12 @@ async fn a_saturated_query_pool_does_not_block_ingest_or_audit(pool: PgPool) {
         elapsed < Duration::from_secs(1),
         "ingest and audit waited {elapsed:?} on the query path"
     );
+    // Credential lookups have their own pool: unaffected by a saturated query pool.
+    assert!(store.find_token(&[1; 32]).await.unwrap().is_none());
     // The query pool really was saturated: a second query cannot get a connection.
     assert!(store.ping().await.unwrap_err().is_retryable());
     locker.rollback().await.unwrap();
-    assert!(slow.await.unwrap().unwrap().is_none());
+    assert_eq!(slow.await.unwrap().unwrap().len(), 1);
 }
 
 // Review finding 3: an event ID repeated inside one batch.

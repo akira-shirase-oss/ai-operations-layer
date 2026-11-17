@@ -1,7 +1,7 @@
 //! Credentials (D-015). Ingest keys (`aiops_ik_…`) and API tokens (`aiops_tk_…`) are 32
 //! random bytes, base64url; the server only ever stores and compares their SHA-256.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -42,15 +42,69 @@ pub fn bearer<'a>(headers: &'a HeaderMap, prefix: &str) -> Option<&'a str> {
     .then_some(secret)
 }
 
-type Entries<V> = HashMap<[u8; 32], (Option<V>, Instant)>;
+/// What the cache knows about a credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cached<V> {
+    /// Looked up within the TTL: `Some` is valid, `None` is unknown or revoked.
+    Fresh(Option<V>),
+    /// Valid when last looked up, past the TTL but inside the stale window: usable when
+    /// the lookup budget is exhausted, so a flood of unknown keys cannot lock a known host
+    /// out (revocation then takes effect within the stale window).
+    Stale(V),
+    Miss,
+}
 
-/// A bounded, time-limited cache of credential lookups (positive and negative), so the
-/// hot path does not query PostgreSQL per request. Revocation takes effect within `ttl`.
+/// A bounded map that evicts its oldest entries first, never everything at once.
+struct Fifo<V> {
+    capacity: usize,
+    map: HashMap<[u8; 32], (V, Instant)>,
+    order: VecDeque<([u8; 32], Instant)>,
+}
+
+impl<V> Fifo<V> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, key: [u8; 32], value: V) {
+        let now = Instant::now();
+        self.map.insert(key, (value, now));
+        self.order.push_back((key, now));
+        while self.map.len() > self.capacity {
+            let Some((old, at)) = self.order.pop_front() else {
+                break;
+            };
+            // Skip order entries superseded by a later insert of the same key.
+            if self.map.get(&old).is_some_and(|(_, t)| *t == at) {
+                self.map.remove(&old);
+            }
+        }
+        // Keep the order queue bounded too (superseded entries accumulate).
+        if self.order.len() > self.capacity * 2 {
+            let map = &self.map;
+            self.order
+                .retain(|(k, t)| map.get(k).is_some_and(|(_, at)| at == t));
+        }
+    }
+
+    fn remove(&mut self, key: &[u8; 32]) {
+        self.map.remove(key);
+    }
+}
+
+/// A bounded, time-limited cache of credential lookups. Valid and invalid credentials are
+/// kept apart, so unknown keys (which an attacker can mint at will) can only evict other
+/// unknown keys, never a valid one.
 pub struct CredentialCache<V> {
     ttl: Duration,
     negative_ttl: Duration,
-    capacity: usize,
-    entries: Mutex<Entries<V>>,
+    stale_for: Duration,
+    positive: Mutex<Fifo<V>>,
+    negative: Mutex<Fifo<()>>,
 }
 
 impl<V: Clone> CredentialCache<V> {
@@ -58,29 +112,48 @@ impl<V: Clone> CredentialCache<V> {
         Self {
             ttl,
             negative_ttl,
-            capacity,
-            entries: Mutex::new(HashMap::new()),
+            stale_for: Duration::from_secs(300),
+            positive: Mutex::new(Fifo::new(capacity)),
+            negative: Mutex::new(Fifo::new(capacity)),
         }
     }
 
-    /// `Some(found)` when cached and fresh.
-    pub fn get(&self, key: &[u8; 32]) -> Option<Option<V>> {
-        let entries = self.entries.lock().ok()?;
-        let (value, at) = entries.get(key)?;
-        let ttl = if value.is_some() {
-            self.ttl
-        } else {
-            self.negative_ttl
-        };
-        (at.elapsed() < ttl).then(|| value.clone())
+    pub fn get(&self, key: &[u8; 32]) -> Cached<V> {
+        if let Ok(pos) = self.positive.lock()
+            && let Some((v, at)) = pos.map.get(key)
+        {
+            let age = at.elapsed();
+            if age < self.ttl {
+                return Cached::Fresh(Some(v.clone()));
+            }
+            if age < self.ttl + self.stale_for {
+                return Cached::Stale(v.clone());
+            }
+        }
+        if let Ok(neg) = self.negative.lock()
+            && let Some(((), at)) = neg.map.get(key)
+            && at.elapsed() < self.negative_ttl
+        {
+            return Cached::Fresh(None);
+        }
+        Cached::Miss
     }
 
     pub fn put(&self, key: [u8; 32], value: Option<V>) {
-        if let Ok(mut entries) = self.entries.lock() {
-            if entries.len() >= self.capacity {
-                entries.clear(); // bounded: a flood of unknown keys cannot grow it
+        if let Some(v) = value {
+            if let Ok(mut neg) = self.negative.lock() {
+                neg.remove(&key);
             }
-            entries.insert(key, (value, Instant::now()));
+            if let Ok(mut pos) = self.positive.lock() {
+                pos.insert(key, v);
+            }
+        } else {
+            if let Ok(mut pos) = self.positive.lock() {
+                pos.remove(&key);
+            }
+            if let Ok(mut neg) = self.negative.lock() {
+                neg.insert(key, ());
+            }
         }
     }
 }
@@ -140,13 +213,31 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_is_bounded() {
+    fn unknown_keys_never_evict_valid_ones_and_eviction_is_oldest_first() {
         let cache: CredentialCache<u8> =
             CredentialCache::new(Duration::from_secs(30), Duration::from_secs(5), 2);
         cache.put([1; 32], Some(1));
-        cache.put([2; 32], None);
+        for n in 10..200u8 {
+            cache.put([n; 32], None); // a flood of unknown keys
+        }
+        assert_eq!(
+            cache.get(&[1; 32]),
+            Cached::Fresh(Some(1)),
+            "a valid key survives the flood"
+        );
+        assert_eq!(cache.get(&[199; 32]), Cached::Fresh(None));
+        assert_eq!(
+            cache.get(&[10; 32]),
+            Cached::Miss,
+            "the oldest unknown key was evicted"
+        );
+        cache.put([2; 32], Some(2));
         cache.put([3; 32], Some(3));
-        assert_eq!(cache.get(&[3; 32]), Some(Some(3)));
-        assert_eq!(cache.get(&[1; 32]), None, "cleared when full");
+        assert_eq!(
+            cache.get(&[1; 32]),
+            Cached::Miss,
+            "oldest valid entry evicted first"
+        );
+        assert_eq!(cache.get(&[3; 32]), Cached::Fresh(Some(3)));
     }
 }

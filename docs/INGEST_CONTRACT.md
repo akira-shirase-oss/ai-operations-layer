@@ -20,6 +20,16 @@ Content-Type: application/json
 The ingest key names the project; it can only call this route. Keys are
 server-side secrets: never ship one to a browser.
 
+**Authentication happens before the request takes ingest capacity.** A key
+is checked for shape, then against the collector's cache; only a cache miss
+queries the database, and at most 4 such lookups run at once (on their own database connections) — beyond that
+an unknown key is answered `503 overloaded` without a query, so a flood of
+made-up keys cannot take a known host's capacity. Valid and invalid keys
+are cached apart and evicted oldest first. **Revocation takes effect within
+30 s** (the cache's lifetime for a valid key); while the lookup budget is
+exhausted, a key that was valid in the last 5 minutes is still served from
+the cache, so revocation can then take up to 5 minutes 30 seconds.
+
 ```json
 {
   "schema_version": 1,
@@ -87,7 +97,8 @@ Per type, only the listed fields may appear (anything else is
 |---|---|---|
 | Body | 1 MiB | 413 `payload_too_large` |
 | Events per batch | 500 | 413 `too_many_events` |
-| Ingest requests in flight (whole collector) | 64 by default | 503 `overloaded`, `Retry-After: 1` |
+| Uncached key lookups in flight | 4 by default (own pool of 4 connections) | 503 `overloaded`, `Retry-After: 1` (no database query) |
+| Ingest requests in flight (whole collector, after authentication) | 64 by default | 503 `overloaded`, `Retry-After: 1` |
 | Events per second per key | 20,000 sustained, 100,000 burst by default | 429 `rate_limited`, `Retry-After: <s>` |
 | Distinct names per project (`op:`, `step:`, `model:`, `release:`, …) | 2,000 | event refused `cardinality_exceeded` |
 | Store transaction | 5 s | 503 `store_unavailable` (the batch may have committed; re-send — it is idempotent) |

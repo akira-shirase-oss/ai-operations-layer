@@ -2,6 +2,7 @@
 //! surfaces (D-008, D-022); middleware order follows rust-mastery chapter 12.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,8 +26,9 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::auth::{Buckets, CredentialCache};
+use crate::auth::{Buckets, Cached, CredentialCache};
 use crate::config::Config;
+use crate::error::ApiError;
 use crate::error::{REQUEST_ID_HEADER, error_envelope, sanitize_request_id};
 use crate::{console, ingest, query};
 
@@ -56,6 +58,8 @@ pub struct Metrics {
     pub rate_limited: AtomicU64,
     pub denied: AtomicU64,
     pub store_unavailable: AtomicU64,
+    /// Credential lookups refused because the lookup budget was spent.
+    pub auth_shed: AtomicU64,
 }
 
 #[derive(Serialize)]
@@ -72,6 +76,7 @@ pub struct MetricsView {
     pub rate_limited: u64,
     pub denied: u64,
     pub store_unavailable: u64,
+    pub auth_shed: u64,
 }
 
 impl Metrics {
@@ -94,6 +99,7 @@ impl Metrics {
             rate_limited: g(&self.rate_limited),
             denied: g(&self.denied),
             store_unavailable: g(&self.store_unavailable),
+            auth_shed: g(&self.auth_shed),
         }
     }
 }
@@ -104,6 +110,9 @@ pub struct AppState {
     pub limits: Limits,
     pub clock: Clock,
     pub ingest_gate: Arc<Semaphore>,
+    /// Credential lookups that missed the cache and may query PostgreSQL, at most this
+    /// many at once (review finding 4): unknown keys can never tie up ingest.
+    pub lookup_gate: Arc<Semaphore>,
     pub ingest_keys: CredentialCache<IngestKey>,
     pub tokens: CredentialCache<Token>,
     pub ingest_buckets: Buckets<Uuid>,
@@ -133,6 +142,7 @@ impl AppState {
     ) -> Self {
         Self {
             ingest_gate: Arc::new(Semaphore::new(config.ingest_max_in_flight)),
+            lookup_gate: Arc::new(Semaphore::new(config.auth_lookups_in_flight)),
             ingest_keys: CredentialCache::new(
                 Duration::from_secs(30),
                 Duration::from_secs(5),
@@ -154,6 +164,38 @@ impl AppState {
 
     pub fn now(&self) -> Timestamp {
         (self.clock)()
+    }
+
+    /// A credential's record: from the cache when fresh, else from PostgreSQL under the
+    /// lookup budget. With the budget spent, a recently valid credential is still served
+    /// from the cache (stale) and anything else is refused as overloaded, without a query.
+    pub async fn resolve<V, Fut>(
+        &self,
+        cache: &CredentialCache<V>,
+        digest: [u8; 32],
+        lookup: impl FnOnce() -> Fut,
+    ) -> Result<Option<V>, ApiError>
+    where
+        V: Clone,
+        Fut: Future<Output = Result<Option<V>, aiops_store::StoreError>>,
+    {
+        let stale = match cache.get(&digest) {
+            Cached::Fresh(found) => return Ok(found),
+            Cached::Stale(v) => Some(v),
+            Cached::Miss => None,
+        };
+        let Ok(_permit) = self.lookup_gate.try_acquire() else {
+            Metrics::add(&self.metrics.auth_shed, 1);
+            return stale.map(Some).ok_or(ApiError::Overloaded);
+        };
+        match tokio::time::timeout(Duration::from_secs(2), lookup()).await {
+            Ok(Ok(found)) => {
+                cache.put(digest, found.clone());
+                Ok(found)
+            }
+            Ok(Err(e)) => Err(e.into()),
+            Err(_) => Err(ApiError::StoreUnavailable),
+        }
     }
 
     pub fn project_cache(&self, slug: &str) -> Option<Project> {

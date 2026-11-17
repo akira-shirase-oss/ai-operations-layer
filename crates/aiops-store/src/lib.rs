@@ -78,6 +78,9 @@ pub struct StoreConfig {
     pub ingest_connections: u32,
     pub query_connections: u32,
     pub control_connections: u32,
+    /// Credential lookups (keys, tokens): their own pool, so unknown-key floods never
+    /// take an ingest or query connection.
+    pub auth_connections: u32,
     pub acquire_timeout: Duration,
     pub ingest_statement_timeout: Duration,
     pub query_statement_timeout: Duration,
@@ -91,6 +94,7 @@ impl StoreConfig {
             ingest_connections: 16,
             query_connections: 8,
             control_connections: 2,
+            auth_connections: 4,
             acquire_timeout: Duration::from_secs(2),
             ingest_statement_timeout: Duration::from_secs(5),
             query_statement_timeout: Duration::from_secs(3),
@@ -104,6 +108,7 @@ pub struct Store {
     ingest: PgPool,
     query: PgPool,
     control: PgPool,
+    auth: PgPool,
 }
 
 /// One validated event ready to store: the event, what policy changed, its stored JSON.
@@ -331,14 +336,16 @@ impl Store {
                 cfg.control_statement_timeout,
             )
             .await?,
+            auth: pool(cfg, base, cfg.auth_connections, cfg.query_statement_timeout).await?,
         })
     }
 
-    /// One pool for all three surfaces (tests only: it gives up the isolation).
+    /// One pool for every surface (tests only: it gives up the isolation).
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
             ingest: pool.clone(),
             query: pool.clone(),
+            auth: pool.clone(),
             control: pool,
         }
     }
@@ -364,7 +371,7 @@ impl Store {
              FROM ingest_keys k JOIN projects p ON p.id = k.project_id WHERE k.key_hash = $1",
         )
         .bind(&hash[..])
-        .fetch_optional(&self.ingest)
+        .fetch_optional(&self.auth)
         .await?;
         Ok(row.map(|r| IngestKey {
             id: r.get(0),
@@ -454,7 +461,7 @@ impl Store {
              FROM api_tokens WHERE token_hash = $1",
         )
         .bind(&hash[..])
-        .fetch_optional(&self.query)
+        .fetch_optional(&self.auth)
         .await?;
         Ok(row.map(|r| Token {
             id: r.get(0),

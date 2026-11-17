@@ -12,6 +12,8 @@ pub struct Config {
     pub console_dir: Option<PathBuf>,
     /// Ingest requests in flight before the collector sheds (503 + Retry-After).
     pub ingest_max_in_flight: usize,
+    /// Uncached credential lookups (each a PostgreSQL query) in flight at most.
+    pub auth_lookups_in_flight: usize,
     /// Per ingest key: sustained events per second and burst.
     pub ingest_events_per_sec: u32,
     pub ingest_burst_events: u32,
@@ -40,6 +42,7 @@ impl Config {
             listen: SocketAddr::from(([127, 0, 0, 1], 57_400)),
             console_dir: None,
             ingest_max_in_flight: 64,
+            auth_lookups_in_flight: 4,
             ingest_events_per_sec: 20_000,
             ingest_burst_events: 100_000,
             query_requests_per_sec: 20,

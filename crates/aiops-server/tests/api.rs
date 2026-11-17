@@ -556,3 +556,54 @@ async fn e1_an_in_batch_twin_cannot_hide_a_missing_event(pool: PgPool) {
         "seq 4 never arrived"
     );
 }
+
+// Review finding 4: unauthenticated traffic must not shed a legitimate host.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
+    let e = env_with(pool, |s| {
+        s.ingest_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    })
+    .await;
+    // Warm the legitimate key (it is cached from then on).
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    assert_eq!(r.status, 200);
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut flooders = Vec::new();
+    for _ in 0..64 {
+        let app = e.app.clone();
+        let stop = stop.clone();
+        flooders.push(tokio::spawn(async move {
+            let body = batch(&journey(9, 0));
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let key =
+                    aiops_server::auth::generate(aiops_server::auth::INGEST_KEY_PREFIX).unwrap();
+                let r = send(&app, post_ingest(&key, body.clone())).await;
+                assert!(matches!(r.status, 401 | 503), "flood got {}", r.status);
+                // An immediately-ready refusal never yields; on the test's single-threaded
+                // runtime the flood would starve everything else.
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut shed = 0;
+    for n in 2..=61u8 {
+        let r = send(
+            &e.app,
+            post_ingest(&e.ingest_key, batch(&journey(n, u64::from(n) * 100))),
+        )
+        .await;
+        if r.status != 200 {
+            shed += 1;
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for f in flooders {
+        f.await.unwrap();
+    }
+    assert_eq!(
+        shed, 0,
+        "the legitimate host lost {shed} of 60 batches to unauthenticated traffic"
+    );
+}

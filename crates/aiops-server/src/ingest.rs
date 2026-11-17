@@ -24,12 +24,13 @@ pub async fn ingest(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<IngestResponse>, ApiError> {
-    // Shed first: the cheapest refusal, before any parsing or lookup.
+    // Authenticate before taking an in-flight slot (review finding 4): a well-shaped but
+    // unknown key costs at most one budgeted lookup and never holds ingest capacity.
+    let key = authenticate(&app, &headers).await?;
     let Ok(_permit) = app.ingest_gate.clone().try_acquire_owned() else {
         Metrics::add(&app.metrics.shed, 1);
         return Err(ApiError::Overloaded);
     };
-    let key = authenticate(&app, &headers).await?;
     let received_at = app.now();
 
     let raw: RawBatch<'_> = serde_json::from_slice(&body).map_err(|_| ApiError::MalformedBatch)?;
@@ -184,13 +185,11 @@ async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<IngestKey, 
         return Err(ApiError::Unauthenticated);
     };
     let digest = hash(secret);
-    let found = if let Some(cached) = app.ingest_keys.get(&digest) {
-        cached
-    } else {
-        let found = app.store.find_ingest_key(&digest).await?;
-        app.ingest_keys.put(digest, found.clone());
-        found
-    };
+    let found = app
+        .resolve(&app.ingest_keys, digest, || {
+            app.store.find_ingest_key(&digest)
+        })
+        .await?;
     match found {
         Some(key) if !key.revoked => Ok(key),
         _ => {
