@@ -52,7 +52,7 @@ verdict="PASS"
 [ "$s5xx" != "0" ] && verdict="FAIL (a non-503 5xx was answered)"
 [ "$stored" -lt "$acked" ] && verdict="FAIL (acknowledged events missing from the database)"
 [ "$ready_after" != "200" ] && verdict="FAIL (the collector did not recover)"
-out="perf/results/$(date -u +%Y-%m-%d)-drill-pg-restart.md"
+out="perf/results/$(date -u +%Y-%m-%d)-drill-pg-restart-$(date -u +%H%M%S).md"
 cat >"$out" <<MD
 # Drill: PostgreSQL restarts during ingest ($(date -u +%Y-%m-%d)) — ${verdict}
 
