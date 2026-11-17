@@ -249,7 +249,8 @@
 					<td class="mono">{s.ingest_key}</td>
 					<td class="mono">{time(s.first_seen)} – {time(s.last_seen)}</td>
 					<td>
-						{s.missing_by_seq} not received (by sequence); SDK reported {s.reported_dropped_queue_full} queue-full,
+						{s.missing_by_seq} not received (by sequence), of which {s.events_refused} refused by the
+						collector; SDK reported {s.reported_dropped_queue_full} queue-full,
 						{s.reported_dropped_send_failed} send-failed, {s.reported_dropped_rejected} refused,
 						{s.reported_gap_overflow} unattributed
 					</td>

@@ -707,7 +707,8 @@ impl Store {
         let ids: Vec<Uuid> = ids.iter().map(|i| uuid128(i.as_bytes())).collect();
         let rows = sqlx::query(
             "SELECT s.instance_id, s.service, s.sdk, k.name, s.first_seen, s.last_seen, s.max_seq, s.events_received,
-                    s.dropped_queue_full, s.dropped_send_failed, s.dropped_rejected, s.gap_overflow, s.truncated_events
+                    s.dropped_queue_full, s.dropped_send_failed, s.dropped_rejected, s.gap_overflow, s.truncated_events,
+                    s.events_refused
              FROM source_instances s JOIN ingest_keys k ON k.id = s.ingest_key_id
              WHERE s.project_id = $1 AND s.instance_id = ANY($2)",
         )
@@ -729,6 +730,7 @@ impl Store {
                     last_seen: from_odt(r.get(5)),
                     max_seq: u(r.get(6)),
                     events_received: u(r.get(7)),
+                    events_refused: u(r.get(13)),
                     reported: WireStats {
                         dropped_queue_full: u(r.get(8)),
                         dropped_send_failed: u(r.get(9)),

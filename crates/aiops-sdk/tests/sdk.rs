@@ -26,6 +26,8 @@ const HANG: u8 = 3;
 /// Store the batch, then answer 503 (the response is "lost"): the SDK must re-send it
 /// unchanged.
 const STORE_THEN_503: u8 = 4;
+/// Accept the batch but refuse its second event by name.
+const REFUSE_SECOND: u8 = 5;
 
 #[derive(Default)]
 struct Fake {
@@ -43,6 +45,17 @@ async fn ingest(State(fake): State<Arc<Fake>>, body: String) -> (StatusCode, Str
         HANG => {
             tokio::time::sleep(Duration::from_secs(30)).await;
             (StatusCode::OK, String::new())
+        }
+        REFUSE_SECOND => {
+            let n = batch["events"].as_array().map_or(0, Vec::len);
+            fake.batches.lock().unwrap().push(batch);
+            fake.mode.store(ACCEPT, Ordering::SeqCst);
+            (
+                StatusCode::OK,
+                json!({"accepted": n - 1, "duplicates": 0, "refused": [{"index": 1, "code": "invalid_value", "field": "kind"}],
+                       "withheld_attributes": 0, "redactions": 0})
+                    .to_string(),
+            )
         }
         STORE_THEN_503 => {
             fake.batches.lock().unwrap().push(batch);
@@ -490,4 +503,26 @@ async fn an_event_over_8_kib_is_cut_in_the_sdk_and_marked() {
         started["truncated"].as_u64().unwrap() >= 1,
         "the cut is marked"
     );
+}
+
+// Review finding 13: an event the collector refuses is reported as a gap, with its reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_event_the_collector_refuses_is_reported_as_a_rejected_gap() {
+    let (endpoint, fake) = fake_collector().await;
+    fake.mode.store(REFUSE_SECOND, Ordering::SeqCst);
+    let client = Client::start(&config(&endpoint)).unwrap();
+    run_operation(&client, 1);
+    eventually(|| client.stats().refused == 1).await;
+    run_operation(&client, 2); // a later batch carries the report
+    eventually(|| client.stats().gap_reports_sent >= 1).await;
+    client.shutdown(Duration::from_secs(2)).await;
+    let events = all_events(&fake);
+    let refused_op = events[1]["operation_id"].clone();
+    let gap = events
+        .iter()
+        .find(|e| e["type"] == "gap.reported")
+        .expect("a gap report for the refused event");
+    assert_eq!(gap["reason"], "rejected");
+    assert_eq!(gap["dropped"], 1);
+    assert_eq!(gap["operation_id"], refused_op);
 }

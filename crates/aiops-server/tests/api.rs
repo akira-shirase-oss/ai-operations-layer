@@ -749,3 +749,25 @@ async fn a_noisy_key_cannot_exhaust_the_projects_names_and_over_budget_names_kee
     assert_eq!(t.body["name"], "publish_article");
     assert_eq!(t.body["steps"][0]["name"], "generate");
 }
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn the_source_view_shows_how_many_events_the_collector_refused(pool: PgPool) {
+    let e = env(pool).await;
+    let mut events = journey(1, 0);
+    events[1].kind = Some("llm".into()); // refused: invalid_value
+    let r = send(&e.app, post_ingest(&e.ingest_key, batch(&events))).await;
+    assert_eq!(r.body["refused"].as_array().unwrap().len(), 1);
+    let t = send(
+        &e.app,
+        get(
+            &format!("/v1/projects/pilot/operations/{}", op_hex(1)),
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(
+        t.body["sources"][0]["events_refused"], 1,
+        "{}",
+        t.body["sources"]
+    );
+}

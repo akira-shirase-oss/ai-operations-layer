@@ -282,17 +282,7 @@ impl Flusher {
             self.inner.in_flight.store(0, Ordering::Relaxed);
             match outcome {
                 Sent::Accepted(answer) => {
-                    add(&c.batches_sent, 1);
-                    if let Some(a) = answer {
-                        add(&c.accepted, u64::from(a.accepted));
-                        add(&c.duplicates, u64::from(a.duplicates));
-                        add(&c.refused, a.refused.len() as u64);
-                    }
-                    for item in chunk {
-                        if let Some(id) = item.report {
-                            delivered_reports.insert(id);
-                        }
-                    }
+                    self.accepted(&chunk, answer.as_ref(), &mut delivered_reports);
                 }
                 Sent::Rejected(StatusCode::PAYLOAD_TOO_LARGE) if chunk.len() > 1 => {
                     let mut first = chunk;
@@ -317,6 +307,36 @@ impl Flusher {
         add(&c.gap_reports_sent, delivered_reports.len() as u64);
         self.pending_reports
             .retain(|r| !delivered_reports.contains(&r.event_id));
+    }
+
+    /// Accounts for an accepted batch: counters, refused events as rejected gaps (review
+    /// finding 13; a conflicting duplicate is not lost, so it is not reported), and the gap
+    /// reports it delivered.
+    fn accepted(
+        &self,
+        chunk: &[Encoded],
+        answer: Option<&IngestResponse>,
+        delivered: &mut std::collections::HashSet<aiops_domain::EventId>,
+    ) {
+        let c = &self.inner.counters;
+        add(&c.batches_sent, 1);
+        if let Some(a) = answer {
+            add(&c.accepted, u64::from(a.accepted));
+            add(&c.duplicates, u64::from(a.duplicates));
+            add(&c.refused, a.refused.len() as u64);
+            for r in a
+                .refused
+                .iter()
+                .filter(|r| r.code != "conflicting_duplicate")
+            {
+                let item = usize::try_from(r.index).ok().and_then(|i| chunk.get(i));
+                if let Some(e) = item.and_then(|i| i.event.as_ref()) {
+                    self.inner
+                        .record_gap(e.operation_id, GapReason::Rejected, e.event_time, 1);
+                }
+            }
+        }
+        delivered.extend(chunk.iter().filter_map(|i| i.report));
     }
 
     /// The events of a lost batch (its gap reports stay pending and are retried).

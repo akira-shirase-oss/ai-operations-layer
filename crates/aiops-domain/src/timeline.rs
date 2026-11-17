@@ -45,6 +45,8 @@ pub struct InstanceStats {
     pub last_seen: Timestamp,
     pub max_seq: u64,
     pub events_received: u64,
+    /// Events of this instance the collector refused (each by name in its answer).
+    pub events_refused: u64,
     pub reported: WireStats,
 }
 
@@ -288,6 +290,9 @@ pub struct SourceView {
     pub last_seen: Timestamp,
     /// Over the instance's whole life, not just this operation.
     pub missing_by_seq: u64,
+    /// Refused by the collector (part of `missing_by_seq` when their sequence numbers
+    /// were valid): a reason, not an unexplained hole.
+    pub events_refused: u64,
     pub reported_dropped_queue_full: u64,
     pub reported_dropped_send_failed: u64,
     pub reported_dropped_rejected: u64,
@@ -624,6 +629,7 @@ fn source_views(instances: &[InstanceStats], events: &[StoredEvent]) -> Vec<Sour
             first_seen: i.first_seen,
             last_seen: i.last_seen,
             missing_by_seq: i.missing_by_seq(),
+            events_refused: i.events_refused,
             reported_dropped_queue_full: i.reported.dropped_queue_full,
             reported_dropped_send_failed: i.reported.dropped_send_failed,
             reported_dropped_rejected: i.reported.dropped_rejected,

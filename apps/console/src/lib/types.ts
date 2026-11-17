@@ -128,6 +128,7 @@ export type SourceView = {
 	first_seen: string;
 	last_seen: string;
 	missing_by_seq: number;
+	events_refused: number;
 	reported_dropped_queue_full: number;
 	reported_dropped_send_failed: number;
 	reported_dropped_rejected: number;
