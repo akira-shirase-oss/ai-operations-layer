@@ -28,6 +28,8 @@ pub enum ApiError {
     InvalidSource(&'static str),
     #[error("the batch has more events than the collector accepts ({0})")]
     TooManyEvents(usize),
+    #[error("the request body is larger than the collector accepts")]
+    BodyTooLarge,
     /// The store could not keep one event's text; nothing was written. A sender splits the
     /// batch to isolate the event (review N1).
     #[error("the batch holds text the store cannot keep; split it and resend")]
@@ -75,7 +77,7 @@ impl ApiError {
             | Self::UnsupportedSchema
             | Self::InvalidSource(_)
             | Self::UnstorableText => StatusCode::BAD_REQUEST,
-            Self::TooManyEvents(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::TooManyEvents(_) | Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InstanceConflict => StatusCode::CONFLICT,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Overloaded | Self::StoreUnavailable | Self::AuditUnavailable => {
@@ -95,6 +97,7 @@ impl ApiError {
             Self::UnsupportedSchema => "unsupported_schema_version",
             Self::InvalidSource(_) => "invalid_source",
             Self::TooManyEvents(_) => "too_many_events",
+            Self::BodyTooLarge => "payload_too_large",
             Self::UnstorableText => "unstorable_text",
             Self::InstanceConflict => "instance_owned_by_another_key",
             Self::RateLimited { .. } => "rate_limited",

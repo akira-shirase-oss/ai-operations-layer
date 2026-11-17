@@ -49,6 +49,9 @@ pub async fn run(
     builder
         .timer(TokioTimer::new())
         .header_read_timeout(limits.header_read_timeout)
+        // Each connection's read buffer is bounded (review N2): request headers fit, and a
+        // body is pulled only as the handler reads it, which it does after authenticating.
+        .max_buf_size(64 * 1024)
         .keep_alive(true);
     let graceful = GracefulShutdown::new();
     let slots = Arc::new(Semaphore::new(limits.max_connections));

@@ -12,6 +12,9 @@ pub struct Config {
     pub console_dir: Option<PathBuf>,
     /// Ingest requests in flight before the collector sheds (503 + Retry-After).
     pub ingest_max_in_flight: usize,
+    /// Ingest body bytes in flight at most, in KiB (review N2): bodies are read after
+    /// authentication and only under this budget; past it the request is shed (503).
+    pub ingest_body_budget_kib: usize,
     /// Uncached credential lookups (each a PostgreSQL query) in flight at most.
     pub auth_lookups_in_flight: usize,
     /// Per ingest key: sustained events per second and burst.
@@ -47,6 +50,7 @@ impl Config {
             listen: SocketAddr::from(([127, 0, 0, 1], 57_400)),
             console_dir: None,
             ingest_max_in_flight: 64,
+            ingest_body_budget_kib: 32 * 1024,
             auth_lookups_in_flight: 4,
             ingest_events_per_sec: 20_000,
             ingest_burst_events: 100_000,
@@ -82,6 +86,7 @@ impl Config {
             }
         };
         let mut in_flight = cfg.ingest_max_in_flight as u64;
+        let mut body_budget_mib = (cfg.ingest_body_budget_kib / 1024) as u64;
         let mut rate = u64::from(cfg.ingest_events_per_sec);
         let mut burst = u64::from(cfg.ingest_burst_events);
         let mut qrate = u64::from(cfg.query_requests_per_sec);
@@ -91,6 +96,7 @@ impl Config {
         let mut header_secs = cfg.header_read_timeout.as_secs();
         let mut max_conns = cfg.max_connections as u64;
         num("AIOPS_INGEST_MAX_IN_FLIGHT", &mut in_flight);
+        num("AIOPS_INGEST_BODY_BUDGET_MIB", &mut body_budget_mib);
         num("AIOPS_INGEST_EVENTS_PER_SEC", &mut rate);
         num("AIOPS_INGEST_BURST_EVENTS", &mut burst);
         num("AIOPS_QUERY_REQUESTS_PER_SEC", &mut qrate);
@@ -101,6 +107,8 @@ impl Config {
         num("AIOPS_MAX_CONNECTIONS", &mut max_conns);
         let to_u32 = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
         cfg.ingest_max_in_flight = usize::try_from(in_flight).unwrap_or(usize::MAX);
+        cfg.ingest_body_budget_kib =
+            usize::try_from(body_budget_mib.saturating_mul(1024)).unwrap_or(usize::MAX);
         cfg.ingest_events_per_sec = to_u32(rate);
         cfg.ingest_burst_events = to_u32(burst);
         cfg.query_requests_per_sec = to_u32(qrate);

@@ -9,6 +9,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use aiops_domain::wire::WireEvent;
 use axum::body::Body;
 use axum::http::Request;
@@ -867,5 +869,80 @@ async fn one_event_with_a_nul_is_refused_alone_and_the_batch_is_stored(pool: PgP
             "{req}: {}",
             list.body
         );
+    }
+}
+
+/// A request body that sends one 1 KiB chunk and then never finishes: a client holding the
+/// rest of a large body.
+struct Stalled(Option<axum::body::Bytes>);
+
+impl axum::body::HttpBody for Stalled {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        match self.0.take() {
+            Some(b) => std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(b)))),
+            None => std::task::Poll::Pending,
+        }
+    }
+}
+
+fn stalled_ingest(key: &str) -> Request<Body> {
+    Request::post("/v1/ingest")
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "application/json")
+        .header("content-length", "999999")
+        .body(Body::new(Stalled(Some(vec![b' '; 1024].into()))))
+        .unwrap()
+}
+
+// Review N2: an unknown key is refused from its headers; its body is never read, so
+// unauthenticated clients cannot make the collector buffer bodies.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn an_unknown_keys_body_is_never_read(pool: PgPool) {
+    let e = env(pool).await;
+    let unknown = format!("aiops_ik_{}", "Q".repeat(43));
+    let r = tokio::time::timeout(
+        Duration::from_secs(3),
+        send(&e.app, stalled_ingest(&unknown)),
+    )
+    .await
+    .expect("answered from the headers, without waiting for the body");
+    assert_eq!(r.status, 401, "{}", r.body);
+}
+
+// Review N2: authenticated bodies are read under a global byte budget; past it a request is
+// shed (503) before its body is read.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn bodies_beyond_the_in_flight_byte_budget_are_shed_before_reading(pool: PgPool) {
+    let e = env_with(pool, |s| {
+        s.ingest_body_budget = std::sync::Arc::new(tokio::sync::Semaphore::new(2 * 1024));
+    })
+    .await;
+    let holders: Vec<_> = (0..2)
+        .map(|_| {
+            let app = e.app.clone();
+            let key = e.ingest_key.clone();
+            tokio::spawn(async move { send(&app, stalled_ingest(&key)).await })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let r = tokio::time::timeout(
+        Duration::from_secs(3),
+        send(&e.app, stalled_ingest(&e.ingest_key)),
+    )
+    .await
+    .expect("shed at once, not queued behind the held bodies");
+    assert_eq!(
+        (r.status, r.body["error"]["code"].as_str()),
+        (503, Some("overloaded")),
+        "{}",
+        r.body
+    );
+    for h in holders {
+        h.abort();
     }
 }

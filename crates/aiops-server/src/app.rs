@@ -110,6 +110,9 @@ pub struct AppState {
     pub limits: Limits,
     pub clock: Clock,
     pub ingest_gate: Arc<Semaphore>,
+    /// In-flight ingest body bytes, in KiB permits (review N2): a body is read only under
+    /// this budget, after authentication.
+    pub ingest_body_budget: Arc<Semaphore>,
     /// Credential lookups that missed the cache and may query PostgreSQL, at most this
     /// many at once (review finding 4): unknown keys can never tie up ingest.
     pub lookup_gate: Arc<Semaphore>,
@@ -142,6 +145,7 @@ impl AppState {
     ) -> Self {
         Self {
             ingest_gate: Arc::new(Semaphore::new(config.ingest_max_in_flight)),
+            ingest_body_budget: Arc::new(Semaphore::new(config.ingest_body_budget_kib)),
             lookup_gate: Arc::new(Semaphore::new(config.auth_lookups_in_flight)),
             ingest_keys: CredentialCache::new(
                 Duration::from_secs(30),

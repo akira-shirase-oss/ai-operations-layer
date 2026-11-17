@@ -1,4 +1,5 @@
-//! `POST /v1/ingest` (`docs/INGEST_CONTRACT.md`): shed → authenticate → bound → rate-limit
+//! `POST /v1/ingest` (`docs/INGEST_CONTRACT.md`): authenticate (headers only) → shed →
+//! read the body under a byte budget → bound → rate-limit
 //! → validate each event (named refusals) → admit names (bounded cardinality) → one
 //! store transaction under a deadline. Nothing here touches control records or hosts.
 
@@ -10,7 +11,7 @@ use aiops_domain::wire::{IngestResponse, RawBatch, RefusedEvent, SCHEMA_VERSION}
 use aiops_domain::{Event, Mode, Validator};
 use aiops_store::{IngestBatch, IngestKey, PreparedEvent};
 use axum::Json;
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use uuid::Uuid;
@@ -22,15 +23,17 @@ use crate::error::ApiError;
 pub async fn ingest(
     State(app): State<SharedState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Json<IngestResponse>, ApiError> {
-    // Authenticate before taking an in-flight slot (review finding 4): a well-shaped but
-    // unknown key costs at most one budgeted lookup and never holds ingest capacity.
+    // Authenticate from the headers before taking an in-flight slot (review finding 4) and
+    // before reading the body (review N2): an unknown key costs at most one budgeted lookup,
+    // never holds ingest capacity, and its body is never read.
     let key = authenticate(&app, &headers).await?;
     let Ok(_permit) = app.ingest_gate.clone().try_acquire_owned() else {
         Metrics::add(&app.metrics.shed, 1);
         return Err(ApiError::Overloaded);
     };
+    let (body, _bytes_permit) = read_body(&app, &headers, body).await?;
     let received_at = app.now();
 
     let raw: RawBatch<'_> = serde_json::from_slice(&body).map_err(|_| ApiError::MalformedBatch)?;
@@ -177,6 +180,42 @@ fn refused(index: usize, event_id: Option<String>, r: Refusal) -> RefusedEvent {
         event_id,
         code: r.code.as_str().to_owned(),
         field: r.field.map(str::to_owned),
+    }
+}
+
+/// Reads the body only under the in-flight byte budget (review N2); a body of unknown length
+/// is charged the full cap. Past the budget, the request is shed before any byte is read.
+async fn read_body(
+    app: &AppState,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<(axum::body::Bytes, tokio::sync::OwnedSemaphorePermit), ApiError> {
+    let limit = app.limits.max_body_bytes;
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(limit)
+        .min(limit);
+    let kib = u32::try_from(declared.div_ceil(1024).max(1)).unwrap_or(u32::MAX);
+    let Ok(permit) = app.ingest_body_budget.clone().try_acquire_many_owned(kib) else {
+        Metrics::add(&app.metrics.shed, 1);
+        return Err(ApiError::Overloaded);
+    };
+    match axum::body::to_bytes(body, limit).await {
+        Ok(bytes) => Ok((bytes, permit)),
+        // Over the cap (no Content-Length, or a chunked body), or the client went away
+        // mid-body. The limit error can sit several sources deep (two limiting layers).
+        Err(e) => {
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+            while let Some(c) = cause {
+                if c.is::<http_body_util::LengthLimitError>() {
+                    return Err(ApiError::BodyTooLarge);
+                }
+                cause = c.source();
+            }
+            Err(ApiError::MalformedBatch)
+        }
     }
 }
 

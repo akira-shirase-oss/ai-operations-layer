@@ -101,6 +101,7 @@ Per type, only the listed fields may appear (anything else is
 | Body | 1 MiB | 413 `payload_too_large` |
 | Events per batch | 500 | 413 `too_many_events` |
 | Uncached key lookups in flight | 4 by default (own pool of 4 connections) | 503 `overloaded`, `Retry-After: 1` (no database query) |
+| Ingest body bytes in flight | 32 MiB by default (`AIOPS_INGEST_BODY_BUDGET_MIB`); a body is read only after its key is authenticated from the headers, and is charged its `Content-Length` (the 1 MiB cap if none) | 503 `overloaded`, before any byte of the body is read |
 | Ingest requests in flight (whole collector, after authentication) | 64 by default | 503 `overloaded`, `Retry-After: 1` |
 | Events per second per key | 20,000 sustained, 100,000 burst by default | 429 `rate_limited`, `Retry-After: <s>` |
 | Distinct names per project (`op:`, `step:`, `model:`, `release:`, …), of which per ingest key | 2,000, 500 | the name is stored as `_overflow` (counted in `overflowed_names`, labeled on the event); the event is kept. Names unused for 90 days are swept and free their budget |
