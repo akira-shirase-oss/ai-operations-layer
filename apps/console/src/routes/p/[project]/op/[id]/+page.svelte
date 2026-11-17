@@ -6,7 +6,7 @@
 	import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@aiops/ui/ui/tooltip';
 	import { api, type Result } from '#lib/api.js';
 	import { micros, money, short, time, value } from '#lib/format.js';
-	import type { EntryView, Timeline } from '#lib/types.js';
+	import type { AttemptView, EntryView, StepView, Timeline } from '#lib/types.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import Notice from '#lib/components/Notice.svelte';
 	import Flag from '#lib/components/Flag.svelte';
@@ -14,7 +14,7 @@
 
 	const project = $derived(page.params['project'] ?? '');
 	const id = $derived(page.params['id'] ?? '');
-	let result: Result<Timeline> | null = $state(null);
+	let result = $state<Result<Timeline> | null>(null);
 
 	$effect(() => {
 		api<Timeline>(`/v1/projects/${encodeURIComponent(project)}/operations/${encodeURIComponent(id)}`).then(
@@ -37,6 +37,22 @@
 		'grid grid-cols-[12rem_4.5rem_23rem_minmax(7rem,1fr)_2.5rem_8rem_minmax(6rem,14rem)] gap-3 px-3';
 	const eventText = (e: EntryView) =>
 		`${e.type}${e.name ? ` · ${e.name}` : ''}${e.attempt ? ` #${e.attempt}` : ''}`;
+	// Every attempt of every step is one row, windowed like the events (a 5,000-event
+	// operation can hold 2,500 attempts). The step's name is repeated, muted, on its later
+	// attempts, so a row scrolled into view on its own still says which step it belongs to.
+	type AttemptRow = { step: StepView; attempt: AttemptView; first: boolean };
+	const attemptRows: AttemptRow[] = $derived(
+		result?.state === 'ok'
+			? result.data.steps.flatMap((step) =>
+					step.attempts.map((attempt, i) => ({ step, attempt, first: i === 0 }))
+				)
+			: []
+	);
+	const STEP_COLUMNS =
+		'grid grid-cols-[minmax(10rem,1fr)_4rem_23rem_6rem_minmax(8rem,12rem)_minmax(8rem,1fr)_7rem] gap-3 px-3';
+	const errorText = (a: AttemptView) => `${a.error_code ?? ''}${a.error_message ? ` ${a.error_message}` : ''}`;
+	const versionText = (a: AttemptView) =>
+		`${a.model ?? ''}${a.prompt_version ? ` · ${a.prompt_version}` : ''}${a.config_version ? ` · ${a.config_version}` : ''}`;
 	const detailText = (e: EntryView) =>
 		[
 			e.dropped ? `${e.dropped} dropped: ${e.reason}` : '',
@@ -164,52 +180,50 @@
 	{#if t.steps.length === 0}
 		<p class="text-muted-foreground">No step events received.</p>
 	{:else}
-		<Table>
-			<TableHeader>
-				<TableRow>
-					<TableHead>Step</TableHead>
-					<TableHead>Attempt</TableHead>
-					<TableHead>Outcome</TableHead>
-					<TableHead>Duration</TableHead>
-					<TableHead>Model / version</TableHead>
-					<TableHead>Error</TableHead>
-					<TableHead>Est. cost</TableHead>
-				</TableRow>
-			</TableHeader>
-			<TableBody>
-				{#each t.steps as s (s.step_id)}
-					{#each s.attempts as a (a.attempt)}
-						<TableRow>
-							<TableCell>
-								{#if a.attempt === s.attempts[0]?.attempt}
-									<strong>{s.name ?? 'name not observed'}</strong>
-									<div class="text-xs text-muted-foreground">
-										{s.kind ?? 'kind unknown'}{s.external_effect ? ' · external effect' : ''}
-									</div>
-								{/if}
-							</TableCell>
-							<TableCell>{a.attempt}</TableCell>
-							<TableCell>
+		<div class="overflow-x-auto">
+			<div class="min-w-[69rem]">
+				<div class="{STEP_COLUMNS} py-2 text-xs font-medium text-muted-foreground" role="row">
+					<span>Step</span><span>Attempt</span><span>Outcome</span><span>Duration</span><span>Model / version</span><span
+						>Error</span
+					><span>Est. cost</span>
+				</div>
+				<VirtualRows
+					rows={attemptRows}
+					label="Steps"
+					height={448}
+					key={(r: AttemptRow) => `${r.step.step_id}:${r.attempt.attempt}`}
+				>
+					{#snippet row(r: AttemptRow)}
+						{@const a = r.attempt}
+						<div class="{STEP_COLUMNS} h-full items-center text-sm">
+							<span class="min-w-0 leading-tight">
+								<span class="block truncate {r.first ? 'font-semibold' : 'text-muted-foreground'}" title={r.step.name ?? ''}
+									>{r.step.name ?? 'name not observed'}</span
+								>
+								<span class="block truncate text-xs text-muted-foreground">
+									{#if r.first}{r.step.kind ?? 'kind unknown'}{r.step.external_effect ? ' · external effect' : ''} ·
+									{/if}<span class="font-mono">{r.step.step_id}</span>
+								</span>
+							</span>
+							<span>{a.attempt}</span>
+							<span data-cell="outcome" class="flex min-w-0 flex-col items-start gap-0.5">
 								<StatusBadge status={a} />
 								{#if !a.start_observed}<Flag>start not received</Flag>{/if}
-							</TableCell>
-							<TableCell class="font-mono text-xs">{micros(a.duration_us)}</TableCell>
-							<TableCell class="font-mono text-xs"
-								>{a.model ?? ''}{a.prompt_version ? ` · ${a.prompt_version}` : ''}{a.config_version
-									? ` · ${a.config_version}`
-									: ''}</TableCell
+							</span>
+							<span class="font-mono text-xs">{micros(a.duration_us)}</span>
+							<span class="min-w-0 truncate font-mono text-xs" title={versionText(a)}>{versionText(a)}</span>
+							<span class="min-w-0 font-mono text-xs leading-tight" title={errorText(a)}>
+								<span class="block truncate">{a.error_code ?? ''}</span>
+								{#if a.error_message}<span class="block truncate text-muted-foreground"><bdi>{a.error_message}</bdi></span>{/if}
+							</span>
+							<span class="font-mono text-xs"
+								>{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</span
 							>
-							<TableCell class="font-mono text-xs">
-								{a.error_code ?? ''}{#if a.error_message}<div class="text-muted-foreground"><bdi>{a.error_message}</bdi></div>{/if}
-							</TableCell>
-							<TableCell class="font-mono text-xs"
-								>{a.cost_estimate_micros !== undefined ? money(a.cost_estimate_micros, a.cost_currency ?? null) : ''}</TableCell
-							>
-						</TableRow>
-					{/each}
-				{/each}
-			</TableBody>
-		</Table>
+						</div>
+					{/snippet}
+				</VirtualRows>
+			</div>
+		</div>
 	{/if}
 
 	<h2 class="mt-8 mb-2 text-lg font-semibold">Gaps</h2>
@@ -249,7 +263,7 @@
 					<span>Event time · received</span><span>Delay</span><span>Outcome</span><span>Event</span><span>#</span
 					><span>Source</span><span>Details</span>
 				</div>
-				<VirtualRows rows={t.entries} key={(e: EntryView) => e.event_id}>
+				<VirtualRows rows={t.entries} label="Events" key={(e: EntryView) => e.event_id}>
 					{#snippet row(e: EntryView)}
 						<div
 							class="{EVENT_COLUMNS} h-full items-center text-sm {e.type === 'gap.reported'

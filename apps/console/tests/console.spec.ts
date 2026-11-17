@@ -51,7 +51,11 @@ test('a lost publish response reads as an unknown external effect, with the auth
 	await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: timeout_after_send');
 	await expect(page.getByText('An external effect may have happened.')).toBeVisible();
 	await expect(page.getByText(/check the system that owns the effect/)).toBeVisible();
-	const publish = page.locator('tbody tr', { hasText: 'publish' }).filter({ hasText: 'external effect' });
+	const publish = page
+		.getByRole('rowgroup', { name: 'Steps' })
+		.getByRole('row')
+		.filter({ hasText: 'publish' })
+		.filter({ hasText: 'external effect' });
 	await expect(publish.locator('.badge')).toHaveText('outcome unknown: timeout_after_send');
 	await expect(page.getByText('Cost (estimate, not a bill)')).toBeVisible();
 	await expect(page.getByText(/^Events \(event time · receive time\)$/)).toBeVisible();
@@ -132,12 +136,29 @@ test('a 5,000-event timeline renders a window of rows and scrolls to the last on
 	await signIn(page);
 	await openByRequest(page, BIG);
 	await expect(page.locator('h1 .badge')).toHaveText('succeeded');
-	const list = page.locator('[role="rowgroup"]');
-	const rendered = await list.locator('[role="row"]').count();
+	const list = page.getByRole('rowgroup', { name: 'Events' });
+	const rendered = await list.getByRole('row').count();
 	expect(rendered).toBeGreaterThan(5);
 	expect(rendered).toBeLessThan(100); // of 5,000
 	await list.evaluate((el) => (el.scrollTop = el.scrollHeight));
 	await expect(list.getByText('operation.finished')).toBeVisible();
+	expect(problems).toEqual([]);
+});
+
+test('a 5,000-event operation lists its 2,499 step attempts as a window and scrolls to the last one', async ({
+	page
+}) => {
+	const problems = watch(page);
+	await signIn(page);
+	await openByRequest(page, BIG);
+	const steps = page.getByRole('rowgroup', { name: 'Steps' });
+	await expect(steps).toBeVisible();
+	const rendered = await steps.getByRole('row').count();
+	expect(rendered).toBeGreaterThan(5);
+	expect(rendered).toBeLessThan(100); // of 2,499
+	await expect(steps.getByText('00000000000009c3')).toHaveCount(0); // the last step is not in the DOM yet
+	await steps.evaluate((el) => (el.scrollTop = el.scrollHeight));
+	await expect(steps.getByText('00000000000009c3')).toBeVisible();
 	expect(problems).toEqual([]);
 });
 
@@ -162,7 +183,7 @@ for (const width of [1280, 1920]) {
 		await signIn(page);
 		await openByRequest(page, LONG);
 		await expect(page.locator('h1 .badge')).toHaveText('outcome unknown: connection_lost_after_send');
-		const badges = page.locator('[role="rowgroup"] [role="row"] .badge');
+		const badges = page.getByRole('rowgroup', { name: 'Events' }).locator('[role="row"] .badge');
 		await expect(badges).toHaveCount(2); // the step's and the operation's finish
 		for (const badge of await badges.all()) {
 			const cell = badge.locator('xpath=ancestor::*[@data-cell][1]');

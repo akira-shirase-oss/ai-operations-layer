@@ -111,7 +111,7 @@ export type StepView = {
 };
 
 export type GapView = {
-	kind: 'sdk_reported' | 'op_seq_hole' | 'unknown_tail' | 'expired';
+	kind: 'sdk_reported' | 'op_seq_hole' | 'unknown_tail' | 'undeclared_count' | 'expired';
 	instance_id: string;
 	count: number | null;
 	reason?: string;

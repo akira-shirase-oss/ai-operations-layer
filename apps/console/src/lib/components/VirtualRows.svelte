@@ -1,10 +1,12 @@
 <script lang="ts" generics="T">
 	import type { Snippet } from 'svelte';
 
-	// A windowed list for long timelines (up to 5,000 events): only the rows in view, plus a
-	// margin, are in the DOM; spacers keep the scrollbar honest. Rows have a fixed height.
+	// A windowed list for long timelines (up to 5,000 events, or as many step attempts): only
+	// the rows in view, plus a margin, are in the DOM; spacers keep the scrollbar honest. Rows
+	// have a fixed height. `label` names the list for assistive technology (and for tests).
 	let {
 		rows,
+		label,
 		rowHeight = 56,
 		height = 560,
 		overscan = 8,
@@ -12,6 +14,7 @@
 		row
 	}: {
 		rows: T[];
+		label: string;
 		rowHeight?: number;
 		height?: number;
 		overscan?: number;
@@ -30,6 +33,7 @@
 	class="overflow-y-auto rounded-xl border"
 	style="height: {viewport + 2}px"
 	role="rowgroup"
+	aria-label={label}
 	onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
 >
 	<div style="height: {first * rowHeight}px" aria-hidden="true"></div>
