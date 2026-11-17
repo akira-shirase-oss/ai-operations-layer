@@ -263,3 +263,66 @@ pub(crate) fn journey(op: u8, first_seq: u64) -> Vec<WireEvent> {
 pub(crate) fn op_hex(op: u8) -> String {
     format!("{op:02x}{}", "ab".repeat(15))
 }
+
+/// A fresh, migrated database for a test that needs a multi-threaded runtime (where
+/// `sqlx::test`'s single-threaded one would let load-generating tasks starve the code
+/// under test). Dropped by [`ScratchDb::drop`]; leftovers from failed runs older than an
+/// hour are dropped by the next one.
+pub(crate) struct ScratchDb {
+    pub(crate) pool: PgPool,
+    admin: PgPool,
+    name: String,
+}
+
+impl ScratchDb {
+    pub(crate) async fn new() -> Self {
+        let admin_url = std::env::var("DATABASE_URL").unwrap();
+        let admin = PgPool::connect(&admin_url).await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let stale: Vec<String> =
+            sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE 'aiops_mt_%'")
+                .fetch_all(&admin)
+                .await
+                .unwrap();
+        for name in stale {
+            let born = name
+                .split('_')
+                .nth(2)
+                .and_then(|t| t.parse::<u64>().ok())
+                .unwrap_or(0);
+            if now.saturating_sub(born) > 3_600 {
+                let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+                )))
+                .execute(&admin)
+                .await;
+            }
+        }
+        let name = format!(
+            "aiops_mt_{now}_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (prefix, _) = admin_url.rsplit_once('/').unwrap();
+        let pool = PgPool::connect(&format!("{prefix}/{name}")).await.unwrap();
+        Store::from_pool(pool.clone()).migrate().await.unwrap();
+        Self { pool, admin, name }
+    }
+
+    pub(crate) async fn drop(self) {
+        self.pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
+            self.name
+        )))
+        .execute(&self.admin)
+        .await
+        .unwrap();
+    }
+}

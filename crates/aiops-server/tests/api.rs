@@ -578,8 +578,12 @@ async fn e1_an_in_batch_twin_cannot_hide_a_missing_event(pool: PgPool) {
 }
 
 // Review finding 4: unauthenticated traffic must not shed a legitimate host.
-#[sqlx::test(migrations = "../aiops-store/migrations")]
-async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
+// Multi-threaded, so 64 flooding tasks cannot starve the legitimate request of CPU (a
+// single-threaded test runtime measures the harness, not the collector).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_random_key_flood_cannot_shed_a_legitimate_host() {
+    let db = common::ScratchDb::new().await;
+    let pool = db.pool.clone();
     // The collector as deployed: separate ingest, query, control and auth pools (a single
     // shared test pool would let the flood's lookups compete with ingest for connections).
     let base = (*pool.connect_options()).clone();
@@ -629,6 +633,7 @@ async fn a_random_key_flood_cannot_shed_a_legitimate_host(pool: PgPool) {
     for f in flooders {
         f.await.unwrap();
     }
+    db.drop().await;
     assert_eq!(
         shed,
         Vec::<String>::new(),

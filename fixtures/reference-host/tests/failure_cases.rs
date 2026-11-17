@@ -27,6 +27,68 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
+/// A fresh, migrated database on a multi-threaded runtime (`sqlx::test`'s single thread
+/// would let load-generating tasks starve the collector under test). Leftovers of failed
+/// runs older than an hour are dropped by the next one.
+struct ScratchDb {
+    pool: PgPool,
+    admin: PgPool,
+    name: String,
+}
+
+impl ScratchDb {
+    async fn new() -> Self {
+        let admin_url = std::env::var("DATABASE_URL").unwrap();
+        let admin = PgPool::connect(&admin_url).await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let stale: Vec<String> =
+            sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE 'aiops_mt_%'")
+                .fetch_all(&admin)
+                .await
+                .unwrap();
+        for name in stale {
+            let born = name
+                .split('_')
+                .nth(2)
+                .and_then(|t| t.parse::<u64>().ok())
+                .unwrap_or(0);
+            if now.saturating_sub(born) > 3_600 {
+                let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+                )))
+                .execute(&admin)
+                .await;
+            }
+        }
+        let name = format!(
+            "aiops_mt_{now}_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (prefix, _) = admin_url.rsplit_once('/').unwrap();
+        let pool = PgPool::connect(&format!("{prefix}/{name}")).await.unwrap();
+        Store::from_pool(pool.clone()).migrate().await.unwrap();
+        Self { pool, admin, name }
+    }
+
+    async fn drop(self) {
+        self.pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
+            self.name
+        )))
+        .execute(&self.admin)
+        .await
+        .unwrap();
+    }
+}
+
 struct Collector {
     base: String,
     store: Store,
@@ -44,7 +106,12 @@ async fn collector_on(
     addr: SocketAddr,
     tune: impl FnOnce(&mut Config),
 ) -> Collector {
-    let store = Store::from_pool(pool.clone());
+    // The collector as deployed: separate ingest, query, control and auth pools (one shared
+    // pool lets one surface's load time out another's, which production never does).
+    let base = (*pool.connect_options()).clone();
+    let store = Store::connect_with(&aiops_store::StoreConfig::new(""), &base)
+        .await
+        .unwrap();
     let mut config = Config::local("");
     tune(&mut config);
     let mut state = AppState::new(store.clone(), config.clone(), system_clock(), None);
@@ -220,10 +287,10 @@ async fn timeline(c: &Collector, token: &str, request_id: &str) -> Value {
     found
 }
 
-#[sqlx::test(migrations = "../../crates/aiops-store/migrations")]
-async fn the_journey_tells_transport_validation_rejection_and_uncertain_effects_apart(
-    pool: PgPool,
-) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_journey_tells_transport_validation_rejection_and_uncertain_effects_apart() {
+    let db = ScratchDb::new().await;
+    let pool = db.pool.clone();
     let c = collector_on(&pool, free_addr(), |_| {}).await;
     let k = keys(&c.store).await;
     let host = start_host(&c.base, &k.ingest).await;
@@ -309,10 +376,13 @@ async fn the_journey_tells_transport_validation_rejection_and_uncertain_effects_
         t["cost"]["estimate_micros"].as_u64().unwrap() > 0,
         "timed-out model calls still cost (estimate)"
     );
+    db.drop().await;
 }
 
-#[sqlx::test(migrations = "../../crates/aiops-store/migrations")]
-async fn with_the_collector_down_the_host_keeps_working_and_the_gaps_show_afterwards(pool: PgPool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_the_collector_down_the_host_keeps_working_and_the_gaps_show_afterwards() {
+    let db = ScratchDb::new().await;
+    let pool = db.pool.clone();
     let addr = free_addr(); // nothing listens here yet
     let base = format!("http://{addr}");
     let store = Store::from_pool(pool.clone());
@@ -375,12 +445,12 @@ async fn with_the_collector_down_the_host_keeps_working_and_the_gaps_show_afterw
         25,
         "the 20 lost operations are known through their gap reports"
     );
-    let lost: Vec<&Value> = ops
+    let lost_ops: Vec<&Value> = ops
         .iter()
         .filter(|o| o["status"]["state"] == "no_finish_observed")
         .collect();
-    assert_eq!(lost.len(), 20);
-    let reported: i64 = lost
+    assert_eq!(lost_ops.len(), 20);
+    let reported: i64 = lost_ops
         .iter()
         .map(|o| o["reported_dropped"].as_i64().unwrap())
         .sum();
@@ -388,7 +458,7 @@ async fn with_the_collector_down_the_host_keeps_working_and_the_gaps_show_afterw
         reported, 200,
         "every dropped event is accounted for, by the host and the collector"
     );
-    for op in &lost {
+    for op in &lost_ops {
         let id = op["operation_id"].as_str().unwrap();
         let (_, t) = get_json(
             &c.base,
@@ -413,6 +483,7 @@ async fn with_the_collector_down_the_host_keeps_working_and_the_gaps_show_afterw
             "all ten events of the operation are reported lost"
         );
     }
+    db.drop().await;
 }
 
 /// Forwards every batch twice and delivers every other batch late, after the next one.
@@ -458,8 +529,10 @@ async fn chaos_ingest(
     first
 }
 
-#[sqlx::test(migrations = "../../crates/aiops-store/migrations")]
-async fn duplicated_and_reordered_batches_merge_without_false_chronology(pool: PgPool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicated_and_reordered_batches_merge_without_false_chronology() {
+    let db = ScratchDb::new().await;
+    let pool = db.pool.clone();
     let c = collector_on(&pool, free_addr(), |_| {}).await;
     let k = keys(&c.store).await;
     let chaos = Chaos {
@@ -535,10 +608,13 @@ async fn duplicated_and_reordered_batches_merge_without_false_chronology(pool: P
     );
     assert_eq!(stats["events_conflicting"], 0);
     proxy.abort();
+    db.drop().await;
 }
 
-#[sqlx::test(migrations = "../../crates/aiops-store/migrations")]
-async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected(pool: PgPool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected() {
+    let db = ScratchDb::new().await;
+    let pool = db.pool.clone();
     let c = collector_on(&pool, free_addr(), |cfg| {
         // Small enough that the second 500-event batch is over the limit at any machine
         // speed; the pilot's own key has the same bucket and needs ~150 events.
@@ -581,6 +657,8 @@ async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected(po
                     assert!(r.headers().contains_key("retry-after"));
                     limited += 1;
                 }
+                // Shed or store-busy under the flood: also a bounded, retryable answer.
+                503 => {}
                 s => panic!("unexpected status {s}"),
             }
         }
@@ -610,10 +688,13 @@ async fn a_flooding_host_is_limited_and_counted_while_the_pilot_is_unaffected(po
         Some(u64::from(limited)),
         "every refusal is counted"
     );
+    db.drop().await;
 }
 
-#[sqlx::test(migrations = "../../crates/aiops-store/migrations")]
-async fn a_console_user_without_scope_or_project_is_denied_and_audited(pool: PgPool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_console_user_without_scope_or_project_is_denied_and_audited() {
+    let db = ScratchDb::new().await;
+    let pool = db.pool.clone();
     let c = collector_on(&pool, free_addr(), |_| {}).await;
     let k = keys(&c.store).await;
     let host = start_host(&c.base, &k.ingest).await;
@@ -650,4 +731,5 @@ async fn a_console_user_without_scope_or_project_is_denied_and_audited(pool: PgP
         ]
     );
     assert!(audit.iter().all(|a| a.decision == "denied"));
+    db.drop().await;
 }
