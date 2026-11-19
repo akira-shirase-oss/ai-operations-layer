@@ -864,11 +864,13 @@ async fn decide(
     let (allowed, reason) = match read.present {
         None => (false, "authority_unavailable"),
         Some(present) => {
-            if !adapter.assertion_matches(&record.expected_state, &read) {
-                (false, "expected_state_mismatch")
-            } else if present {
-                // The effect is already there: the correct recovery is none.
+            if present {
+                // The effect already happened: the correct recovery is none —
+                // this answer precedes the caller's assertion (an effect that
+                // happened denies the retry whatever was expected).
                 (false, "effect_confirmed")
+            } else if !adapter.assertion_matches(&record.expected_state, &read) {
+                (false, "expected_state_mismatch")
             } else {
                 (true, "authorized")
             }

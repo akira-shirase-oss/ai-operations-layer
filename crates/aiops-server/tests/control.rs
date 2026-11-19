@@ -148,7 +148,7 @@ async fn stub_host() -> (String, Arc<StubHost>) {
         jobs: Mutex::new(Vec::new()),
     });
     let app = Router::new()
-        .route("/publications/{key}", get(stub_publication))
+        .route("/publications/{*key}", get(stub_publication))
         .route("/articles/retry", post(stub_retry))
         .route("/jobs", post(stub_job_submit))
         .with_state(host.clone());

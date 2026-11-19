@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
     });
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/publications/{key}", get(publication))
+        .route("/publications/{*key}", get(publication))
         .route("/{step}", get(probe).post(step))
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .with_state(worker);
