@@ -234,6 +234,70 @@ async fn controls_require_operate_scope_and_a_configured_adapter(pool: PgPool) {
     assert_eq!(r.body["error"]["code"], "forbidden");
 }
 
+/// Every malformed-input arm answers 400 before any authority call: the operation id's
+/// hex, the control id's uuid, the business key's shape and size, `expected_state`'s
+/// shape and size — none of them reaches the adapter.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn malformed_control_requests_are_400(pool: PgPool) {
+    let (url, _host) = stub_host().await;
+    let e = env_with_adapter(pool, &url).await;
+    let op = op_path(&e, "reconcile").await;
+    let op_id = op_hex(1);
+    let good = body("article:req-x", &json!({"published": false}));
+
+    for (what, path, b) in [
+        (
+            "non-hex op id",
+            "/v1/projects/pilot/operations/nothex/reconcile".into(),
+            good.clone(),
+        ),
+        (
+            "key without prefix",
+            op.clone(),
+            body("req-x", &json!({"published": false})),
+        ),
+        (
+            "key too long",
+            op.clone(),
+            body(
+                &format!("article:{}", "k".repeat(300)),
+                &json!({"published": false}),
+            ),
+        ),
+        (
+            "expected wrong shape",
+            op.clone(),
+            body("article:req-x", &json!({"published": "yes"})),
+        ),
+        (
+            "expected too big",
+            op.clone(),
+            body(
+                "article:req-x",
+                &json!({"published": false, "pad": "p".repeat(5000)}),
+            ),
+        ),
+    ] {
+        let r = send(&e.app, post_json(&path, &e.no_read, &b)).await;
+        assert_eq!(r.status, 400, "{what}: {:?}", r.body);
+    }
+    // The read paths validate their ids the same way.
+    for path in [
+        "/v1/projects/pilot/operations/nothex/controls".to_string(),
+        format!("/v1/projects/pilot/operations/{op_id}/controls/not-a-uuid"),
+    ] {
+        let r = send(
+            &e.app,
+            Request::get(&path)
+                .header("authorization", format!("Bearer {}", e.reader))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(r.status, 400, "{path}: {:?}", r.body);
+    }
+}
+
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn reconcile_reads_the_authority_and_stores_its_answer(pool: PgPool) {
     let (url, host) = stub_host().await;

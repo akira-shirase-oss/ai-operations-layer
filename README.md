@@ -1,9 +1,10 @@
 # AI Operations Layer
 
 > **Status — A0 done; A1 done except the quiet-machine million-event run;
-> A2 partly (2026-11-17).** Two independent reviews' findings are fixed, each
-> with a test that fails without its fix; redaction remains pattern matching
-> and partial by nature (`docs/END_GOAL.md`). Durable Runner is the first
+> A2 partly; A3 done (2026-11-19).** Two independent reviews' findings are
+> fixed, each with a test that fails without its fix; redaction remains
+> pattern matching and partial by nature (`docs/END_GOAL.md`). Durable
+> Runner is the first
 > real host (D-027): the article workflow runs as its handlers through an
 > adapter that never changes what the runner decides, and the console shows
 > a real run end to end with the runner's own answer beside the timeline
@@ -11,11 +12,16 @@
 > name, release and time, and releases compare from the same records. The drill kit runs on
 > Durable Runner (D-028); its first, seeder-aware baseline shows the
 > registered comparison cannot pass on that catalog (open question OQ8).
-> Decisions D-012–D-028. Load evidence is development observation on a busy
+> A3 added controlled recovery: reconcile reads the effect's authority,
+> retries run under actor scope + expected state + the business key with
+> every decision audited, and the live drill proved the effect lands exactly
+> once through crashes (`perf/results/2026-11-19-drill-lost-publish.md`).
+> Decisions D-012–D-034. Load evidence is development observation on a busy
 > laptop: two short smokes, the 1,000,000-event run that missed its
 > thresholds (36,580 events shed and counted, p95 152 ms;
-> `perf/results/2026-11-17-ingest-million.md`), and the lock measurement
-> (`perf/results/2026-11-17-ingest-locks.md`). A quiet-machine 1M run is
+> `perf/results/2026-11-17-ingest-million.md`), the lock measurement
+> (`perf/results/2026-11-17-ingest-locks.md`), and a control-surface smoke
+> (`perf/results/2026-11-19-control-smoke3.md`). A quiet-machine 1M run is
 > owed. Evidence per milestone: `docs/ROADMAP.md`. Development software, no
 > production claim. Contract:
 > `../../docs/Project_Guides/08_AI_Operations_Layer.docx` (extract with
@@ -62,7 +68,7 @@ scripts/check.sh                                   # everything CI runs
 npm run build --workspace @aiops/console
 cargo run -p aiops-server -- admin create-project pilot
 cargo run -p aiops-server -- admin create-ingest-key --project pilot --name my-host
-cargo run -p aiops-server -- admin create-token --actor me --project pilot
+cargo run -p aiops-server -- admin create-token --actor me --project pilot   # read; add --scope operate to retry/reconcile
 AIOPS_CONSOLE_DIR=apps/console/build cargo run -p aiops-server -- serve
 # console: http://127.0.0.1:57400/console/   ingest: POST http://127.0.0.1:57400/v1/ingest
 ```
