@@ -15,7 +15,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde::Serialize;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::error::ApiError;
 use crate::error::{REQUEST_ID_HEADER, error_envelope, sanitize_request_id};
 use crate::locks::{LockStats, LockView};
-use crate::{console, ingest, query};
+use crate::{console, control, ingest, query};
 
 pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
@@ -157,6 +157,16 @@ pub struct AppState {
     /// a connect timeout; at most `AUTHORITY_READS` at once.
     pub authority_client: reqwest::Client,
     pub authority_gate: Semaphore,
+    /// The project's configured control adapter (D-007): controls exist only where one
+    /// owns execution — every other project's control call is denied, audited.
+    pub adapters: HashMap<String, control::ControlAdapter>,
+    /// The control path's own per-token bucket (not the query bucket's).
+    pub control_buckets: Buckets<Uuid>,
+    /// External adapter calls (reads + submits) in flight at most — D-033's semaphore.
+    pub control_gate: Semaphore,
+    /// Wakes the control executor when a retry commits `authorized`; its 1 s tick is the
+    /// backstop for a wake lost while a pass was running.
+    pub control_wake: Notify,
 }
 
 /// Runner reads in flight at most; past it the console is told "busy".
@@ -206,6 +216,21 @@ impl AppState {
             projects_lock: LockStats::default(),
             authority_client,
             authority_gate: Semaphore::new(AUTHORITY_READS),
+            adapters: config
+                .control_reference_host
+                .as_ref()
+                .map(|(slug, url)| {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        slug.clone(),
+                        control::ControlAdapter::ReferenceHost(control::ReferenceHost::new(url)),
+                    );
+                    m
+                })
+                .unwrap_or_default(),
+            control_buckets: Buckets::new(control::CONTROL_RATE, control::CONTROL_BURST),
+            control_gate: Semaphore::new(control::DRIVE_MAX),
+            control_wake: Notify::new(),
             limits: Limits::default(),
             store,
             config,
@@ -332,6 +357,22 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/projects/{project}/operations/{operation_id}/authority",
             get(crate::authority::authority),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/reconcile",
+            post(control::reconcile),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/retry",
+            post(control::retry),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/controls",
+            get(control::controls),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/controls/{control_id}",
+            get(control::control),
         )
         .route("/v1/collector/stats", get(query::stats))
         .layer(SetResponseHeaderLayer::overriding(

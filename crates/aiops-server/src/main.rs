@@ -136,6 +136,9 @@ Ok(t) => {
             }
         });
     }
+    // The control executor (D-033): boot re-drive first, then wake + tick passes on the
+    // tracked tasks.
+    aiops_server::control::spawn_executor(state.clone(), &tracker, cancel.clone());
     tracker.close();
 
     let listener = tokio::net::TcpListener::bind(listen)

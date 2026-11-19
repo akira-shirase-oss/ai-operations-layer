@@ -230,7 +230,7 @@ async fn a_stuck_query_path_never_delays_ingest_or_audit_at_the_api(pool: PgPool
             aiops_server::system_clock(),
             None,
         )
-        .expect("invariant: the authority client builds with a static config"),
+        .unwrap(),
     );
     let app = aiops_server::router(state);
     // Warm the credential and project caches, as a running collector's are.

@@ -61,6 +61,10 @@ pub struct Config {
     /// `AIOPS_AUTHORITY_DURABLE_RUNNER=<label>=<url>` and
     /// `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`: the runner the console may ask.
     pub authority: Option<AuthoritySource>,
+    /// `AIOPS_CONTROL_REFERENCE_HOST=<slug>=<url>`: the project's control adapter (D-007).
+    /// v1 wires one project to the reference host; a project without an adapter denies
+    /// every control call, audited.
+    pub control_reference_host: Option<(String, String)>,
     /// Accepted connections at most.
     pub max_connections: usize,
     /// A response write making no progress for this long ends its connection (review N3).
@@ -100,9 +104,14 @@ impl Config {
             max_requests_per_connection: 1_000,
             connection_lifetime: Duration::from_secs(300),
             authority: None,
+            control_reference_host: None,
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one env var per stanza; splitting obscures the surface it describes"
+    )]
     pub fn from_env() -> Result<Self, String> {
         let mut errors = Vec::new();
         let database_url = std::env::var("AIOPS_DATABASE_URL").unwrap_or_else(|_| {
@@ -188,6 +197,21 @@ impl Config {
                 }
                 _ => errors.push(
                     "AIOPS_AUTHORITY_DURABLE_RUNNER must be <label>=http(s)://host:port".to_owned(),
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("AIOPS_CONTROL_REFERENCE_HOST") {
+            match v.split_once('=') {
+                Some((slug, url))
+                    if !slug.is_empty()
+                        && (url.starts_with("http://") || url.starts_with("https://")) =>
+                {
+                    cfg.control_reference_host =
+                        Some((slug.to_owned(), url.trim_end_matches('/').to_owned()));
+                }
+                _ => errors.push(
+                    "AIOPS_CONTROL_REFERENCE_HOST must be <project-slug>=http(s)://host:port"
+                        .to_owned(),
                 ),
             }
         }

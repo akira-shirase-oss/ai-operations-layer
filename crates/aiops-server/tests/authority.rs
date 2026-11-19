@@ -198,7 +198,7 @@ async fn a_runner_that_is_down_or_refuses_the_key_is_named_as_such(pool: PgPool)
         });
         let state = Arc::new(
             aiops_server::AppState::new(e.store.clone(), cfg, aiops_server::system_clock(), None)
-                .expect("invariant: the authority client builds with a static config"),
+                .unwrap(),
         );
         aiops_server::router(state)
     };
