@@ -23,7 +23,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 # The runner's own answer for the console (authority.rs): read-only, bounded, rustls.
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -37,7 +37,6 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-reqwest = { workspace = true, features = ["json"] }
 sqlx.workspace = true
 
 [lints]

@@ -17,7 +17,7 @@ aiops-sdk.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 http-body.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,7 +27,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 
 [lints]
