@@ -25,7 +25,7 @@ use aiops_store::{AuditEntry, StoreError};
 
 /// Authenticate under the control bucket, then require `admin` — denied and audited.
 /// No project check: credentials span projects by nature.
-async fn authorize_admin(
+pub(crate) async fn authorize_admin(
     app: &AppState,
     headers: &HeaderMap,
     action: &str,
