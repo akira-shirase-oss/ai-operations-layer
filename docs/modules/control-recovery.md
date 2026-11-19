@@ -1,7 +1,8 @@
 # Controlled recovery (milestone A3) — design for review
 
-Status: **proposal, not yet built** (2026-11-18). Everything below the line
-marked "proposed" is open for the coordinator's review before code. The
+Status: **built and drilled** (built 2026-11-18, live drill recorded
+2026-11-19 in `perf/results/2026-11-19-drill-lost-publish.md`; rulings
+D-029–D-034 in `docs/DECISIONS.md`). The
 binding text is the A3 row of `docs/ROADMAP.md` and the invariants in
 `docs/END_GOAL.md` (1 telemetry is not truth, 4 safe control) and
 `docs/ARCHITECTURE.md` (the control path). The gate A3 must prove:
