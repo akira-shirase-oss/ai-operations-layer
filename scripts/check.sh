@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 scripts/check-toolchain.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+scripts/check-isolated.sh
 if [ -z "${DATABASE_URL:-}" ]; then
   # The store, API and black-box tests create their own databases in this server.
   scripts/stack.sh up >/dev/null
