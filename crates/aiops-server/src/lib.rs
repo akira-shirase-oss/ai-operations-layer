@@ -14,6 +14,7 @@ pub mod authority;
 pub mod config;
 pub mod console;
 pub mod control;
+pub mod credentials;
 pub mod error;
 pub mod ingest;
 pub mod locks;

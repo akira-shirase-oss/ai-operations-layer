@@ -296,6 +296,38 @@ pub struct Project {
     pub slug: String,
 }
 
+/// Credential metadata for the admin surface (D-034): everything about a key or a
+/// token except the secret hash, which never leaves the store.
+#[derive(Debug, Clone)]
+pub struct ProjectInfo {
+    pub id: Uuid,
+    pub slug: String,
+    pub opt_in_keys: Vec<String>,
+    pub created_at: Timestamp,
+}
+
+/// One ingest key's metadata (the hash is never selected).
+#[derive(Debug, Clone)]
+pub struct IngestKeyInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub project_slug: String,
+    pub created_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
+}
+
+/// One token's metadata (the hash is never selected).
+#[derive(Debug, Clone)]
+pub struct TokenInfo {
+    pub id: Uuid,
+    pub actor: String,
+    pub scopes: Vec<String>,
+    pub project_slugs: Vec<String>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
+}
+
 /// One row of the operation list.
 #[derive(Debug, Clone)]
 pub struct OperationRow {
@@ -1357,6 +1389,91 @@ impl Store {
         .await?;
         if done.rows_affected() == 0 {
             return Err(StoreError::NotFound("active token"));
+        }
+        Ok(())
+    }
+
+    // ---- the credential surface (D-034) ------------------------------------------------
+    //
+    // The console's admin view: every credential's metadata — name, actor, scopes,
+    // projects, expiry, revocation — and never a hash. All on the control pool; these
+    // are bounded lists (credentials are counted in tens, not millions).
+
+    /// Every project, oldest first.
+    pub async fn list_project_infos(&self) -> Result<Vec<ProjectInfo>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, slug, opt_in_attribute_keys, created_at FROM projects ORDER BY created_at LIMIT 1000",
+        )
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| ProjectInfo {
+                id: r.get(0),
+                slug: r.get(1),
+                opt_in_keys: r.get(2),
+                created_at: from_odt(r.get(3)),
+            })
+            .collect())
+    }
+
+    /// Every ingest key's metadata, oldest first — `key_hash` is never selected.
+    pub async fn list_ingest_key_infos(&self) -> Result<Vec<IngestKeyInfo>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT k.id, k.name, p.slug, k.created_at, k.revoked_at
+             FROM ingest_keys k JOIN projects p ON p.id = k.project_id
+             ORDER BY k.created_at LIMIT 2000",
+        )
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| IngestKeyInfo {
+                id: r.get(0),
+                name: r.get(1),
+                project_slug: r.get(2),
+                created_at: from_odt(r.get(3)),
+                revoked_at: r.get::<Option<OffsetDateTime>, _>(4).map(from_odt),
+            })
+            .collect())
+    }
+
+    /// Every token's metadata, oldest first — `token_hash` is never selected;
+    /// `project_ids` are joined back to their slugs.
+    pub async fn list_token_infos(&self) -> Result<Vec<TokenInfo>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT t.id, t.actor, t.scopes,
+                    COALESCE((SELECT array_agg(p.slug ORDER BY p.slug) FROM projects p
+                              WHERE p.id = ANY(t.project_ids)), '{}') AS slugs,
+                    t.created_at, t.expires_at, t.revoked_at
+             FROM api_tokens t ORDER BY t.created_at LIMIT 2000",
+        )
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| TokenInfo {
+                id: r.get(0),
+                actor: r.get(1),
+                scopes: r.get(2),
+                project_slugs: r.get(3),
+                created_at: from_odt(r.get(4)),
+                expires_at: from_odt(r.get(5)),
+                revoked_at: r.get::<Option<OffsetDateTime>, _>(6).map(from_odt),
+            })
+            .collect())
+    }
+
+    /// Revoke an ingest key by its id (the admin surface's handle; D-034).
+    pub async fn revoke_ingest_key_id(&self, id: Uuid) -> Result<(), StoreError> {
+        let done = sqlx::query(
+            "UPDATE ingest_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .execute(&self.control)
+        .await?;
+        if done.rows_affected() == 0 {
+            return Err(StoreError::NotFound("active ingest key"));
         }
         Ok(())
     }

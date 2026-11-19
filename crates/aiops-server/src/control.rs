@@ -475,7 +475,9 @@ async fn audit_denial(
     }
 }
 
-async fn deny(
+/// Deny with a synchronous audit row — shared by the control and credential
+/// surfaces (`pub(crate)` for `credentials.rs`).
+pub(crate) async fn deny(
     app: &AppState,
     actor: &Actor,
     action: &str,

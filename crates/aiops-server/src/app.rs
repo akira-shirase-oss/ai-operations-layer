@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::auth::{Buckets, Cached, CredentialCache};
 use crate::config::Config;
+use crate::credentials;
 use crate::error::ApiError;
 use crate::error::{REQUEST_ID_HEADER, error_envelope, sanitize_request_id};
 use crate::locks::{LockStats, LockView};
@@ -381,6 +382,15 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/projects/{project}/operations/{operation_id}/controls/{control_id}",
             get(control::control),
+        )
+        .route("/v1/admin/credentials", get(credentials::list))
+        .route(
+            "/v1/admin/credentials/tokens/{id}/revoke",
+            post(credentials::revoke_token),
+        )
+        .route(
+            "/v1/admin/credentials/ingest-keys/{id}/revoke",
+            post(credentials::revoke_ingest_key),
         )
         .route("/v1/collector/stats", get(query::stats))
         .layer(SetResponseHeaderLayer::overriding(
