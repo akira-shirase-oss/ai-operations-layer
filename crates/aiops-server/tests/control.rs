@@ -27,8 +27,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::{
-    Env, ScratchDb, batch, env_with, env_with_store, get as get_req, journey, now, op_hex,
-    post_ingest, post_json, send,
+    Env, ScratchDb, audit_rows, batch, env_with, env_with_store, get as get_req, journey, now,
+    op_hex, post_ingest, post_json, send,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -484,7 +484,7 @@ async fn reconcile_reads_the_authority_and_stores_its_answer(pool: PgPool) {
     assert_eq!(r.body["resolution"], "effect_present");
 
     // Every call was audited.
-    let audit = e.store.recent_audit(20).await.unwrap();
+    let audit = audit_rows(&e.store, 20).await;
     let n = audit
         .iter()
         .filter(|r| r.action == "control.reconcile")
@@ -511,7 +511,7 @@ async fn reconcile_replays_and_conflicts_on_a_changed_intent(pool: PgPool) {
     let r = send(&e.app, post_json(&path, &e.no_read, &changed)).await;
     assert_eq!(r.status, 409, "{:?}", r.body);
     assert_eq!(r.body["error"]["code"], "conflicting_request");
-    let audit = e.store.recent_audit(20).await.unwrap();
+    let audit = audit_rows(&e.store, 20).await;
     assert!(
         audit
             .iter()

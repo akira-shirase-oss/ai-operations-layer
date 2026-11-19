@@ -11,7 +11,7 @@ mod common;
 use aiops_server::auth::{TOKEN_PREFIX, generate, hash};
 use axum::body::Body;
 use axum::http::Request;
-use common::{env, get as get_req, now, post_json, send};
+use common::{audit_rows, env, get as get_req, now, post_json, send};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -90,7 +90,7 @@ async fn credentials_show_every_metadata_field_and_never_a_hash(pool: PgPool) {
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn credentials_need_admin_scope_and_every_denial_is_audited(pool: PgPool) {
     let e = env(pool).await;
-    let before = e.store.recent_audit(50).await.unwrap().len();
+    let before = audit_rows(&e.store, 50).await.len();
 
     let r = send(&e.app, get_req("/v1/admin/credentials", &e.reader)).await;
     assert_eq!(r.status, 403);
@@ -105,7 +105,7 @@ async fn credentials_need_admin_scope_and_every_denial_is_audited(pool: PgPool) 
     .await;
     assert_eq!(r.status, 401);
 
-    let audits = e.store.recent_audit(50).await.unwrap();
+    let audits = audit_rows(&e.store, 50).await;
     let denials = audits[before..]
         .iter()
         .filter(|a| a.action == "credentials.list" && a.decision == "denied")
@@ -139,7 +139,7 @@ async fn revoking_a_token_ends_its_calls_and_is_audited(pool: PgPool) {
     assert_eq!(r.status, 401);
 
     // The audit row names the acting token and the target credential.
-    let audits = e.store.recent_audit(50).await.unwrap();
+    let audits = audit_rows(&e.store, 50).await;
     let grant = audits
         .iter()
         .find(|a| a.action == "admin.revoke_token" && a.target.as_deref() == Some(&id.to_string()));
@@ -156,7 +156,7 @@ async fn revoking_a_token_ends_its_calls_and_is_audited(pool: PgPool) {
     )
     .await;
     assert_eq!(r.status, 404);
-    let audits = e.store.recent_audit(50).await.unwrap();
+    let audits = audit_rows(&e.store, 50).await;
     let denial = audits
         .iter()
         .find(|a| a.action == "admin.revoke_token" && a.decision == "denied");
@@ -202,7 +202,7 @@ async fn revoking_an_ingest_key_ends_its_writes(pool: PgPool) {
     let r = send(&e.app, common::post_ingest(&key, common::batch(&[]))).await;
     assert_eq!(r.status, 401, "the revoked key cannot ingest");
 
-    let audits = e.store.recent_audit(50).await.unwrap();
+    let audits = audit_rows(&e.store, 50).await;
     assert!(
         audits
             .iter()

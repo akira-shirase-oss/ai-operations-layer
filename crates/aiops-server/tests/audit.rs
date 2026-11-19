@@ -12,7 +12,7 @@ mod common;
 use aiops_store::AuditEntry;
 use axum::body::Body;
 use axum::http::Request;
-use common::{env, get as get_req, now, send};
+use common::{audit_rows, env, get as get_req, now, send};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -35,7 +35,7 @@ async fn seed(e: &common::Env, actor: &'static str, action: &'static str, token_
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn audit_reads_need_admin_scope_and_denials_are_audited(pool: PgPool) {
     let e = env(pool).await;
-    let before = e.store.recent_audit(50).await.unwrap().len();
+    let before = audit_rows(&e.store, 50).await.len();
 
     let r = send(&e.app, get_req("/v1/admin/audit", &e.reader)).await;
     assert_eq!(r.status, 403);
@@ -48,7 +48,7 @@ async fn audit_reads_need_admin_scope_and_denials_are_audited(pool: PgPool) {
     .await;
     assert_eq!(r.status, 401);
 
-    let audits = e.store.recent_audit(50).await.unwrap();
+    let audits = audit_rows(&e.store, 50).await;
     let denials = audits[before..]
         .iter()
         .filter(|a| a.action == "audit.list" && a.decision == "denied")
@@ -58,7 +58,7 @@ async fn audit_reads_need_admin_scope_and_denials_are_audited(pool: PgPool) {
     // An allowed read is traffic, not a decision: it must not grow the log it reads.
     let r = send(&e.app, get_req("/v1/admin/audit", &e.admin)).await;
     assert_eq!(r.status, 200, "{:?}", r.body);
-    let audits = e.store.recent_audit(50).await.unwrap();
+    let audits = audit_rows(&e.store, 50).await;
     let reads = audits[before..]
         .iter()
         .filter(|a| a.action == "audit.list")

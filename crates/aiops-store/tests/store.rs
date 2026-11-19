@@ -439,7 +439,14 @@ async fn keys_tokens_and_audit_round_trip(pool: PgPool) {
         })
         .await
         .unwrap();
-    let rows = f.store.recent_audit(10).await.unwrap();
+    let rows = f
+        .store
+        .audit_page(&aiops_store::AuditFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert_eq!(rows[0].decision, "denied");
     assert_eq!(rows[0].reason, "project_not_in_scope");
 }
@@ -861,7 +868,14 @@ async fn control_records_commit_replay_and_resume(pool: PgPool) {
     assert_eq!(list[0].deny_reason.as_deref(), Some("effect_confirmed"));
 
     // The decision's audit row was written inside the same transaction.
-    let audit = f.store.recent_audit(10).await.unwrap();
+    let audit = f
+        .store
+        .audit_page(&aiops_store::AuditFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     assert!(
         audit
             .iter()

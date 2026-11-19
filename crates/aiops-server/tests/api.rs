@@ -14,7 +14,9 @@ use std::time::Duration;
 use aiops_domain::wire::WireEvent;
 use axum::body::Body;
 use axum::http::Request;
-use common::{batch, batch_from, env, env_with, get, journey, op_hex, post_ingest, send};
+use common::{
+    audit_rows, batch, batch_from, env, env_with, get, journey, op_hex, post_ingest, send,
+};
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -339,7 +341,7 @@ async fn queries_without_scope_or_project_are_denied_and_audited(pool: PgPool) {
         "an unknown project answers like a forbidden one"
     );
 
-    let audit = e.store.recent_audit(10).await.unwrap();
+    let audit = audit_rows(&e.store, 10).await;
     let seen: Vec<(&str, &str, &str)> = audit
         .iter()
         .map(|a| (a.actor.as_str(), a.decision.as_str(), a.reason.as_str()))
@@ -380,7 +382,7 @@ async fn an_unknown_slug_flood_is_bounded_by_the_query_limit(pool: PgPool) {
             s => panic!("an unknown slug answered {s}: {}", r.body),
         }
     }
-    let audit = e.store.recent_audit(100).await.unwrap();
+    let audit = audit_rows(&e.store, 100).await;
     assert_eq!(denied + limited, 40);
     assert!(
         audit.len() == denied,
@@ -825,7 +827,7 @@ async fn collector_wide_counters_need_the_admin_scope(pool: PgPool) {
     }
     let r = send(&e.app, get("/v1/collector/stats", &e.admin)).await;
     assert_eq!(r.status, 200);
-    let audit = e.store.recent_audit(10).await.unwrap();
+    let audit = audit_rows(&e.store, 10).await;
     assert_eq!(
         audit
             .iter()

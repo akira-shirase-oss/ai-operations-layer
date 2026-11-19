@@ -55,6 +55,18 @@ pub(crate) struct Reply {
     pub(crate) body: Value,
 }
 
+/// The newest `limit` audit rows, newest first — the same page the `audit.list`
+/// endpoint reads (`Store::recent_audit` was removed as test-only).
+pub(crate) async fn audit_rows(store: &Store, limit: i64) -> Vec<aiops_store::AuditPageRow> {
+    store
+        .audit_page(&aiops_store::AuditFilter {
+            limit,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+
 pub(crate) async fn send(app: &Router, req: Request<Body>) -> Reply {
     let res: Response<Body> = app.clone().oneshot(req).await.unwrap();
     let status = res.status().as_u16();

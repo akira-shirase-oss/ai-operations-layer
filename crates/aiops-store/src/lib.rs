@@ -431,16 +431,6 @@ pub struct AuditEntry<'a> {
     pub reason: &'a str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuditRow {
-    pub actor: String,
-    pub action: String,
-    pub project_slug: Option<String>,
-    pub target: Option<String>,
-    pub decision: String,
-    pub reason: String,
-}
-
 /// The audit read's filter: a keyset window plus equality bounds on the fields an
 /// investigator actually narrows by.
 #[derive(Debug, Default)]
@@ -1145,26 +1135,6 @@ impl Store {
         .execute(&self.audit)
         .await?;
         Ok(())
-    }
-
-    pub async fn recent_audit(&self, limit: i64) -> Result<Vec<AuditRow>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT actor, action, project_slug, target, decision, reason FROM audit_log ORDER BY id DESC LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(&self.audit)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| AuditRow {
-                actor: r.get(0),
-                action: r.get(1),
-                project_slug: r.get(2),
-                target: r.get(3),
-                decision: r.get(4),
-                reason: r.get(5),
-            })
-            .collect())
     }
 
     /// A page through `audit_log`, newest first, on the CONTROL pool: a query-path

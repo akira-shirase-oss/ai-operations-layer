@@ -763,7 +763,14 @@ async fn a_console_user_without_scope_or_project_is_denied_and_audited() {
     let (status, _) = get_json(&c.base, &path, &k.ingest).await;
     assert_eq!(status, 401, "an ingest key cannot read");
 
-    let audit = c.store.recent_audit(10).await.unwrap();
+    let audit = c
+        .store
+        .audit_page(&aiops_store::AuditFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     let rows: Vec<(&str, &str, &str)> = audit
         .iter()
         .map(|a| (a.actor.as_str(), a.action.as_str(), a.reason.as_str()))
