@@ -4,9 +4,9 @@
 	import { Card, CardContent, CardHeader, CardTitle } from '@aiops/ui/ui/card';
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@aiops/ui/ui/tooltip';
-	import { api, type Result } from '#lib/api.js';
+	import { api, apiPost, type Result } from '#lib/api.js';
 	import { count, eventTypeText, micros, money, outcomeDetail, short, statusCodes, statusText, time, value } from '#lib/format.js';
-	import type { AttemptView, Authority, EntryView, GapView, StepView, Timeline } from '#lib/types.js';
+	import type { AttemptView, Authority, ControlView, Controls, EntryView, GapView, StepView, Timeline } from '#lib/types.js';
 	import StatusBadge from '#lib/components/StatusBadge.svelte';
 	import Notice from '#lib/components/Notice.svelte';
 	import Flag from '#lib/components/Flag.svelte';
@@ -19,13 +19,77 @@
 	const id = $derived(page.params['id'] ?? '');
 	let result = $state<Result<Timeline> | null>(null);
 	let authority = $state<Result<Authority> | null>(null);
+	let controls = $state<Result<Controls> | null>(null);
+	let controlNote = $state('');
+	let actionBusy = $state(false);
+	let formKey = $state('');
+	let formExpected = $state<'true' | 'false'>('false');
+
+	const opPath = $derived(
+		`/v1/projects/${encodeURIComponent(project)}/operations/${encodeURIComponent(id)}`
+	);
 
 	function load() {
-		const path = `/v1/projects/${encodeURIComponent(project)}/operations/${encodeURIComponent(id)}`;
-		api<Timeline>(path).then((r) => (result = r));
-		api<Authority>(`${path}/authority`).then((r) => (authority = r));
+		api<Timeline>(opPath).then((r) => (result = r));
+		api<Authority>(`${opPath}/authority`).then((r) => (authority = r));
+		loadControls();
+	}
+	function loadControls() {
+		api<Controls>(`${opPath}/controls`).then((r) => (controls = r));
 	}
 	$effect(load);
+
+	/** A control action (operate scope): the reply is the record — replayed records
+	 *  say so; a denial is shown, not retried behind the user's back. */
+	async function act(action: 'reconcile' | 'retry') {
+		controlNote = '';
+		const key = formKey.trim();
+		if (!key) {
+			controlNote = 'A business key is required — the operation id is not one.';
+			return;
+		}
+		actionBusy = true;
+		const r = await apiPost<ControlView>(`${opPath}/${action}`, {
+			business_key: key,
+			expected_state: { published: formExpected === 'true' }
+		});
+		actionBusy = false;
+		if (r.state === 'ok') {
+			controlNote = r.data.replayed ? 'An identical request already exists — the same record was returned.' : '';
+			loadControls();
+		} else if (r.state === 'forbidden') {
+			controlNote = `Refused: ${r.message}`;
+		} else if (r.state === 'needsAuth') {
+			controlNote = 'Sign in to act.';
+		} else if (r.state === 'rateLimited') {
+			controlNote = `Rate limited — try again in ${r.retryAfter}s.`;
+		} else {
+			controlNote = `Could not reach the collector: ${'message' in r ? r.message : ''}`;
+		}
+	}
+
+	// What each control status means, in words (A3): never "run again", never a guess.
+	const CONTROL_STATUS: Record<string, string> = {
+		requested: 'asked for; the decision is pending',
+		reconciling: 'asking the authority',
+		reconciled: 'the authority answered',
+		authorized: 'allowed — the resubmit is queued',
+		submitted: 'resubmitted; watching the authority for the effect',
+		confirmed: 'the authority proved the effect',
+		observed_unknown: 'resubmitted; the authority could not prove the effect',
+		denied: 'refused',
+		submit_failed: 'the resubmit was refused by the host'
+	};
+	const RESOLUTION_TEXT: Record<string, string> = {
+		effect_present: 'the effect was already there',
+		effect_absent: 'the effect is not there',
+		still_uncertain: 'the authority could not say',
+		effect_confirmed: 'the effect already happened — the correct recovery was none',
+		expected_state_mismatch: 'what was expected does not match what the authority said',
+		authority_unavailable: 'the authority could not be asked',
+		submit_rejected: 'the host refused the resubmit',
+		observation_exhausted: 'the effect was never proven within the observation bound'
+	};
 	// The runner's own words, said plainly; its raw state stays one click away.
 	function runnerSays(state: string, steps: number): string {
 		if (state === 'done') return 'finished every step';
@@ -571,6 +635,94 @@
 			{/each}
 		</TableBody>
 	</Table>
+
+	<h2 class="mt-8 mb-2 text-lg font-semibold">Recovery</h2>
+	<p class="mb-3 max-w-3xl text-sm text-muted-foreground">
+		Control actions ask the system that owns the work, never the trace: a reconcile records the
+		authority's answer; a retry resubmits under the business key only after the authority's checks
+		pass. There is no generic "run again" (A3, D-029..D-033).
+	</p>
+	{#if controls === null}
+		<Loading rows={2} label="Loading control records" />
+	{:else if controls.state === 'ok'}
+		<!-- The action form: a business key and what the caller asserts. An operate-scope
+		     token is required; anything else is refused and shown. -->
+		<div class="mb-4 flex flex-wrap items-end gap-2 rounded-md border p-3 text-sm" data-testid="control-form">
+			<label class="grid gap-1">
+				<span class="text-xs text-muted-foreground">Business key</span>
+				<input
+					class="w-64 rounded-md border bg-background px-2 py-1 font-mono text-xs"
+					placeholder="article:… or article/…"
+					bind:value={formKey}
+				/>
+			</label>
+			<label class="grid gap-1">
+				<span class="text-xs text-muted-foreground">The caller asserts the effect is</span>
+				<select class="rounded-md border bg-background px-2 py-1" bind:value={formExpected}>
+					<option value="false">not there (published: false)</option>
+					<option value="true">there (published: true)</option>
+				</select>
+			</label>
+			<button
+				class="rounded-md border px-3 py-1 disabled:opacity-50"
+				disabled={actionBusy}
+				onclick={() => act('reconcile')}>Reconcile</button
+			>
+			<button
+				class="rounded-md border bg-primary px-3 py-1 text-primary-foreground disabled:opacity-50"
+				disabled={actionBusy}
+				onclick={() => act('retry')}>Retry the operation</button
+			>
+			{#if controlNote}<p class="w-full text-sm text-muted-foreground" data-testid="control-note">{controlNote}</p>{/if}
+		</div>
+		{#if controls.data.controls.length === 0}
+			<p class="text-sm text-muted-foreground">No control actions yet on this operation.</p>
+		{:else}
+			<Table>
+				<TableHeader>
+					<TableRow
+						><TableHead>Action</TableHead><TableHead>Status</TableHead><TableHead>What it means</TableHead><TableHead
+							>Business key · where it went</TableHead
+						><TableHead>By · when</TableHead></TableRow
+					>
+				</TableHeader>
+				<TableBody>
+					{#each controls.data.controls as c (c.control_id)}
+						<TableRow data-testid="control-record">
+							<TableCell class="font-mono text-xs">{c.action}</TableCell>
+							<TableCell><Flag>{c.status}</Flag></TableCell>
+							<TableCell class="text-sm">
+								{CONTROL_STATUS[c.status] ?? c.status}{c.resolution
+									? ` — ${RESOLUTION_TEXT[c.resolution] ?? c.resolution}`
+									: ''}{c.denied_reason ? ` (${c.denied_reason.replaceAll('_', ' ')})` : ''}{c.replayed ? ' · replayed call' : ''}{c.attempts > 1 ? ` · ${c.attempts} submits` : ''}
+							</TableCell>
+							<TableCell class="font-mono text-xs break-all">
+								<bdi>{c.business_key}</bdi>{c.submitted_ref ? ` → ${c.submitted_ref}` : ''}
+								{#if c.authority_read}<div class="text-muted-foreground">
+										authority answered HTTP {c.authority_read.status ?? '?'} at {c.authority_read.read_at ? time(c.authority_read.read_at) : '—'}
+									</div>{/if}
+							</TableCell>
+							<TableCell class="font-mono text-xs"><bdi>{c.actor}</bdi> · {time(c.created_at)}</TableCell>
+						</TableRow>
+					{/each}
+				</TableBody>
+			</Table>
+		{/if}
+	{:else if controls.state === 'forbidden' || controls.state === 'needsAuth'}
+		<p class="text-sm text-muted-foreground">
+			Your token cannot read this operation's control records{controls.state === 'forbidden'
+				? ` (${controls.message})`
+				: ' — sign in'}.
+		</p>
+	{:else}
+		<p class="text-sm text-muted-foreground">
+			The control records could not be read — {controls.state === 'rateLimited'
+				? `rate limited, try again in ${controls.retryAfter}s`
+				: 'message' in controls
+					? controls.message
+					: 'unreachable'}. Nothing is inferred.
+		</p>
+	{/if}
 {:else}
 	<Failure {result} retry={load} />
 {/if}

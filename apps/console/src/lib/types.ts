@@ -240,3 +240,84 @@ export type ReleaseView = {
 };
 
 export type Comparison = { from: string; to: string; releases: ReleaseView[] };
+
+/** One control record (GET …/controls and the action replies): intent, decision,
+ * what the authority answered, and where the resubmission went (A3, D-029..D-033). */
+export type ControlView = {
+	control_id: string;
+	action: 'reconcile' | 'retry' | string;
+	status:
+		| 'requested'
+		| 'reconciling'
+		| 'reconciled'
+		| 'authorized'
+		| 'submitted'
+		| 'confirmed'
+		| 'observed_unknown'
+		| 'denied'
+		| 'submit_failed'
+		| string;
+	business_key: string;
+	actor: string;
+	approved_by: string | null;
+	approved_at: string | null;
+	resolution: string | null;
+	authority_read: { source?: string; status?: number; answer?: unknown; read_at?: string } | null;
+	submitted_ref: string | null;
+	denied_reason: string | null;
+	attempts: number;
+	created_at: string;
+	updated_at: string;
+	replayed: boolean;
+};
+
+export type Controls = { controls: ControlView[] };
+
+/** The credential surface (GET /v1/admin/credentials, D-034): metadata only — the
+ * wire never carries a secret or a hash. */
+export type CredentialProject = {
+	id: string;
+	slug: string;
+	opt_in_attribute_keys: string[];
+	created_at: string;
+};
+export type IngestKeyInfo = {
+	id: string;
+	name: string;
+	project: string;
+	created_at: string;
+	revoked_at: string | null;
+};
+export type TokenInfo = {
+	id: string;
+	actor: string;
+	scopes: string[];
+	projects: string[];
+	created_at: string;
+	expires_at: string;
+	revoked_at: string | null;
+};
+export type Credentials = {
+	projects: CredentialProject[];
+	ingest_keys: IngestKeyInfo[];
+	tokens: TokenInfo[];
+};
+
+/** Collector counters (GET /v1/collector/stats, admin): every counter the process
+ * holds — the drops and refusals included; gaps are data. */
+export type CollectorStats = {
+	batches: number;
+	events_accepted: number;
+	events_duplicate: number;
+	events_refused: number;
+	events_conflicting: number;
+	attributes_withheld: number;
+	redactions: number;
+	unauthenticated: number;
+	shed: number;
+	rate_limited: number;
+	denied: number;
+	store_unavailable: number;
+	auth_shed: number;
+	locks: Record<string, { acquisitions: number; wait_ns_total: number; wait_ns_max: number; hold_ns_total: number; hold_ns_max: number }>;
+};

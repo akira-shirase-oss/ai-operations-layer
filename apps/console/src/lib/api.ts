@@ -31,11 +31,33 @@ export type Result<T> =
 	| { state: 'unreachable'; message: string };
 
 export async function api<T>(path: string, fetcher: typeof fetch = fetch): Promise<Result<T>> {
+	return apiCall<T>(path, { method: 'GET' }, fetcher);
+}
+
+/** A JSON POST — control actions and admin revocations; same failure states. */
+export async function apiPost<T>(
+	path: string,
+	body: unknown,
+	fetcher: typeof fetch = fetch
+): Promise<Result<T>> {
+	return apiCall<T>(
+		path,
+		{
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(body ?? {})
+		},
+		fetcher
+	);
+}
+
+async function apiCall<T>(path: string, init: RequestInit, fetcher: typeof fetch): Promise<Result<T>> {
 	const t = token();
 	if (!t) return { state: 'needsAuth' };
 	let response: Response;
 	try {
-		response = await fetcher(path, { headers: { authorization: `Bearer ${t}` } });
+		const headers = { ...(init.headers ?? {}), authorization: `Bearer ${t}` };
+		response = await fetcher(path, { ...init, headers });
 	} catch (e) {
 		return { state: 'unreachable', message: e instanceof Error ? e.message : 'network error' };
 	}

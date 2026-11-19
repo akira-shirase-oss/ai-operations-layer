@@ -36,6 +36,11 @@
 		<div class="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
 			<a class="font-semibold tracking-tight" href={resolve('/')}>AI Operations Layer</a>
 			<div class="flex items-center gap-2">
+				{#if signedIn}
+					<a class="text-sm text-muted-foreground underline-offset-4 hover:underline" href={resolve('/credentials')}
+						>Credentials</a
+					>
+				{/if}
 				<Button variant="ghost" size="icon" aria-label="Toggle dark mode" onclick={toggleMode}>
 					<SunMoon aria-hidden="true" />
 				</Button>
