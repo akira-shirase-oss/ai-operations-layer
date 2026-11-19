@@ -400,6 +400,54 @@ async fn controls_pages_follow_a_stable_keyset(pool: PgPool) {
     assert_eq!(r.status, 400);
 }
 
+/// A store that cannot write the audit row must refuse the action, never perform it
+/// unaudited (the `audit_unavailable`/`store_unavailable` 503s): the reconcile's
+/// decision commit rolls back, the denial refuses the same way, and nothing but the
+/// still-resumable intent record survives.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_failing_audit_store_refuses_the_action(pool: PgPool) {
+    let (url, _host) = stub_host().await;
+    let e = env_with_adapter(pool, &url).await;
+    let path = op_path(&e, "reconcile").await;
+    let req_body = body("article:req-x", &json!({"published": false}));
+
+    e.store.fail_audit_writes(true);
+    // The decision and its audit row commit in one transaction: a failed insert rolls
+    // the transition back — 503, and the intent row stays resumable, never decided.
+    let r = send(&e.app, post_json(&path, &e.no_read, &req_body)).await;
+    assert_eq!(r.status, 503, "{:?}", r.body);
+    // A denied call is denied only because it is audited: the same refusal, no row.
+    let r = send(&e.app, post_json(&path, &e.reader, &req_body)).await;
+    assert_eq!(r.status, 503, "{:?}", r.body);
+    assert!(audit_rows(&e.store, 20).await.is_empty());
+    let op = op_hex(1);
+    let project = e.store.project_by_slug("pilot").await.unwrap().unwrap();
+    let op_uuid = Uuid::from_bytes(*aiops_domain::OperationId::parse(&op).unwrap().as_bytes());
+    let stranded = e
+        .store
+        .control_list(project.id, op_uuid, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        stranded.len(),
+        1,
+        "the committed intent is the crash-window record"
+    );
+    assert_eq!(stranded[0].status, "reconciling");
+
+    // Healed, the boot re-drive finishes the reconcile and audits it — the designed
+    // recovery for exactly this window.
+    e.store.fail_audit_writes(false);
+    assert_eq!(drive_resumable(&e.state).await, 1);
+    let done = e
+        .store
+        .control_list(project.id, op_uuid, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(done[0].status, "reconciled");
+    assert_eq!(audit_rows(&e.store, 20).await.len(), 1);
+}
+
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn reconcile_reads_the_authority_and_stores_its_answer(pool: PgPool) {
     let (url, host) = stub_host().await;

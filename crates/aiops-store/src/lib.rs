@@ -229,6 +229,11 @@ pub struct Store {
     auth: PgPool,
     maintenance: PgPool,
     audit: PgPool,
+    /// Fault hook, debug builds only (never compiled into a release binary): while
+    /// set, every audit write fails — `deny`, `control_decide` and the admin revokes
+    /// must then refuse, which is what their tests assert.
+    #[cfg(debug_assertions)]
+    fail_audit: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One validated event ready to store: the event, what policy changed, its stored JSON.
@@ -663,6 +668,8 @@ impl Store {
                 cfg.control_statement_timeout,
             )
             .await?,
+            #[cfg(debug_assertions)]
+            fail_audit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -675,7 +682,22 @@ impl Store {
             maintenance: pool.clone(),
             audit: pool.clone(),
             control: pool,
+            #[cfg(debug_assertions)]
+            fail_audit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Debug-build fault hook: while set, `audit` and `control_decide`'s audit
+    /// insert fail as an unavailable store — release builds do not carry it.
+    #[cfg(debug_assertions)]
+    pub fn fail_audit_writes(&self, on: bool) {
+        self.fail_audit
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(debug_assertions)]
+    fn audit_failing(&self) -> bool {
+        self.fail_audit.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn migrate(&self) -> Result<(), StoreError> {
@@ -1105,6 +1127,10 @@ impl Store {
 
     /// Writes one audit row on the audit pool. Callers fail closed when this fails.
     pub async fn audit(&self, entry: &AuditEntry<'_>) -> Result<(), StoreError> {
+        #[cfg(debug_assertions)]
+        if self.audit_failing() {
+            return Err(StoreError::Unavailable(sqlx::Error::PoolClosed));
+        }
         sqlx::query(
             "INSERT INTO audit_log (actor, token_id, action, project_slug, target, decision, reason)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -1355,6 +1381,10 @@ impl Store {
         let mut tx = self.control.begin().await?;
         let done = control_apply(&mut tx, id, expect_status, patch).await?;
         if done {
+            #[cfg(debug_assertions)]
+            if self.audit_failing() {
+                return Err(StoreError::Unavailable(sqlx::Error::PoolClosed));
+            }
             sqlx::query(
                 "INSERT INTO audit_log (actor, token_id, action, project_slug, target, decision, reason)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
