@@ -60,22 +60,25 @@ by whether this branch fixed them or listed them. Every claim is cited.
    owed for the counted drill (D-017). People risk, not code.
 4. **Docs site + changelog** — built by a separate worker in
    `planned/ai-operations-layer-docs`; not duplicated here.
-5. **`Store::recent_audit`** (`lib.rs:1124`) — production API with only test
-   callers since `audit_page` landed. Keep (tests lean on it) or move under
-   `#[cfg(test)]` in a later pass; listed, not changed.
-6. **`controls.list` truncates at 100 with no cursor**
-   (`lib.rs:1287`): an operation with >100 control records shows only the
-   newest 100 and offers no next page. Acceptable today (records are few per
-   operation); the audit endpoint already has keyset paging if this ever bites.
-7. **`ApiError::AuditUnavailable`** (control.rs:474, credentials.rs:149,
-   query.rs:83): fail-closed when a *denial* can't be audited — untested
-   because it needs store-failure injection mid-request. The right fix is a
-   `sqlx::test`-level fault hook, not a mock; listed for the next pass.
-8. **No CONTRIBUTING.md** — `AGENTS.md` doubles as it; README doesn't link
-   either file. A one-line pointer in the README's docs list would help humans.
-9. **Console browser coverage for `/audit`** — testids are the anchors
-   (`audit-row`, `audit-empty`); Chromium is sandboxed out here, so the page
-   has no spec yet (UI_AUDIT.md records this).
+5. ~~`Store::recent_audit`~~ — **fixed this branch**: deleted with `AuditRow`;
+   the tests now read through the shared `audit_rows` helper on `audit_page`
+   (`tests/common/mod.rs`), so no production API exists only for tests.
+6. ~~`controls.list` truncates at 100 with no cursor~~ — **fixed this branch**:
+   the store takes `(before_time, before_id)` + `limit` (clamped 1–100) and the
+   endpoint returns `next` in the audit page's shape; `controls_pages_follow_a_
+   stable_keyset` proves the walk stable under mid-walk inserts.
+7. ~~`ApiError::AuditUnavailable` untested~~ — **fixed this branch**:
+   `Store::fail_audit_writes` is a `#[cfg(debug_assertions)]` fault hook
+   (absent from release builds); `a_failing_audit_store_refuses_the_action`
+   proves the denied call and the decision commit both refuse with 503 and no
+   audit row — only the resumable intent record survives, and the re-drive
+   finishes it once the store heals.
+8. ~~No CONTRIBUTING.md~~ — **fixed this branch**: `CONTRIBUTING.md` now
+   carries setup, the stack map, the gates, and the commit/evidence rules.
+9. **Console browser coverage for `/audit`** — `tests/audit.spec.ts` written
+   against the anchors (`audit-row`, `audit-empty`) and `console-e2e.sh` now
+   mints `AIOPS_E2E_ADMIN_TOKEN`; running it needs Chromium, which is sandboxed
+   out here — the coordinator runs it outside the sandbox.
 
 ## Unaudited and unbounded spots — the audit
 
@@ -87,7 +90,7 @@ by whether this branch fixed them or listed them. Every claim is cited.
 | Control endpoints | `operate`/`read` scope under the control bucket; decisions + denials audited in the same transaction |
 | Unauthenticated requests (any surface) | rejected at `authenticate` before an actor exists — nothing to audit; standard |
 | Adapter `GET /stats` | unauthenticated, metadata-only; binds loopback per `deploy/adapter.example.json` — acceptable |
-| `GET /v1/projects/…/controls` | `LIMIT 100`, no cursor — finding 6 above |
+| `GET /v1/projects/…/controls` | keyset `(before_time, before_id)`, `limit` clamped ≤ 100 — fixed, finding 6 |
 | All list/read endpoints | `limit` clamped (ops ≤ 200, audit ≤ 100); `ident_param`/`time_param` bound every filter; bodies bounded by the ingest contract |
 
 Nothing new was found where telemetry could authorize an action or a read
