@@ -1380,17 +1380,22 @@ impl Store {
         Ok(id)
     }
 
-    pub async fn revoke_token(&self, id: Uuid) -> Result<(), StoreError> {
-        let done = sqlx::query(
-            "UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+    /// Revokes the token and returns its digest, so the caller can evict it from the
+    /// credential cache — an incident action must stop the credential NOW, not when
+    /// the cache TTL runs out (D-034). The digest never crosses the API.
+    pub async fn revoke_token(&self, id: Uuid) -> Result<[u8; 32], StoreError> {
+        let row = sqlx::query(
+            "UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
+             RETURNING token_hash",
         )
         .bind(id)
-        .execute(&self.control)
+        .fetch_optional(&self.control)
         .await?;
-        if done.rows_affected() == 0 {
+        let Some(row) = row else {
             return Err(StoreError::NotFound("active token"));
-        }
-        Ok(())
+        };
+        let hash: Vec<u8> = row.get(0);
+        <[u8; 32]>::try_from(hash.as_slice()).map_err(|_| StoreError::Corrupt)
     }
 
     // ---- the credential surface (D-034) ------------------------------------------------
@@ -1464,18 +1469,21 @@ impl Store {
             .collect())
     }
 
-    /// Revoke an ingest key by its id (the admin surface's handle; D-034).
-    pub async fn revoke_ingest_key_id(&self, id: Uuid) -> Result<(), StoreError> {
-        let done = sqlx::query(
-            "UPDATE ingest_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+    /// Revoke an ingest key by its id and return its digest for cache eviction —
+    /// the same incident-action immediacy as token revocation (D-034).
+    pub async fn revoke_ingest_key_id(&self, id: Uuid) -> Result<[u8; 32], StoreError> {
+        let row = sqlx::query(
+            "UPDATE ingest_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
+             RETURNING key_hash",
         )
         .bind(id)
-        .execute(&self.control)
+        .fetch_optional(&self.control)
         .await?;
-        if done.rows_affected() == 0 {
+        let Some(row) = row else {
             return Err(StoreError::NotFound("active ingest key"));
-        }
-        Ok(())
+        };
+        let hash: Vec<u8> = row.get(0);
+        <[u8; 32]>::try_from(hash.as_slice()).map_err(|_| StoreError::Corrupt)
     }
 
     // ---- retention (D-016) ------------------------------------------------------------

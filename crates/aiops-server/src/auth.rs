@@ -123,6 +123,17 @@ impl<V: Clone> CredentialCache<V> {
         }
     }
 
+    /// Drop any cached answer for a digest — the revocation path: a revoked
+    /// credential must stop working now, not when its TTL runs out (D-034).
+    pub fn remove(&self, key: &[u8; 32]) {
+        if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
+            pos.remove(key);
+        }
+        if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
+            neg.remove(key);
+        }
+    }
+
     pub fn get(&self, key: &[u8; 32]) -> Cached<V> {
         if let Some(pos) = self.lock_stats.lock(&self.positive)
             && let Some((v, at)) = pos.map.get(key)

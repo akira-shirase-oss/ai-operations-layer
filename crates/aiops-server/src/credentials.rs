@@ -115,10 +115,25 @@ async fn revoke(
         Kind::Token => app.store.revoke_token(credential).await,
         Kind::IngestKey => app.store.revoke_ingest_key_id(credential).await,
     };
-    let (allowed, reason) = match result {
-        Ok(()) => (true, "revoked"),
-        Err(StoreError::NotFound(_)) => (false, "unknown_or_revoked"),
+    let digest = match result {
+        Ok(digest) => Some(digest),
+        Err(StoreError::NotFound(_)) => None,
         Err(e) => return Err(e.into()),
+    };
+    // Evict the credential's cached answer NOW: a revoked credential dies on its
+    // next presentation, not when the resolver's TTL runs out (D-034 — revocation
+    // is an incident action). The digest stays inside the process; it is never on
+    // the wire.
+    if let Some(digest) = &digest {
+        match kind {
+            Kind::Token => app.tokens.remove(digest),
+            Kind::IngestKey => app.ingest_keys.remove(digest),
+        }
+    }
+    let (allowed, reason) = if digest.is_some() {
+        (true, "revoked")
+    } else {
+        (false, "unknown_or_revoked")
     };
     let entry = AuditEntry {
         actor: &actor.token.actor,
