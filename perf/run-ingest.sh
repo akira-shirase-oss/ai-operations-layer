@@ -190,3 +190,6 @@ $(grep -E '✓|✗' "$work/query.txt" | sed 's/^ *//' || true)
 \`\`\`
 EOF
 echo "wrote $out.md (ingest exit $ingest_status, query exit $query_status)"
+# A threshold miss fails the workflow (k6 exits nonzero); the artifacts still upload.
+if [ "$ingest_status" -ne 0 ]; then exit "$ingest_status"; fi
+exit "$query_status"
