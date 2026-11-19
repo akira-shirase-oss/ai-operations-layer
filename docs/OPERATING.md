@@ -103,6 +103,22 @@ Mint one ingest key per host (`aiops_admin create-ingest-key --project pilot
   older runner without the call headers; `runs_untracked_capacity` means the
   tracking bound was reached.
 
+## Controlled recovery (optional, per project)
+
+Reconcile and retry calls need an execution adapter wired to the project's slug —
+without one every control call is denied `no_adapter` and audited, never guessed:
+
+- `AIOPS_CONTROL_REFERENCE_HOST=<slug>=<host URL>` — the reference host's publisher.
+- `AIOPS_CONTROL_DURABLE_RUNNER=<slug>=<runner URL>`, plus
+  `AIOPS_CONTROL_DURABLE_RUNNER_EFFECT=<worker URL>` (the effect authority the
+  reconcile reads) and `AIOPS_CONTROL_DURABLE_RUNNER_SUBMIT_KEY=<the runner's API
+  key>` — write access, keep it only in this env file.
+
+A retry submits under the business key: the reference host's `POST /articles/retry`,
+or a *new* Durable Runner job under a new `op_key` carrying the key (D-031). Callers
+need the `operate` scope on the project; readers see the records. Control reads run on
+their own pool, so a query flood cannot starve an incident action.
+
 ## Upgrade
 
 Migrations are forward-only and run on start. To upgrade:
