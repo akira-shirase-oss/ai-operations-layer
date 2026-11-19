@@ -366,3 +366,81 @@ named decision when the relevant milestone starts.
   runner's log had one line ("listening"), but its state names the failed
   step. That result opens OQ8. Trade-off: the deciding comparison is still
   not runnable as registered — stated, not hidden.
+- **D-029 — Control approval is the record itself: single actor in v1, with
+  the second-approver column reserved (2026-11-18).** A `control_records`
+  row names one `actor` (the token's owner) and, when a retry is
+  authorized, stamps `approved_by`/`approved_at` from that same actor at
+  the decision commit — the approval is the recorded, audited decision,
+  not a separate artifact. The schema carries a nullable
+  `second_approver` column now so two-person sign-off is a contract change
+  later, not a migration under load. v1 never fills it; nothing reads it.
+  Trade-off: a single operator can retry production effects — accepted
+  because every decision is pre-committed, audited and bounded by the
+  reconciliation it must pass first; two-person sign-off is the listed
+  hardening for the first external consumer.
+- **D-030 — The reference host recovers by resubmitting the same business
+  key; the host's publish is idempotent by key (2026-11-18).** There is no
+  special "republish" path: the retry asks the host to rerun the stored
+  request, and the host's publisher deduplicates effects at its own
+  authority — the same rule D-002 sets for effects generally. A lost
+  publish response followed by a retry lands `times_published == 1`; two
+  concurrent duplicate retries land one effect as well. The control record
+  distinguishes attempts (`times_attempted`, the submit calls that
+  reached the authority) from effects (`times_published`, the registry
+  rows), so a re-driven submit is visible without ever double-counting.
+  Proof: `fixtures/reference-host` — `POST /articles/retry` replays the
+  stored request; the in-process tests submit twice under one key and
+  assert one publication.
+- **D-031 — A Durable Runner retry is a new job under a new `op_key`; the
+  business key travels in the input, and reconciliation reads the effect's
+  authority (2026-11-18).** D-027 settled that an `op_key` returns its
+  first run, so a retry cannot reuse it. The new job carries the business
+  key in its input; the control record stores the new `op_key` ↔
+  business-key mapping so the record can answer "which run is this work
+  now". Reconciliation asks the handler's own authority (the publisher's
+  record for the article worker), not only `GET /jobs/{run}` — the
+  runner's state says the run ended, the effect's authority says the work
+  did. Trade-off: the runner shows two runs for one logical retry, linked
+  only through the control record and the job input — accepted; a
+  telemetry link is evidence, never the retry's authorization.
+- **D-032 — The control executor runs in-server on the control pool:
+  semaphore 16, 2 s authority reads, 5 s submits, boot re-drive
+  (2026-11-18).** A dedicated executor inside `aiops-server` drives
+  resumable records (`requested`, `reconciling`, `authorized`,
+  `submitted` — the states a crash can strand), woken by a `Notify` after
+  each committed decision plus a periodic backstop. Every drive is bounded:
+  at most 16 in flight, authority reads under 2 s, submits under 5 s, a
+  capped submit-attempt counter before `submit_failed`. Isolation is
+  D-022's: control reads and writes use the control pool only, so an
+  ingest or query flood cannot starve a control call (tested with a
+  locked `events` table holding the query pool). A crash between the
+  decision commit and the submit is re-driven exactly once at the effect
+  authority — safe because submits are idempotent by business key (D-030,
+  D-031). Trade-off: the collector process carries the executor's work —
+  accepted at this size; a separate worker is the listed split if submit
+  volume ever approaches the semaphore.
+- **D-033 — `expected_state` is adapter-typed JSON, validated against the
+  adapter's schema, ≤ 4 KiB; `step_id` is reserved — v1 retries the whole
+  operation (2026-11-18).** The caller's assertion is checked against the
+  configured adapter's schema with unknown fields refused (the reference
+  host accepts exactly `{"published": bool}`), so a mistyped assertion is
+  a 400, not a silently wrong reconcile. The wire field `step_id` stays
+  reserved: a retry resubmits the whole operation under its business key —
+  there is no step-scoped retry in v1, and the limitation is documented so
+  no caller invents one. Trade-off: a step-level rerun asks the adapter to
+  resubmit more work than strictly needed — accepted; idempotent business
+  keys make the extra work safe, and partial-step recovery is a listed
+  future contract.
+- **D-034 — Console credentials surface: minting stays CLI-only; the
+  console shows credential metadata and revokes under `admin` (amends
+  D-015, 2026-11-18).** D-015 ruled "no admin HTTP surface". The workspace
+  rule — a UI for every operation — is amended, not surrendered: minting
+  secrets (`create-project`, `create ingest key`, `create token`) stays
+  CLI-only, because a secret shown once in a terminal is a smaller surface
+  than a secret in a browser. The console must show every credential's
+  metadata — projects, ingest keys and tokens with their actor, scope,
+  expiry and revoked state, never the secret — and must offer revocation
+  from the same surface: an `admin`-scoped call, a confirm dialog, an
+  audited row, because revocation is an incident action that has to be
+  fast. `set-opt-in` stays visible in the console; toggling it stays CLI.
+  The UI audit records these exclusions with this rationale.
