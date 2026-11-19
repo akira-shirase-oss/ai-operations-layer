@@ -14,7 +14,7 @@
 # docker compose exec, AIOPS_PG_PORT selects its port). Set AIOPS_PG_URL to an
 # external server's maintenance database instead — postgres://user:pass@host:port/db —
 # and psql(1) talks to it directly; nothing docker is needed (CI's postgres service).
-# psql must be on PATH in that mode.
+# Where psql is out of reach the store crate's perf-psql example stands in.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,7 +29,11 @@ work="$(mktemp -d)"
 db="aiops_perf_$(date -u +%Y%m%d%H%M%S)"
 run_id="$(openssl rand -hex 4)"
 
-if command -v brew >/dev/null 2>&1; then export PATH="$(brew --prefix rustup)/bin:$PATH"; fi
+# Prefer rustup's cargo (the pin) when brew can name it; a brew that resolves but
+# cannot run (a sandbox, a broken install) must not abort the run.
+if brew_prefix="$(brew --prefix rustup 2>/dev/null)" && [ -n "$brew_prefix" ]; then
+  export PATH="$brew_prefix/bin:$PATH"
+fi
 unset CARGO_TARGET_DIR
 scripts/check-toolchain.sh >/dev/null
 if [ -n "${AIOPS_PG_URL:-}" ]; then
@@ -41,8 +45,16 @@ if [ -n "${AIOPS_PG_URL:-}" ]; then
   esac
   pg_base="${AIOPS_PG_URL%/}"; pg_base="${pg_base%/*}"
   store_desc="PostgreSQL at ${pg_base##*@} (external, AIOPS_PG_URL)"
-  psql_admin() { psql "$AIOPS_PG_URL" -v ON_ERROR_STOP=1 -qtA "$@"; }
-  psql_db() { psql "$pg_base/$db" -v ON_ERROR_STOP=1 -qtA "$@"; }
+  if command -v psql >/dev/null 2>&1; then
+    psql_admin() { psql "$AIOPS_PG_URL" -v ON_ERROR_STOP=1 -qtA "$@"; }
+    psql_db() { psql "$pg_base/$db" -v ON_ERROR_STOP=1 -qtA "$@"; }
+  else
+    # No client on this machine (a sandbox where the stack answers on TCP but docker
+    # is out of reach): the store crate's perf-psql example does the same one-statement job.
+    cargo build --release --locked -p aiops-store --example perf-psql >/dev/null 2>&1
+    psql_admin() { target/release/examples/perf-psql "$AIOPS_PG_URL" "${@: -1}"; }
+    psql_db() { target/release/examples/perf-psql "$pg_base/$db" "${@: -1}"; }
+  fi
 else
   scripts/stack.sh up >/dev/null
   pg_base="postgres://aiops:aiops-dev@127.0.0.1:${AIOPS_PG_PORT:-57432}"
@@ -53,10 +65,36 @@ fi
 psql_admin -c "CREATE DATABASE $db"
 cleanup() {
   [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null
+  # The logs outlive the work dir — a failed run must not delete its own evidence.
+  mkdir -p perf/results
+  [ -f "$work/server.log" ] && cp "$work/server.log" "${out}.server.log" || true
+  [ -f "$work/ingest.txt" ] && cp "$work/ingest.txt" "${out}.k6.txt" || true
   psql_admin -c "DROP DATABASE IF EXISTS $db" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
+
+# One GET returning just the HTTP status (000 on transport failure): the
+# pre-flight needs the verdict's code, not the body. python3 stand-in where
+# curl is out of reach — the same pattern as perf-psql.
+if curl --version >/dev/null 2>&1; then
+  probe_code() { curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || echo 000; }
+else
+  probe_code() {
+    python3 - "$1" "$2" <<'PY'
+import sys, urllib.request, urllib.error
+req = urllib.request.Request(sys.argv[1])
+if sys.argv[2]:
+    req.add_header("authorization", sys.argv[2])
+try:
+    print(urllib.request.urlopen(req, timeout=5).status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print("000")
+PY
+  }
+fi
 
 cargo build --release --locked -p aiops-server >/dev/null 2>&1
 bin=target/release/aiops-server
@@ -74,13 +112,30 @@ AIOPS_RETENTION_SWEEP_SECS=86400 AIOPS_LOG=warn \
   "$bin" serve >"$work/server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 100); do
-  curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break
+  probe_code "http://127.0.0.1:$port/readyz" | grep -qx 200 && break
   sleep 0.2
 done
 
+# Pre-flight (the control run's CI 44544883621 burned an hour against a dead
+# listener): the loop above only waits — verify. /healthz answers, then one
+# authenticated call proves auth+pool+project before a million events move.
+fail_preflight() {
+  echo "PREFLIGHT FAILED: $1" >&2
+  [ -f "$work/server.log" ] && { echo '--- collector log (tail) ---' >&2; tail -30 "$work/server.log" >&2; }
+  exit 2
+}
+code="$(probe_code "http://127.0.0.1:$port/healthz")"
+[ "$code" = 200 ] || fail_preflight "GET /healthz answered HTTP $code — the collector is not up; load would only see connection-refused."
+code="$(probe_code "http://127.0.0.1:$port/v1/collector/stats" "authorization: Bearer $admin_token")"
+[ "$code" = 200 ] || fail_preflight "GET /v1/collector/stats with the minted admin token answered HTTP $code (expected 200)."
+
 commit="$(git rev-parse --short HEAD)$(git diff --quiet || echo '-dirty')"
 if [ "$(uname -s)" = "Darwin" ]; then
-  machine="$(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
+  if cpu_brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null)" && [ -n "$cpu_brand" ]; then
+    machine="$cpu_brand, $(sysctl -n hw.ncpu) cores, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
+  else
+    machine="$(uname -sm) — sysctl unavailable here (a sandbox); CPU/RAM not recorded"
+  fi
 else
   cpu="$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -1)"
   machine="${cpu:-$(uname -m)}, $(nproc) cores, $(( $(awk '/^MemTotal/{print $2}' /proc/meminfo) / 1048576 )) GB, $(uname -srm)"
@@ -120,8 +175,10 @@ k6 run --quiet --summary-export "$work/query.json" \
 query_status=$?
 set -e
 load_after="$(uptime | sed 's/.*load averages*: //')"
-rss_kb="$(ps -o rss= -p "$server_pid" | tr -d ' ')"
-collector_stats="$(curl -fsS -H "authorization: Bearer $admin_token" "http://127.0.0.1:$port/v1/collector/stats")"
+# Post-run probes degrade, never abort: a denied `ps` or `curl` (a sandbox) must
+# not kill the script through `set -o pipefail` the way it did on the first smoke.
+rss_kb="$(ps -o rss= -p "$server_pid" 2>/dev/null | tr -d ' ' || true)"
+collector_stats="$(curl -fsS -H "authorization: Bearer $admin_token" "http://127.0.0.1:$port/v1/collector/stats" 2>/dev/null || echo unavailable)"
 
 mkdir -p perf/results
 cp "$work/ingest.json" "$out.ingest.json"
@@ -170,7 +227,7 @@ ${machine_rows}
 | \`events\` table + indexes | ${events_bytes} bytes ($(python3 -c "print(round(${events_bytes}/max(${stored_events},1)))") bytes/event) |
 | \`operations\` table + indexes | ${ops_bytes} bytes |
 | Database total | ${db_bytes} bytes |
-| Collector RSS after the runs | ${rss_kb} KiB |
+| Collector RSS after the runs | ${rss_kb:-unavailable (process tools denied here)}${rss_kb:+ KiB} |
 | Collector counters | \`${collector_stats}\` |
 
 ## Query over what was stored (\`perf/k6/query.js\`, exit ${query_status}, 50 iterations/s for 30 s)
@@ -181,6 +238,12 @@ ${machine_rows}
 | List-by-request p50 / p95 / p99 (ms) | $(metric "$qry" 'http_req_duration{name:list}' med) / $(metric "$qry" 'http_req_duration{name:list}' 'p(95)') / $(metric "$qry" 'http_req_duration{name:list}' 'p(99)') |
 | Checks passed (rate) | $(metric "$qry" checks value) |
 | HTTP failures (rate) | $(metric "$qry" http_req_failed value) |
+
+## First failures (verbatim — status 0 means the request never left k6)
+
+\`\`\`
+$(grep 'AIOPS_FIRST_FAILURE ' "$work/ingest.txt" | head -10 | sed 's/^AIOPS_FIRST_FAILURE //' || true)
+\`\`\`
 
 ## Threshold verdicts
 
