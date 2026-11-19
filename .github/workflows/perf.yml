@@ -7,8 +7,12 @@ name: perf
 on:
   workflow_dispatch:
     inputs:
+      scenario:
+        description: "ingest | control | all"
+        required: true
+        default: "all"
       name:
-        description: "Run name: perf/results/<date>-ingest-<name>.*"
+        description: "Run name: perf/results/<date>-<scenario>-<name>.*"
         required: true
         default: "million-ci"
       rate:
@@ -19,6 +23,14 @@ on:
         description: "k6 duration (K6 format, e.g. 200s)"
         required: true
         default: "200s"
+      control_rate:
+        description: "Control requests per second (300 req/s for ~3,400 s offers ~1,000,000)"
+        required: true
+        default: "300"
+      control_duration:
+        description: "Control mix duration (K6 format; ingest runs concurrently at 100 batches/s)"
+        required: true
+        default: "3400s"
 
 permissions:
   contents: read
@@ -28,6 +40,7 @@ env:
 
 jobs:
   ingest:
+    if: inputs.scenario != 'control'
     name: "ingest run: ${{ inputs.name }} (${{ inputs.rate }} batches/s for ${{ inputs.duration }})"
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -73,5 +86,55 @@ jobs:
         with:
           name: perf-${{ inputs.name }}-${{ github.run_id }}
           path: perf/results/*ingest-${{ inputs.name }}.*
+          retention-days: 30
+          if-no-files-found: error
+
+  control:
+    if: inputs.scenario != 'ingest'
+    name: "control run: ${{ inputs.name }} (${{ inputs.control_rate }} req/s for ${{ inputs.control_duration }}, ingest concurrent)"
+    runs-on: ubuntu-24.04
+    # The mix runs ~57 min at the default rate; the release build and the credential
+    # pool's minting come on top.
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install psql and k6 (version- and sha256-pinned)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          curl -fsSLo /tmp/k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo '39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1  /tmp/k6.tgz' | sha256sum -c -
+          sudo tar -xzf /tmp/k6.tgz -C /usr/local/bin --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          k6 version
+      - name: "perf/run-control.sh ${{ inputs.name }} ${{ inputs.control_rate }} ${{ inputs.control_duration }}"
+        env:
+          AIOPS_PG_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+          AIOPS_PERF_PORT: "57410"
+        run: perf/run-control.sh "${{ inputs.name }}" "${{ inputs.control_rate }}" "${{ inputs.control_duration }}" 100 600
+      - name: Upload the result files (a reviewer commits them under perf/results/)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-control-${{ inputs.name }}-${{ github.run_id }}
+          path: perf/results/*control-${{ inputs.name }}.*
           retention-days: 30
           if-no-files-found: error

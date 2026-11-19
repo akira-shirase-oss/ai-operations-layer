@@ -321,3 +321,24 @@ export type CollectorStats = {
 	auth_shed: number;
 	locks: Record<string, { acquisitions: number; wait_ns_total: number; wait_ns_max: number; hold_ns_total: number; hold_ns_max: number }>;
 };
+
+/** One audit_log row (GET /v1/admin/audit, admin): metadata only — the wire never
+ * carries a secret, a digest or a request body. */
+export type AuditEntry = {
+	id: number;
+	at: string;
+	actor: string;
+	token_id: string | null;
+	action: string;
+	project_slug: string | null;
+	target: string | null;
+	decision: 'allowed' | 'denied';
+	reason: string;
+};
+
+/** One keyset page of audit entries. `next` is the [before_time, before_id]
+ * cursor pair to pass back; null on the last page. */
+export type AuditPage = {
+	audit: AuditEntry[];
+	next: [string, string] | null;
+};

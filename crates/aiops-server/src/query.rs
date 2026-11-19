@@ -184,7 +184,10 @@ fn status_param(s: Option<&str>) -> Result<Option<&'static str>, ApiError> {
     }
 }
 
-fn ident_param(v: Option<String>, field: &'static str) -> Result<Option<String>, ApiError> {
+pub(crate) fn ident_param(
+    v: Option<String>,
+    field: &'static str,
+) -> Result<Option<String>, ApiError> {
     match v {
         None => Ok(None),
         Some(v) if v.is_empty() => Ok(None),
@@ -193,7 +196,10 @@ fn ident_param(v: Option<String>, field: &'static str) -> Result<Option<String>,
     }
 }
 
-fn time_param(v: Option<&str>, field: &'static str) -> Result<Option<Timestamp>, ApiError> {
+pub(crate) fn time_param(
+    v: Option<&str>,
+    field: &'static str,
+) -> Result<Option<Timestamp>, ApiError> {
     v.filter(|t| !t.is_empty())
         .map(|t| Timestamp::parse_rfc3339(t).map_err(|_| ApiError::BadRequest(field)))
         .transpose()

@@ -32,7 +32,7 @@ use crate::credentials;
 use crate::error::ApiError;
 use crate::error::{REQUEST_ID_HEADER, error_envelope, sanitize_request_id};
 use crate::locks::{LockStats, LockView};
-use crate::{console, control, ingest, query};
+use crate::{audit, console, control, ingest, query};
 
 pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
@@ -383,6 +383,7 @@ pub fn router(state: SharedState) -> Router {
             "/v1/projects/{project}/operations/{operation_id}/controls/{control_id}",
             get(control::control),
         )
+        .route("/v1/admin/audit", get(audit::list))
         .route("/v1/admin/credentials", get(credentials::list))
         .route(
             "/v1/admin/credentials/tokens/{id}/revoke",

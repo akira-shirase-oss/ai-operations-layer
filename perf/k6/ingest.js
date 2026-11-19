@@ -13,6 +13,7 @@ import http from 'k6/http';
 import exec from 'k6/execution';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
+import { EVENTS_PER_OP, hex, operation } from './ops.js';
 
 const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:57410';
 const KEY = __ENV.INGEST_KEY;
@@ -20,7 +21,6 @@ const RUN_ID = (__ENV.RUN_ID || '0000beef').padStart(8, '0').slice(0, 8);
 const RATE = Number(__ENV.RATE || 100);
 const DURATION = __ENV.DURATION || '30s';
 const OPS_PER_BATCH = Number(__ENV.OPS_PER_BATCH || 1);
-const EVENTS_PER_OP = 10;
 
 const sent = new Counter('events_sent');
 const accepted = new Counter('events_accepted');
@@ -54,78 +54,12 @@ export const options = {
 	summaryTrendStats: ['min', 'med', 'avg', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
-function hex(n, width) {
-	return n.toString(16).padStart(width, '0').slice(-width);
-}
-
-// Per VU (each VU is its own JS runtime): one source instance with its own sequence.
-let seq = 0;
-
-function iso(ms) {
-	// Fixed six fractional digits, like the SDK.
-	return new Date(ms).toISOString().replace('Z', '000Z');
-}
-
-function operation(n, now) {
-	const op = RUN_ID + hex(n, 24);
-	const step = (k) => hex(n * 8 + k + 1, 16);
-	const base = (k, type) => {
-		seq += 1;
-		return {
-			event_id: RUN_ID + hex(n * EVENTS_PER_OP + k, 24),
-			type,
-			operation_id: op,
-			seq,
-			op_seq: k + 1,
-			event_time: iso(now - 50 + k),
-		};
-	};
-	const steps = [
-		['model', 'generate'],
-		['validation', 'validate'],
-		['tool', 'fact_check'],
-		['tool', 'publish'],
-	];
-	const events = [
-		Object.assign(base(0, 'operation.started'), {
-			name: 'publish_article',
-			request_id: `load-${RUN_ID}-${n}`,
-			release: 'load-r1',
-		}),
-	];
-	steps.forEach(([kind, name], i) => {
-		events.push(
-			Object.assign(base(1 + i * 2, 'step.started'), {
-				step_id: step(i),
-				kind,
-				name,
-				attempt: 1,
-				external_effect: name === 'publish',
-			}),
-		);
-		const finished = Object.assign(base(2 + i * 2, 'step.finished'), {
-			step_id: step(i),
-			attempt: 1,
-			outcome: 'succeeded',
-		});
-		if (kind === 'model') {
-			finished.usage = { input_tokens: 132, output_tokens: 480 };
-			finished.cost_estimate = { micros: 2052, currency: 'USD', basis: 'fake-list-price-2026-11' };
-		}
-		events.push(finished);
-	});
-	events.push(
-		Object.assign(base(9, 'operation.finished'), { outcome: 'succeeded', events_emitted: EVENTS_PER_OP }),
-	);
-	return events;
-}
-
 export default function () {
 	const i = exec.scenario.iterationInTest;
 	const now = Date.now();
 	let events = [];
 	for (let j = 0; j < OPS_PER_BATCH; j++) {
-		events = events.concat(operation(i * OPS_PER_BATCH + j, now));
+		events = events.concat(operation(i * OPS_PER_BATCH + j, now, RUN_ID).events);
 	}
 	const body = JSON.stringify({
 		schema_version: 1,

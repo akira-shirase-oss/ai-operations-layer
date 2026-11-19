@@ -436,6 +436,36 @@ pub struct AuditRow {
     pub reason: String,
 }
 
+/// The audit read's filter: a keyset window plus equality bounds on the fields an
+/// investigator actually narrows by.
+#[derive(Debug, Default)]
+pub struct AuditFilter<'a> {
+    /// Rows strictly older than `(at, id)` — the next-page cursor.
+    pub before: Option<(Timestamp, i64)>,
+    pub action: Option<&'a str>,
+    pub actor: Option<&'a str>,
+    pub token_id: Option<Uuid>,
+    /// `at` in `[from, to)`.
+    pub from: Option<Timestamp>,
+    pub to: Option<Timestamp>,
+    pub limit: i64,
+}
+
+/// One `audit_log` row as the read surface shows it: every column, metadata only
+/// (the table holds no secrets, digests or bodies — this selects no such field).
+#[derive(Debug, Clone)]
+pub struct AuditPageRow {
+    pub id: i64,
+    pub at: Timestamp,
+    pub actor: String,
+    pub token_id: Option<Uuid>,
+    pub action: String,
+    pub project_slug: Option<String>,
+    pub target: Option<String>,
+    pub decision: String,
+    pub reason: String,
+}
+
 /// What a new control record is committed as (`control_insert`'s input).
 #[derive(Debug)]
 pub struct NewControlRecord<'a> {
@@ -1109,6 +1139,55 @@ impl Store {
                 reason: r.get(5),
             })
             .collect())
+    }
+
+    /// A page through `audit_log`, newest first, on the CONTROL pool: a query-path
+    /// flood cannot starve an incident read. The `(at, id)` keyset keeps pages
+    /// stable while rows arrive — a newer row can only fall ahead of the cursor.
+    pub async fn audit_page(
+        &self,
+        filter: &AuditFilter<'_>,
+    ) -> Result<Vec<AuditPageRow>, StoreError> {
+        let (before_t, before_id) = filter
+            .before
+            .map_or((None, None), |(t, id)| (Some(to_odt(t)), Some(id)));
+        let rows = sqlx::query(
+            "SELECT id, at, actor, token_id, action, project_slug, target, decision, reason
+             FROM audit_log
+             WHERE ($1::timestamptz IS NULL OR (at, id) < ($1, $2::bigint))
+               AND ($3::text IS NULL OR action = $3)
+               AND ($4::text IS NULL OR actor = $4)
+               AND ($5::uuid IS NULL OR token_id = $5)
+               AND ($6::timestamptz IS NULL OR at >= $6)
+               AND ($7::timestamptz IS NULL OR at < $7)
+             ORDER BY at DESC, id DESC
+             LIMIT $8",
+        )
+        .bind(before_t)
+        .bind(before_id)
+        .bind(filter.action)
+        .bind(filter.actor)
+        .bind(filter.token_id)
+        .bind(filter.from.map(to_odt))
+        .bind(filter.to.map(to_odt))
+        .bind(filter.limit)
+        .fetch_all(&self.control)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(AuditPageRow {
+                    id: r.get(0),
+                    at: from_odt(r.get(1)),
+                    actor: r.get(2),
+                    token_id: r.get(3),
+                    action: r.get(4),
+                    project_slug: r.get(5),
+                    target: r.get(6),
+                    decision: r.get(7),
+                    reason: r.get(8),
+                })
+            })
+            .collect()
     }
 
     // ---- control records (A3; invariant 4: everything on the control pool) --------------
