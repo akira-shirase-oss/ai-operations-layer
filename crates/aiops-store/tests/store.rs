@@ -757,3 +757,215 @@ async fn the_summary_lookup_uses_the_primary_key_as_a_generic_plan(pool: PgPool)
     assert!(plan.contains("operations_pkey"), "{plan}");
     assert!(plan.contains("operation_id = $2"), "{plan}");
 }
+
+// A3 (D-029..D-033): control records — the layer's own authority for "an operator asked,
+// we decided, the world answered": replay identity, the decision commit with its audit
+// row, the resumable scan, and the control pool's isolation from a saturated query path.
+#[sqlx::test(migrations = "./migrations")]
+async fn control_records_commit_replay_and_resume(pool: PgPool) {
+    use aiops_store::{ControlInsert, ControlPatch, NewControlRecord};
+    let f = fixture(pool).await;
+    let src = source(1);
+    f.store
+        .ingest(batch(
+            &f,
+            &src,
+            prepare(journey(9, 1_000)),
+            WireStats::default(),
+        ))
+        .await
+        .unwrap();
+    let op_uuid = Uuid::from_bytes(*op(9).as_bytes());
+    assert!(
+        f.store
+            .control_operation_exists(f.project, op_uuid)
+            .await
+            .unwrap()
+    );
+
+    let expected = serde_json::json!({"published": false});
+    let new = NewControlRecord {
+        project_id: f.project,
+        operation_id: op_uuid,
+        action: "retry",
+        business_key: "article:req-9",
+        expected_state: &expected,
+        actor: "ana",
+        token_id: Uuid::new_v4(),
+        initial_status: "requested",
+    };
+    let rec = match f.store.control_insert(&new).await.unwrap() {
+        ControlInsert::Created(r) => r,
+        ControlInsert::Existing(_) => panic!("the first insert must create the record"),
+    };
+    assert_eq!(rec.status, "requested");
+    // The replay identity: a repeated call returns the same row, driving nothing new.
+    match f.store.control_insert(&new).await.unwrap() {
+        ControlInsert::Existing(r) => assert_eq!(r.id, rec.id),
+        ControlInsert::Created(_) => panic!("a repeated call must replay, not insert"),
+    }
+
+    // The decision commit: transition + audit row in one transaction.
+    let audit = AuditEntry {
+        actor: "ana",
+        token_id: Some(new.token_id),
+        action: "control.retry",
+        project_slug: Some("pilot"),
+        target: Some("t"),
+        allowed: true,
+        reason: "authorized",
+    };
+    let patch = ControlPatch {
+        status: Some("authorized"),
+        approved_by: Some("ana"),
+        approved_at: Some(now()),
+        ..ControlPatch::default()
+    };
+    assert!(
+        f.store
+            .control_decide(rec.id, Some("requested"), &patch, &audit)
+            .await
+            .unwrap()
+    );
+    // Optimistic concurrency: the same expected status cannot decide twice.
+    assert!(
+        !f.store
+            .control_decide(rec.id, Some("requested"), &patch, &audit)
+            .await
+            .unwrap()
+    );
+    // `authorized` is resumable — the executor's queue sees it with its project.
+    let res = f.store.control_resumable(10).await.unwrap();
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].project_slug, "pilot");
+
+    // A terminal denial is not resumable, and the list shows the reason.
+    let patch = ControlPatch {
+        status: Some("denied"),
+        deny_reason: Some("effect_confirmed"),
+        ..ControlPatch::default()
+    };
+    assert!(
+        f.store
+            .control_update(rec.id, Some("authorized"), &patch)
+            .await
+            .unwrap()
+    );
+    assert!(f.store.control_resumable(10).await.unwrap().is_empty());
+    let list = f.store.control_list(f.project, op_uuid).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].deny_reason.as_deref(), Some("effect_confirmed"));
+
+    // The decision's audit row was written inside the same transaction.
+    let audit = f.store.recent_audit(10).await.unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|r| r.action == "control.retry" && r.decision == "allowed")
+    );
+}
+
+// D-033: the control path lives on its own pool. A query path saturated by a locked
+// `events` table (what an ingest/query flood contends) cannot starve a control write.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_saturated_query_pool_does_not_block_control_writes(pool: PgPool) {
+    use aiops_store::{ControlInsert, ControlPatch, NewControlRecord};
+    let base = (*pool.connect_options()).clone();
+    let mut cfg = StoreConfig::new("");
+    cfg.query_connections = 1;
+    let store = Store::connect_with(&cfg, &base).await.unwrap();
+    let project = store.create_project("pilot").await.unwrap();
+    let op_uuid = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO operations (project_id, operation_id, first_event_time, last_event_time,
+                                 first_received_at, last_received_at)
+         VALUES ($1, $2, now(), now(), now(), now())",
+    )
+    .bind(project)
+    .bind(op_uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A slow timeline read: another session holds `events`, so the query pool's only
+    // connection waits on the lock — the query path is saturated.
+    let mut locker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    let blocked = store.clone();
+    let slow = tokio::spawn(async move {
+        blocked
+            .operation_events(
+                project,
+                OperationId::from_bytes(*op_uuid.as_bytes()).unwrap(),
+                10,
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Every control-surface call still answers: its reads and writes share nothing with
+    // the query or ingest paths.
+    let started = std::time::Instant::now();
+    let found = store
+        .control_project_by_slug("pilot")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.id, project);
+    assert!(
+        store
+            .control_operation_exists(project, op_uuid)
+            .await
+            .unwrap()
+    );
+    let expected = serde_json::json!({"published": false});
+    let rec = match store
+        .control_insert(&NewControlRecord {
+            project_id: project,
+            operation_id: op_uuid,
+            action: "reconcile",
+            business_key: "article:req-x",
+            expected_state: &expected,
+            actor: "ana",
+            token_id: Uuid::new_v4(),
+            initial_status: "reconciling",
+        })
+        .await
+        .unwrap()
+    {
+        ControlInsert::Created(r) => r,
+        ControlInsert::Existing(_) => panic!("must create"),
+    };
+    let audit = AuditEntry {
+        actor: "ana",
+        token_id: None,
+        action: "control.reconcile",
+        project_slug: Some("pilot"),
+        target: None,
+        allowed: true,
+        reason: "effect_absent",
+    };
+    let patch = ControlPatch {
+        status: Some("reconciled"),
+        resolution: Some("effect_absent"),
+        ..ControlPatch::default()
+    };
+    assert!(
+        store
+            .control_decide(rec.id, Some("reconciling"), &patch, &audit)
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.control_list(project, op_uuid).await.unwrap().len(), 1);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "control calls waited {elapsed:?} on a saturated query path"
+    );
+
+    locker.rollback().await.unwrap();
+    let _ = slow.await.unwrap();
+}
