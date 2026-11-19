@@ -8,7 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: "ingest | control | all"
+        description: "Which million-scale job(s) to run"
+        type: choice
+        options: [all, ingest, control]
         required: true
         default: "all"
       name:
