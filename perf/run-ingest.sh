@@ -9,6 +9,12 @@
 #
 # Writes perf/results/<date>-ingest-<name>.md (+ the k6 summaries as JSON). The result
 # carries the machine, the commit, the load average before and after, and every miss.
+#
+# PostgreSQL: by default the local docker stack (scripts/stack.sh up; psql through
+# docker compose exec, AIOPS_PG_PORT selects its port). Set AIOPS_PG_URL to an
+# external server's maintenance database instead — postgres://user:pass@host:port/db —
+# and psql(1) talks to it directly; nothing docker is needed (CI's postgres service).
+# psql must be on PATH in that mode.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -23,12 +29,27 @@ work="$(mktemp -d)"
 db="aiops_perf_$(date -u +%Y%m%d%H%M%S)"
 run_id="$(openssl rand -hex 4)"
 
-export PATH="$(brew --prefix rustup)/bin:$PATH"
+if command -v brew >/dev/null 2>&1; then export PATH="$(brew --prefix rustup)/bin:$PATH"; fi
 unset CARGO_TARGET_DIR
 scripts/check-toolchain.sh >/dev/null
-scripts/stack.sh up >/dev/null
-psql_admin() { docker compose -f deploy/compose.yaml exec -T postgres psql -U aiops -d aiops -v ON_ERROR_STOP=1 -qtA "$@"; }
-psql_db() { docker compose -f deploy/compose.yaml exec -T postgres psql -U aiops -d "$db" -v ON_ERROR_STOP=1 -qtA "$@"; }
+if [ -n "${AIOPS_PG_URL:-}" ]; then
+  # External PostgreSQL (CI): no docker; the URL names the maintenance database and the
+  # run's databases live beside it.
+  case "$AIOPS_PG_URL" in
+    *://*/*) ;;
+    *) echo "AIOPS_PG_URL must look like postgres://user:pass@host:port/db" >&2; exit 2 ;;
+  esac
+  pg_base="${AIOPS_PG_URL%/}"; pg_base="${pg_base%/*}"
+  store_desc="PostgreSQL at ${pg_base##*@} (external, AIOPS_PG_URL)"
+  psql_admin() { psql "$AIOPS_PG_URL" -v ON_ERROR_STOP=1 -qtA "$@"; }
+  psql_db() { psql "$pg_base/$db" -v ON_ERROR_STOP=1 -qtA "$@"; }
+else
+  scripts/stack.sh up >/dev/null
+  pg_base="postgres://aiops:aiops-dev@127.0.0.1:${AIOPS_PG_PORT:-57432}"
+  store_desc="PostgreSQL 18.6 (docker compose, local stack)"
+  psql_admin() { docker compose -f deploy/compose.yaml exec -T postgres psql -U aiops -d aiops -v ON_ERROR_STOP=1 -qtA "$@"; }
+  psql_db() { docker compose -f deploy/compose.yaml exec -T postgres psql -U aiops -d "$db" -v ON_ERROR_STOP=1 -qtA "$@"; }
+fi
 psql_admin -c "CREATE DATABASE $db"
 cleanup() {
   [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null
@@ -39,7 +60,7 @@ trap cleanup EXIT
 
 cargo build --release --locked -p aiops-server >/dev/null 2>&1
 bin=target/release/aiops-server
-export AIOPS_DATABASE_URL="postgres://aiops:aiops-dev@127.0.0.1:${AIOPS_PG_PORT:-57432}/$db"
+export AIOPS_DATABASE_URL="$pg_base/$db"
 "$bin" admin create-project perf >/dev/null
 key="$("$bin" admin create-ingest-key --project perf --name k6)"
 token="$("$bin" admin create-token --actor perf --project perf 2>/dev/null)"
@@ -58,7 +79,20 @@ for _ in $(seq 1 100); do
 done
 
 commit="$(git rev-parse --short HEAD)$(git diff --quiet || echo '-dirty')"
-machine="$(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
+if [ "$(uname -s)" = "Darwin" ]; then
+  machine="$(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
+else
+  cpu="$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -1)"
+  machine="${cpu:-$(uname -m)}, $(nproc) cores, $(( $(awk '/^MemTotal/{print $2}' /proc/meminfo) / 1048576 )) GB, $(uname -srm)"
+fi
+machine_rows="| Machine | ${machine} |
+| Collector | release build, one process, ${store_desc}, 16 ingest connections |"
+venue="Development observation on a shared laptop, **not** production capacity."
+if [ -n "${GITHUB_RUN_ID:-}" ]; then
+  machine_rows="${machine_rows}
+| CI run | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |"
+  venue="Run on a GitHub-hosted Actions runner (dedicated VM, **not** production capacity)."
+fi
 load_before="$(uptime | sed 's/.*load averages*: //')"
 k6v="$(k6 version | head -1 | awk '{print $2}')"
 
@@ -101,15 +135,14 @@ ing="$work/ingest.json"; qry="$work/query.json"
 cat >"$out.md" <<EOF
 # Ingestion run: ${name} (${date})
 
-Development observation on a shared laptop, **not** production capacity.
+${venue}
 
 | | |
 |---|---|
 | Commit | \`${commit}\` |
-| Machine | ${machine} |
+${machine_rows}
 | Load average (1/5/15 min) before | ${load_before} |
 | … after ingest / after query | ${load_after_ingest} / ${load_after} |
-| Collector | release build, one process, PostgreSQL 18.6 (Docker, local stack), 16 ingest connections |
 | Load generator | k6 ${k6v} on the same machine (open model: constant arrival rate) |
 | Offered load | ${rate} batches/s × ${ops_per_batch} operation(s) × 10 events for ${duration} |
 
