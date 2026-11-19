@@ -4,6 +4,26 @@
 // instance's sequence, as the SDK keeps it.
 export const EVENTS_PER_OP = 10;
 
+// The first failures, printed verbatim so a dead harness can never read as a
+// capacity result again (CI 44544883621: 1.36M requests, all refused — and the
+// summary held no reason). A status of 0 means k6 never got an answer: `error`
+// then carries the dial error ("connection refused"), which a real HTTP status
+// or body can't give. Module state is per-VU, so each VU logs at most three —
+// bounded noise even on a total outage — and the runner lifts the lines into
+// the result file.
+let noted = 0;
+
+export function note(tag, r, expected) {
+	if (expected.indexOf(r.status) !== -1 || noted >= 3) return;
+	noted += 1;
+	console.log(`AIOPS_FIRST_FAILURE ${JSON.stringify({
+		op: tag,
+		status: r.status,
+		error: r.error || '',
+		body: String(r.body || '').slice(0, 240),
+	})}`);
+}
+
 let seq = 0;
 
 export function hex(n, width) {

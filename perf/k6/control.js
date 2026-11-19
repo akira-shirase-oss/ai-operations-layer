@@ -24,7 +24,7 @@ import http from 'k6/http';
 import exec from 'k6/execution';
 import { check, sleep } from 'k6';
 import { Counter } from 'k6/metrics';
-import { hex, operation } from './ops.js';
+import { hex, note, operation } from './ops.js';
 
 const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:57410';
 const ADMINS = (__ENV.ADMINS || '').split(',').filter(Boolean);
@@ -92,10 +92,11 @@ export function setup() {
 	// Round-robin the reader tokens and pace the seeding — a burst on one token
 	// hits the 5 rps control bucket and a 429 writes no denial row.
 	for (let i = 0; i < 80; i++) {
-		http.get(`${BASE_URL}/v1/admin/audit`, {
+		const r = http.get(`${BASE_URL}/v1/admin/audit`, {
 			headers: { authorization: `Bearer ${READERS[i % READERS.length]}` },
 			responseCallback: http.expectedStatuses(403, 429),
 		});
+		note('setup-denial', r, [403, 429]);
 		sleep(0.05);
 	}
 }
@@ -130,6 +131,7 @@ function auditPage() {
 		'audit page answered': (x) => x.status === 200 || x.status === 429,
 		'audit page is a page': (x) => x.status !== 200 || Array.isArray(x.json().audit),
 	});
+	note('audit', r, [200, 429]);
 	const next = r.status === 200 ? r.json().next : null;
 	if (r.status === 200) auditPages.add(1);
 	if (next) {
@@ -149,6 +151,7 @@ function controlsRead() {
 		responseCallback: http.expectedStatuses(200, 429),
 		tags: { name: 'controls' },
 	});
+	note('controls', r, [200, 429]);
 	check(r, {
 		'controls answered': (x) => x.status === 429 || (x.status === 200 && Array.isArray(x.json().controls)),
 	});
@@ -161,6 +164,7 @@ function credentialsRead() {
 		responseCallback: http.expectedStatuses(200, 429),
 		tags: { name: 'credentials' },
 	});
+	note('credentials', r, [200, 429]);
 	check(r, {
 		'credentials answered': (x) => x.status === 429 || (x.status === 200 && Array.isArray(x.json().tokens)),
 	});
@@ -176,6 +180,7 @@ function deniedRead() {
 		responseCallback: http.expectedStatuses(403, 429),
 		tags: { name: 'denied' },
 	});
+	note('denied', r, [403, 429]);
 	check(r, { 'denied answered': (x) => x.status === 403 || x.status === 429 });
 	return r;
 }
@@ -193,6 +198,7 @@ function revoke() {
 		responseCallback: http.expectedStatuses(200, 404, 429),
 		tags: { name: 'revoke' },
 	});
+	note('revoke', r, [200, 404, 429]);
 	check(r, { 'revoke answered': (x) => x.status === 200 || x.status === 404 || x.status === 429 });
 	return r;
 }
@@ -234,6 +240,7 @@ export function ingest() {
 		tags: { name: 'ingest' },
 	});
 	sent.add(events.length);
+	note('ingest', res, [200]);
 	let stored = 0;
 	if (res.status === 200) {
 		const answer = res.json();

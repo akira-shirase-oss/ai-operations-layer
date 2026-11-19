@@ -13,7 +13,7 @@ import http from 'k6/http';
 import exec from 'k6/execution';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
-import { EVENTS_PER_OP, hex, operation } from './ops.js';
+import { EVENTS_PER_OP, hex, note, operation } from './ops.js';
 
 const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:57410';
 const KEY = __ENV.INGEST_KEY;
@@ -75,6 +75,7 @@ export default function () {
 		tags: { name: 'ingest' },
 	});
 	sent.add(events.length);
+	note('ingest', res, [200]);
 	let stored = 0;
 	if (res.status === 200) {
 		const answer = res.json();
