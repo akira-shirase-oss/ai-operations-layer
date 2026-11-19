@@ -37,6 +37,9 @@
 			<a class="font-semibold tracking-tight" href={resolve('/')}>AI Operations Layer</a>
 			<div class="flex items-center gap-2">
 				{#if signedIn}
+					<a class="text-sm text-muted-foreground underline-offset-4 hover:underline" href={resolve('/audit')}
+						>Audit</a
+					>
 					<a class="text-sm text-muted-foreground underline-offset-4 hover:underline" href={resolve('/credentials')}
 						>Credentials</a
 					>
