@@ -216,18 +216,26 @@ impl AppState {
             projects_lock: LockStats::default(),
             authority_client,
             authority_gate: Semaphore::new(AUTHORITY_READS),
-            adapters: config
-                .control_reference_host
-                .as_ref()
-                .map(|(slug, url)| {
-                    let mut m = HashMap::new();
+            adapters: {
+                let mut m: HashMap<String, control::ControlAdapter> = HashMap::new();
+                if let Some((slug, url)) = &config.control_reference_host {
                     m.insert(
                         slug.clone(),
                         control::ControlAdapter::ReferenceHost(control::ReferenceHost::new(url)),
                     );
-                    m
-                })
-                .unwrap_or_default(),
+                }
+                if let Some(r) = &config.control_durable_runner {
+                    m.insert(
+                        r.slug.clone(),
+                        control::ControlAdapter::DurableRunner(control::DurableRunner::new(
+                            &r.runner_url,
+                            &r.effect_url,
+                            &r.submit_key,
+                        )),
+                    );
+                }
+                m
+            },
             control_buckets: Buckets::new(control::CONTROL_RATE, control::CONTROL_BURST),
             control_gate: Semaphore::new(control::DRIVE_MAX),
             control_wake: Notify::new(),

@@ -42,6 +42,10 @@ struct Call {
 struct Job {
     #[serde(default)]
     fault: Option<String>,
+    /// A retry's business key (D-031): the new job carries it in the input so its
+    /// publish dedups under the original key — a new `op_key`, the same effect.
+    #[serde(default)]
+    business_key: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -49,6 +53,9 @@ struct Publication {
     business_key: String,
     first_published_at_ms: u128,
     times_published: u32,
+    /// Publish calls that reached this key, deduplicated retries included — attempts
+    /// are not effects (`times_published` is the effect: one per key).
+    times_attempted: u32,
 }
 
 #[derive(Default)]
@@ -98,17 +105,21 @@ impl Worker {
             .is_ok_and(|c| c.by_key.get(key).is_some_and(|e| e.1.is_some()))
     }
 
+    /// The publish effect dedups at its own authority (D-030 applies to the runner's
+    /// workflow too): attempts count every call, `times_published` is the effect —
+    /// one per business key however often a resubmitted run reaches this step.
     fn publish(&self, business_key: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         if let Ok(mut p) = self.publications.lock() {
             p.entry(business_key.to_owned())
-                .and_modify(|p| p.times_published += 1)
+                .and_modify(|p| p.times_attempted += 1)
                 .or_insert_with(|| Publication {
                     business_key: business_key.to_owned(),
                     first_published_at_ms: now,
                     times_published: 1,
+                    times_attempted: 1,
                 });
         }
     }
@@ -130,11 +141,13 @@ async fn step(
 ) -> Response {
     let job: Job = serde_json::from_slice(&call.input).unwrap_or_default();
     let fault = job.fault.as_deref().unwrap_or("");
-    let business_key = call
-        .idem_key
-        .rsplit_once('/')
-        .map_or(call.idem_key.as_str(), |(k, _)| k)
-        .to_owned();
+    // The retry's key comes from the job input (D-031); a first run derives it from the
+    // op_key half of the idem key, as it always has.
+    let business_key = job.business_key.clone().unwrap_or_else(|| {
+        call.idem_key
+            .rsplit_once('/')
+            .map_or(call.idem_key.clone(), |(k, _)| k.to_owned())
+    });
     let (n, done) = w.arrive(&call.idem_key);
     if let Some(answer) = done {
         return ok(&answer); // at-least-once: a repeat gets the first answer

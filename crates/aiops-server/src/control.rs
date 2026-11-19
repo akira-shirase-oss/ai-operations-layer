@@ -67,6 +67,7 @@ const BUSINESS_KEY_MAX: usize = 256;
 #[derive(Clone)]
 pub enum ControlAdapter {
     ReferenceHost(ReferenceHost),
+    DurableRunner(DurableRunner),
 }
 
 /// The reference host (`fixtures/reference-host`): reconcile is
@@ -84,6 +85,36 @@ impl ReferenceHost {
         }
     }
 }
+
+/// Durable Runner (D-031): a retry is a NEW job under a NEW `op_key` — an `op_key`
+/// returns its first run, so it cannot be reused. The business key travels in the job
+/// input; the control record's `submitted_ref` is the new `op_key`, the
+/// `op_key` ↔ `business_key` mapping. Reconcile reads the EFFECT's authority
+/// (`GET {effect}/publications/{key}` — the handler's own record), never only the
+/// runner's run state.
+#[derive(Clone)]
+pub struct DurableRunner {
+    /// The runner's API base (`POST {runner}/jobs` submits a run).
+    runner_base: String,
+    /// The article worker's base — the effect's authority lives there.
+    effect_base: String,
+    /// The runner's write-scope API key. Never logged, never in a snapshot.
+    submit_key: String,
+}
+
+impl DurableRunner {
+    pub fn new(runner_base: &str, effect_base: &str, submit_key: &str) -> Self {
+        Self {
+            runner_base: runner_base.trim_end_matches('/').to_owned(),
+            effect_base: effect_base.trim_end_matches('/').to_owned(),
+            submit_key: submit_key.to_owned(),
+        }
+    }
+}
+
+/// The pilot workflow's step names, in order — the resubmitted job's spec mirrors the
+/// seeded spec (same names, same handler names).
+const DR_STEPS: [&str; 4] = ["generate", "validate", "factcheck", "publish"];
 
 /// What the effect's authority answered for one business key.
 struct EffectRead {
@@ -115,6 +146,7 @@ impl ControlAdapter {
     ) -> Result<(), &'static str> {
         match self {
             Self::ReferenceHost(_) => ReferenceHost::check_request(business_key, expected_state),
+            Self::DurableRunner(_) => DurableRunner::check_request(business_key, expected_state),
         }
     }
 
@@ -123,6 +155,7 @@ impl ControlAdapter {
     async fn read_effect(&self, app: &AppState, key: &str) -> EffectRead {
         match self {
             Self::ReferenceHost(h) => h.read_effect(app, key).await,
+            Self::DurableRunner(d) => d.read_effect(app, key).await,
         }
     }
 
@@ -130,6 +163,7 @@ impl ControlAdapter {
     fn assertion_matches(&self, expected_state: &Value, read: &EffectRead) -> bool {
         match self {
             Self::ReferenceHost(_) => ReferenceHost::assertion_matches(expected_state, read),
+            Self::DurableRunner(_) => DurableRunner::assertion_matches(expected_state, read),
         }
     }
 
@@ -138,6 +172,7 @@ impl ControlAdapter {
     async fn submit(&self, app: &AppState, key: &str) -> Result<SubmitRef, SubmitError> {
         match self {
             Self::ReferenceHost(h) => h.submit(app, key).await,
+            Self::DurableRunner(d) => d.submit(app, key).await,
         }
     }
 }
@@ -237,6 +272,118 @@ impl ReferenceHost {
                 "the host answered 5xx"
             } else {
                 "the host's answer was unexpected"
+            })),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl DurableRunner {
+    /// Business keys carry the runner's `op_key` convention (`article/<id>`); the
+    /// effect assertion is the same publication shape as the reference host.
+    fn check_request(key: &str, expected: &Value) -> Result<(), &'static str> {
+        if key.len() > BUSINESS_KEY_MAX
+            || !key
+                .strip_prefix("article/")
+                .is_some_and(|s| !s.is_empty() && s.len() <= 64)
+        {
+            return Err("business_key must be \"article/<id>\" (256 bytes at most)");
+        }
+        match expected.as_object().map(|m| (m.len(), m.get("published"))) {
+            Some((1, Some(Value::Bool(_)))) => Ok(()),
+            _ => Err("expected_state must be exactly {\"published\": bool}"),
+        }
+    }
+
+    /// `GET {effect}/publications/{key}` — the handler's own record of the effect,
+    /// never the runner's run state (D-031). 200 is published, 404 is absent,
+    /// anything else is the authority not answering.
+    async fn read_effect(&self, app: &AppState, key: &str) -> EffectRead {
+        let url = format!("{}/publications/{key}", self.effect_base);
+        let result = async {
+            let _permit = app.control_gate.acquire().await.ok()?;
+            let res = tokio::time::timeout(READ_DEADLINE, app.authority_client.get(&url).send())
+                .await
+                .ok()?
+                .ok()?;
+            let status = res.status().as_u16();
+            let body = res.json::<Value>().await.unwrap_or(Value::Null);
+            Some((status, body))
+        }
+        .await;
+        let (status, body) = result.unwrap_or((0, Value::Null));
+        let present = match status {
+            200 => Some(true),
+            404 => Some(false),
+            _ => None,
+        };
+        EffectRead {
+            present,
+            snapshot: json!({
+                "source": "publications",
+                "status": status,
+                "answer": body,
+                "read_at": app.now().to_rfc3339(),
+            }),
+        }
+    }
+
+    fn assertion_matches(expected: &Value, read: &EffectRead) -> bool {
+        expected
+            .get("published")
+            .and_then(Value::as_bool)
+            .is_some_and(|claimed| read.present == Some(claimed))
+    }
+
+    /// `POST {runner}/jobs` with a NEW `op_key` and the business key in the input
+    /// (D-031). The new `op_key` is the submitted reference — the record's
+    /// `business_key` ↔ `submitted_ref` pair is the key mapping the decision keeps.
+    async fn submit(&self, app: &AppState, key: &str) -> Result<SubmitRef, SubmitError> {
+        let new_op_key = format!("{key}-r{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let steps: Vec<Value> = DR_STEPS
+            .iter()
+            .map(|h| json!({"name": h, "handler": h}))
+            .collect();
+        let input_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            serde_json::to_vec(&json!({"business_key": key})).unwrap_or_default(),
+        );
+        let job = json!({
+            "op_key": new_op_key,
+            "spec": {"version": 1, "steps": steps, "input_b64": input_b64},
+        });
+        let url = format!("{}/jobs", self.runner_base);
+        let result = async {
+            let _permit = app
+                .control_gate
+                .acquire()
+                .await
+                .map_err(|_| SubmitError::Transient("the control gate closed"))?;
+            let res = tokio::time::timeout(
+                SUBMIT_DEADLINE,
+                app.authority_client
+                    .post(&url)
+                    .bearer_auth(&self.submit_key)
+                    .json(&job)
+                    .send(),
+            )
+            .await
+            .map_err(|_| SubmitError::Transient("the submit deadline passed"))?
+            .map_err(|_| SubmitError::Transient("the submit could not reach the runner"))?;
+            let status = res.status();
+            let body = res.json::<Value>().await.unwrap_or(Value::Null);
+            Ok::<_, SubmitError>((status, body))
+        }
+        .await;
+        match result {
+            Ok((status, _)) if status.is_success() => Ok(SubmitRef(new_op_key)),
+            Ok((status, _)) if status.is_client_error() => {
+                Err(SubmitError::Rejected(status.as_u16()))
+            }
+            Ok((status, _)) => Err(SubmitError::Transient(if status.is_server_error() {
+                "the runner answered 5xx"
+            } else {
+                "the runner's answer was unexpected"
             })),
             Err(e) => Err(e),
         }
@@ -386,14 +533,19 @@ async fn authorize_control(
 /// The shared front of `reconcile`/`retry`: authenticate + authorize under `operate`,
 /// validate the request, check the operation exists, insert-or-replay the record.
 /// `Ok(None)` is the replay/conflict path where the response is already decided.
+/// Both variants boxed: `ControlRecord` is 360 bytes and `Fresh` carries even more —
+/// the enum stays pointer-sized either way (`large_enum_variant`).
 enum ControlFront {
-    Fresh {
-        actor: Actor,
-        project: Project,
-        adapter: ControlAdapter,
-        record: ControlRecord,
-    },
-    Replay(ControlRecord),
+    Fresh(Box<ControlFresh>),
+    Replay(Box<ControlRecord>),
+}
+
+/// A first-call record plus everything its drive needs.
+struct ControlFresh {
+    actor: Actor,
+    project: Project,
+    adapter: ControlAdapter,
+    record: ControlRecord,
 }
 
 async fn begin(
@@ -474,17 +626,17 @@ async fn begin(
         })
         .await?;
     match insert {
-        ControlInsert::Created(record) => Ok(ControlFront::Fresh {
+        ControlInsert::Created(record) => Ok(ControlFront::Fresh(Box::new(ControlFresh {
             actor,
             project,
             adapter,
             record,
-        }),
+        }))),
         ControlInsert::Existing(record) => {
             // The replay identity matched; the body must match too — a different
             // expected_state on the same key is an explicit conflict, audited.
             if record.expected_state == body.expected_state {
-                Ok(ControlFront::Replay(record))
+                Ok(ControlFront::Replay(Box::new(record)))
             } else {
                 audit_denial(
                     app,
@@ -521,12 +673,13 @@ pub async fn reconcile(
     .await?;
     match front {
         ControlFront::Replay(record) => Ok(Json(view(&record, true))),
-        ControlFront::Fresh {
-            actor,
-            project,
-            adapter,
-            record,
-        } => {
+        ControlFront::Fresh(fresh) => {
+            let ControlFresh {
+                actor,
+                project,
+                adapter,
+                record,
+            } = *fresh;
             let read = adapter.read_effect(&app, &record.business_key).await;
             finish_reconcile(
                 &app,
@@ -568,12 +721,13 @@ pub async fn retry(
     .await?;
     match front {
         ControlFront::Replay(record) => Ok(Json(view(&record, true))),
-        ControlFront::Fresh {
-            actor,
-            project,
-            adapter,
-            record,
-        } => {
+        ControlFront::Fresh(fresh) => {
+            let ControlFresh {
+                actor,
+                project,
+                adapter,
+                record,
+            } = *fresh;
             decide(
                 &app,
                 &record,
