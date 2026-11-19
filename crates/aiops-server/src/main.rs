@@ -102,7 +102,10 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
         config.connection_lifetime,
     );
     let sweep_every = config.retention_sweep_every;
-    let state = Arc::new(AppState::new(store.clone(), config, system_clock(), csp));
+    let state = Arc::new(
+        AppState::new(store.clone(), config, system_clock(), csp)
+            .context("building the authority HTTP client")?,
+    );
     let app = router(state.clone());
 
     let cancel = CancellationToken::new();

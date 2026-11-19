@@ -170,13 +170,22 @@ pub type SharedState = Arc<AppState>;
 impl AppState {
     /// `console_csp` comes from [`console::content_security_policy`], computed off the
     /// async workers by the caller (it reads a file).
+    ///
+    /// Fails rather than degrading to a default `reqwest::Client`: that fallback would
+    /// silently drop the redirect ban and the connect timeout the authority read is
+    /// bounded by (D-027), so a client that cannot be built stops startup.
     pub fn new(
         store: Store,
         config: Config,
         clock: Clock,
         console_csp: Option<HeaderValue>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, reqwest::Error> {
+        let authority_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .build()?;
+        Ok(Self {
             ingest_gate: Arc::new(Semaphore::new(config.ingest_max_in_flight)),
             ingest_body_budget: Arc::new(Semaphore::new(config.ingest_body_budget_kib)),
             lookup_gate: Arc::new(Semaphore::new(config.auth_lookups_in_flight)),
@@ -195,19 +204,14 @@ impl AppState {
             metrics: Metrics::default(),
             projects: Mutex::new(HashMap::new()),
             projects_lock: LockStats::default(),
-            authority_client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .connect_timeout(Duration::from_secs(2))
-                .build()
-                .unwrap_or_default(),
+            authority_client,
             authority_gate: Semaphore::new(AUTHORITY_READS),
             limits: Limits::default(),
             store,
             config,
             clock,
             console_csp,
-        }
+        })
     }
 
     pub fn now(&self) -> Timestamp {

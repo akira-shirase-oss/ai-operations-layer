@@ -81,7 +81,8 @@ pub(crate) async fn env_with(pool: PgPool, tune: impl FnOnce(&mut AppState)) -> 
     let no_read = token("bob", &["operate"], "pilot").await;
     let other_reader = token("eve", &["read"], "other").await;
     let admin = token("ops", &["admin"], "pilot").await;
-    let mut state = AppState::new(store.clone(), Config::local(""), system_clock(), None);
+    let mut state = AppState::new(store.clone(), Config::local(""), system_clock(), None)
+        .expect("invariant: the authority client builds with a static config");
     tune(&mut state);
     let state = Arc::new(state);
     Env {

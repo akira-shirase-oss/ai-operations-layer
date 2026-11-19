@@ -114,7 +114,8 @@ async fn collector_on(
         .unwrap();
     let mut config = Config::local("");
     tune(&mut config);
-    let mut state = AppState::new(store.clone(), config.clone(), system_clock(), None);
+    let mut state = AppState::new(store.clone(), config.clone(), system_clock(), None)
+        .expect("invariant: the authority client builds with a static config");
     state.ingest_buckets =
         aiops_server::auth::Buckets::new(config.ingest_events_per_sec, config.ingest_burst_events);
     let app = router(Arc::new(state));

@@ -358,6 +358,42 @@ async fn queries_without_scope_or_project_are_denied_and_audited(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn an_unknown_slug_flood_is_bounded_by_the_query_limit(pool: PgPool) {
+    // Every denial writes an audit row synchronously, so a token holder spraying random
+    // unknown slugs would otherwise turn denials into an audit-write flood. The bound is
+    // the token's own query bucket: a rate-limited request never reaches authorize(), so
+    // it writes no row. Audited rows must equal the denials the limiter admitted.
+    let e = env_with(pool, |s| {
+        s.query_buckets = aiops_server::auth::Buckets::new(1, 5);
+    })
+    .await;
+    let (mut denied, mut limited) = (0usize, 0usize);
+    for i in 0..40 {
+        let r = send(
+            &e.app,
+            get(&format!("/v1/projects/nope-{i}/operations"), &e.reader),
+        )
+        .await;
+        match r.status {
+            403 => denied += 1,
+            429 => limited += 1,
+            s => panic!("an unknown slug answered {s}: {}", r.body),
+        }
+    }
+    let audit = e.store.recent_audit(100).await.unwrap();
+    assert_eq!(denied + limited, 40);
+    assert!(
+        audit.len() == denied,
+        "every denial audited exactly once; a 429 never audits"
+    );
+    assert!(
+        denied <= 10,
+        "burst 5 plus a slow refill admits a few, not a flood: {denied}"
+    );
+    assert!(limited >= 30, "the limiter refused most of the flood");
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn an_expired_token_is_unauthenticated(pool: PgPool) {
     let e = env(pool).await;
     let t = aiops_server::auth::generate(aiops_server::auth::TOKEN_PREFIX).unwrap();
