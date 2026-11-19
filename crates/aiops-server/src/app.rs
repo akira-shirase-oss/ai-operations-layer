@@ -15,7 +15,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use serde::Serialize;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -28,10 +28,11 @@ use uuid::Uuid;
 
 use crate::auth::{Buckets, Cached, CredentialCache};
 use crate::config::Config;
+use crate::credentials;
 use crate::error::ApiError;
 use crate::error::{REQUEST_ID_HEADER, error_envelope, sanitize_request_id};
 use crate::locks::{LockStats, LockView};
-use crate::{console, ingest, query};
+use crate::{console, control, ingest, query};
 
 pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
@@ -157,6 +158,16 @@ pub struct AppState {
     /// a connect timeout; at most `AUTHORITY_READS` at once.
     pub authority_client: reqwest::Client,
     pub authority_gate: Semaphore,
+    /// The project's configured control adapter (D-007): controls exist only where one
+    /// owns execution — every other project's control call is denied, audited.
+    pub adapters: HashMap<String, control::ControlAdapter>,
+    /// The control path's own per-token bucket (not the query bucket's).
+    pub control_buckets: Buckets<Uuid>,
+    /// External adapter calls (reads + submits) in flight at most — D-033's semaphore.
+    pub control_gate: Semaphore,
+    /// Wakes the control executor when a retry commits `authorized`; its 1 s tick is the
+    /// backstop for a wake lost while a pass was running.
+    pub control_wake: Notify,
 }
 
 /// Runner reads in flight at most; past it the console is told "busy".
@@ -170,13 +181,22 @@ pub type SharedState = Arc<AppState>;
 impl AppState {
     /// `console_csp` comes from [`console::content_security_policy`], computed off the
     /// async workers by the caller (it reads a file).
+    ///
+    /// Fails rather than degrading to a default `reqwest::Client`: that fallback would
+    /// silently drop the redirect ban and the connect timeout the authority read is
+    /// bounded by (D-027), so a client that cannot be built stops startup.
     pub fn new(
         store: Store,
         config: Config,
         clock: Clock,
         console_csp: Option<HeaderValue>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, reqwest::Error> {
+        let authority_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .build()?;
+        Ok(Self {
             ingest_gate: Arc::new(Semaphore::new(config.ingest_max_in_flight)),
             ingest_body_budget: Arc::new(Semaphore::new(config.ingest_body_budget_kib)),
             lookup_gate: Arc::new(Semaphore::new(config.auth_lookups_in_flight)),
@@ -195,19 +215,37 @@ impl AppState {
             metrics: Metrics::default(),
             projects: Mutex::new(HashMap::new()),
             projects_lock: LockStats::default(),
-            authority_client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .connect_timeout(Duration::from_secs(2))
-                .build()
-                .unwrap_or_default(),
+            authority_client,
             authority_gate: Semaphore::new(AUTHORITY_READS),
+            adapters: {
+                let mut m: HashMap<String, control::ControlAdapter> = HashMap::new();
+                if let Some((slug, url)) = &config.control_reference_host {
+                    m.insert(
+                        slug.clone(),
+                        control::ControlAdapter::ReferenceHost(control::ReferenceHost::new(url)),
+                    );
+                }
+                if let Some(r) = &config.control_durable_runner {
+                    m.insert(
+                        r.slug.clone(),
+                        control::ControlAdapter::DurableRunner(control::DurableRunner::new(
+                            &r.runner_url,
+                            &r.effect_url,
+                            &r.submit_key,
+                        )),
+                    );
+                }
+                m
+            },
+            control_buckets: Buckets::new(control::CONTROL_RATE, control::CONTROL_BURST),
+            control_gate: Semaphore::new(control::DRIVE_MAX),
+            control_wake: Notify::new(),
             limits: Limits::default(),
             store,
             config,
             clock,
             console_csp,
-        }
+        })
     }
 
     pub fn now(&self) -> Timestamp {
@@ -328,6 +366,31 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/projects/{project}/operations/{operation_id}/authority",
             get(crate::authority::authority),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/reconcile",
+            post(control::reconcile),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/retry",
+            post(control::retry),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/controls",
+            get(control::controls),
+        )
+        .route(
+            "/v1/projects/{project}/operations/{operation_id}/controls/{control_id}",
+            get(control::control),
+        )
+        .route("/v1/admin/credentials", get(credentials::list))
+        .route(
+            "/v1/admin/credentials/tokens/{id}/revoke",
+            post(credentials::revoke_token),
+        )
+        .route(
+            "/v1/admin/credentials/ingest-keys/{id}/revoke",
+            post(credentials::revoke_ingest_key),
         )
         .route("/v1/collector/stats", get(query::stats))
         .layer(SetResponseHeaderLayer::overriding(

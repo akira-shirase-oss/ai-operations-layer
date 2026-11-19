@@ -7,6 +7,8 @@
 //! - [`timeline`]: one operation's honest timeline — declared status, exact and unknown
 //!   loss, both clocks, clock-skew flags.
 //! - [`summary`], [`names`], [`ratelimit`], [`context`]: the pure parts of the ingest path.
+//! - [`control`]: the control-record state machine — the only legal way a reconcile or
+//!   retry record may move.
 //!
 //! **Compatibility rule.** A collector accepts exactly the schema versions it lists in
 //! [`wire::SCHEMA_VERSION`] (v1 today) and refuses unknown fields, so any new field is a
@@ -14,6 +16,7 @@
 //! the SDK always writes the lowest version that carries what it sends.
 
 pub mod context;
+pub mod control;
 pub mod correlate;
 pub mod event;
 pub mod ids;

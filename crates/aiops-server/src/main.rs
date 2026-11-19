@@ -102,7 +102,10 @@ async fn serve(store: Store, config: Config) -> anyhow::Result<()> {
         config.connection_lifetime,
     );
     let sweep_every = config.retention_sweep_every;
-    let state = Arc::new(AppState::new(store.clone(), config, system_clock(), csp));
+    let state = Arc::new(
+        AppState::new(store.clone(), config, system_clock(), csp)
+            .context("building the authority HTTP client")?,
+    );
     let app = router(state.clone());
 
     let cancel = CancellationToken::new();
@@ -133,6 +136,9 @@ Ok(t) => {
             }
         });
     }
+    // The control executor (D-033): boot re-drive first, then wake + tick passes on the
+    // tracked tasks.
+    aiops_server::control::spawn_executor(state.clone(), &tracker, cancel.clone());
     tracker.close();
 
     let listener = tokio::net::TcpListener::bind(listen)

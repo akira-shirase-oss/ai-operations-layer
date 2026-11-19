@@ -42,60 +42,7 @@ pub(crate) async fn env(pool: PgPool) -> Env {
 }
 
 pub(crate) async fn env_with(pool: PgPool, tune: impl FnOnce(&mut AppState)) -> Env {
-    let store = Store::from_pool(pool);
-    store.create_project("pilot").await.unwrap();
-    store.create_project("other").await.unwrap();
-    let ingest_key = generate(INGEST_KEY_PREFIX).unwrap();
-    store
-        .create_ingest_key("pilot", "reference-host", &hash(&ingest_key))
-        .await
-        .unwrap();
-    let other_ingest_key_same_project = generate(INGEST_KEY_PREFIX).unwrap();
-    store
-        .create_ingest_key(
-            "pilot",
-            "second-host",
-            &hash(&other_ingest_key_same_project),
-        )
-        .await
-        .unwrap();
-    let other_ingest_key = generate(INGEST_KEY_PREFIX).unwrap();
-    store
-        .create_ingest_key("other", "other-host", &hash(&other_ingest_key))
-        .await
-        .unwrap();
-    let later = now().plus_micros(3_600_000_000);
-    let token = |actor: &'static str, scopes: &'static [&'static str], project: &'static str| {
-        let store = store.clone();
-        async move {
-            let t = generate(TOKEN_PREFIX).unwrap();
-            let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
-            store
-                .create_token(actor, &scopes, &[project.to_owned()], &hash(&t), later)
-                .await
-                .unwrap();
-            t
-        }
-    };
-    let reader = token("ana", &["read"], "pilot").await;
-    let no_read = token("bob", &["operate"], "pilot").await;
-    let other_reader = token("eve", &["read"], "other").await;
-    let admin = token("ops", &["admin"], "pilot").await;
-    let mut state = AppState::new(store.clone(), Config::local(""), system_clock(), None);
-    tune(&mut state);
-    let state = Arc::new(state);
-    Env {
-        app: router(state.clone()),
-        state,
-        store,
-        ingest_key,
-        other_ingest_key,
-        other_ingest_key_same_project,
-        reader,
-        no_read,
-        other_reader,
-        admin,
-    }
+    env_with_store(Store::from_pool(pool), tune).await
 }
 
 pub(crate) fn now() -> Timestamp {
@@ -337,4 +284,71 @@ impl ScratchDb {
         .await
         .unwrap();
     }
+}
+
+/// `env` with a caller-built `Store` (e.g. `Store::connect_with` for real pools — the
+/// isolation tests need the control path on its own connections, not `from_pool`'s one).
+pub(crate) async fn env_with_store(store: Store, tune: impl FnOnce(&mut AppState)) -> Env {
+    store.create_project("pilot").await.unwrap();
+    store.create_project("other").await.unwrap();
+    let ingest_key = generate(INGEST_KEY_PREFIX).unwrap();
+    store
+        .create_ingest_key("pilot", "reference-host", &hash(&ingest_key))
+        .await
+        .unwrap();
+    let other_ingest_key_same_project = generate(INGEST_KEY_PREFIX).unwrap();
+    store
+        .create_ingest_key(
+            "pilot",
+            "second-host",
+            &hash(&other_ingest_key_same_project),
+        )
+        .await
+        .unwrap();
+    let other_ingest_key = generate(INGEST_KEY_PREFIX).unwrap();
+    store
+        .create_ingest_key("other", "other-host", &hash(&other_ingest_key))
+        .await
+        .unwrap();
+    let later = now().plus_micros(3_600_000_000);
+    let token = |actor: &'static str, scopes: &'static [&'static str], project: &'static str| {
+        let store = store.clone();
+        async move {
+            let t = generate(TOKEN_PREFIX).unwrap();
+            let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+            store
+                .create_token(actor, &scopes, &[project.to_owned()], &hash(&t), later)
+                .await
+                .unwrap();
+            t
+        }
+    };
+    let reader = token("ana", &["read"], "pilot").await;
+    let no_read = token("bob", &["operate"], "pilot").await;
+    let other_reader = token("eve", &["read"], "other").await;
+    let admin = token("ops", &["admin"], "pilot").await;
+    let mut state = AppState::new(store.clone(), Config::local(""), system_clock(), None).unwrap();
+    tune(&mut state);
+    let state = Arc::new(state);
+    Env {
+        app: router(state.clone()),
+        state,
+        store,
+        ingest_key,
+        other_ingest_key,
+        other_ingest_key_same_project,
+        reader,
+        no_read,
+        other_reader,
+        admin,
+    }
+}
+
+/// A JSON POST to a `/v1` API route under a token.
+pub(crate) fn post_json(path: &str, token: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::post(path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(body.to_string().into())
+        .unwrap()
 }

@@ -196,12 +196,10 @@ async fn a_runner_that_is_down_or_refuses_the_key_is_named_as_such(pool: PgPool)
             url: "http://127.0.0.1:9".into(), // nothing listens on discard
             read_key: READ_KEY.into(),
         });
-        let state = Arc::new(aiops_server::AppState::new(
-            e.store.clone(),
-            cfg,
-            aiops_server::system_clock(),
-            None,
-        ));
+        let state = Arc::new(
+            aiops_server::AppState::new(e.store.clone(), cfg, aiops_server::system_clock(), None)
+                .unwrap(),
+        );
         aiops_server::router(state)
     };
     let (_, a) = authority(&e2, &e.reader, &real).await;

@@ -25,6 +25,31 @@ impl std::fmt::Debug for AuthoritySource {
     }
 }
 
+/// A Durable Runner project's control adapter config (D-031): the runner's API, the
+/// effect's authority (the article worker), and the runner's write-scope submit key.
+#[derive(Clone)]
+pub struct ControlRunner {
+    /// The project slug the adapter serves.
+    pub slug: String,
+    /// `POST {runner_url}/jobs` — where a resubmitted job goes.
+    pub runner_url: String,
+    /// `GET {effect_url}/publications/{key}` — the effect's own authority.
+    pub effect_url: String,
+    /// The runner's write-scope API key. Never logged.
+    pub submit_key: String,
+}
+
+impl std::fmt::Debug for ControlRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlRunner")
+            .field("slug", &self.slug)
+            .field("runner_url", &self.runner_url)
+            .field("effect_url", &self.effect_url)
+            .field("submit_key", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
@@ -61,6 +86,16 @@ pub struct Config {
     /// `AIOPS_AUTHORITY_DURABLE_RUNNER=<label>=<url>` and
     /// `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`: the runner the console may ask.
     pub authority: Option<AuthoritySource>,
+    /// `AIOPS_CONTROL_REFERENCE_HOST=<slug>=<url>`: the project's control adapter (D-007).
+    /// v1 wires one project to the reference host; a project without an adapter denies
+    /// every control call, audited.
+    pub control_reference_host: Option<(String, String)>,
+    /// `AIOPS_CONTROL_DURABLE_RUNNER=<slug>=<runner-url>` plus
+    /// `AIOPS_CONTROL_DURABLE_RUNNER_EFFECT=<effect-url>` and
+    /// `AIOPS_CONTROL_DURABLE_RUNNER_SUBMIT_KEY`: the Durable Runner control adapter
+    /// (D-031) — a retry submits a NEW job under a NEW `op_key` with the business key
+    /// in its input; reconcile reads the effect's authority, not the runner's state.
+    pub control_durable_runner: Option<ControlRunner>,
     /// Accepted connections at most.
     pub max_connections: usize,
     /// A response write making no progress for this long ends its connection (review N3).
@@ -100,9 +135,15 @@ impl Config {
             max_requests_per_connection: 1_000,
             connection_lifetime: Duration::from_secs(300),
             authority: None,
+            control_reference_host: None,
+            control_durable_runner: None,
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one env var per stanza; splitting obscures the surface it describes"
+    )]
     pub fn from_env() -> Result<Self, String> {
         let mut errors = Vec::new();
         let database_url = std::env::var("AIOPS_DATABASE_URL").unwrap_or_else(|_| {
@@ -189,6 +230,58 @@ impl Config {
                 _ => errors.push(
                     "AIOPS_AUTHORITY_DURABLE_RUNNER must be <label>=http(s)://host:port".to_owned(),
                 ),
+            }
+        }
+        if let Ok(v) = std::env::var("AIOPS_CONTROL_REFERENCE_HOST") {
+            match v.split_once('=') {
+                Some((slug, url))
+                    if !slug.is_empty()
+                        && (url.starts_with("http://") || url.starts_with("https://")) =>
+                {
+                    cfg.control_reference_host =
+                        Some((slug.to_owned(), url.trim_end_matches('/').to_owned()));
+                }
+                _ => errors.push(
+                    "AIOPS_CONTROL_REFERENCE_HOST must be <project-slug>=http(s)://host:port"
+                        .to_owned(),
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("AIOPS_CONTROL_DURABLE_RUNNER") {
+            let effect = std::env::var("AIOPS_CONTROL_DURABLE_RUNNER_EFFECT").unwrap_or_default();
+            let submit_key =
+                std::env::var("AIOPS_CONTROL_DURABLE_RUNNER_SUBMIT_KEY").unwrap_or_default();
+            let valid = match v.split_once('=') {
+                Some((slug, url))
+                    if !slug.is_empty()
+                        && (url.starts_with("http://") || url.starts_with("https://")) =>
+                {
+                    cfg.control_durable_runner = Some(ControlRunner {
+                        slug: slug.to_owned(),
+                        runner_url: url.trim_end_matches('/').to_owned(),
+                        effect_url: effect.trim_end_matches('/').to_owned(),
+                        submit_key: submit_key.clone(),
+                    });
+                    true
+                }
+                _ => false,
+            };
+            if valid {
+                if !effect.starts_with("http://") && !effect.starts_with("https://") {
+                    errors.push(
+                        "AIOPS_CONTROL_DURABLE_RUNNER_EFFECT (the effect authority's http(s) URL) is required with AIOPS_CONTROL_DURABLE_RUNNER".to_owned(),
+                    );
+                }
+                if submit_key.len() < 32 {
+                    errors.push(
+                        "AIOPS_CONTROL_DURABLE_RUNNER_SUBMIT_KEY (the runner's write-scope key, at least 32 characters) is required with AIOPS_CONTROL_DURABLE_RUNNER".to_owned(),
+                    );
+                }
+            } else {
+                errors.push(
+                    "AIOPS_CONTROL_DURABLE_RUNNER must be <project-slug>=http(s)://host:port"
+                        .to_owned(),
+                );
             }
         }
         if errors.is_empty() {

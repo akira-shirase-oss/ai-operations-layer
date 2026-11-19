@@ -223,12 +223,15 @@ async fn a_stuck_query_path_never_delays_ingest_or_audit_at_the_api(pool: PgPool
         }
     };
     let (reader, outsider) = (token("pilot").await, token("other").await);
-    let state = std::sync::Arc::new(aiops_server::AppState::new(
-        store.clone(),
-        aiops_server::Config::local(""),
-        aiops_server::system_clock(),
-        None,
-    ));
+    let state = std::sync::Arc::new(
+        aiops_server::AppState::new(
+            store.clone(),
+            aiops_server::Config::local(""),
+            aiops_server::system_clock(),
+            None,
+        )
+        .unwrap(),
+    );
     let app = aiops_server::router(state);
     // Warm the credential and project caches, as a running collector's are.
     let warm = |n: u32| {

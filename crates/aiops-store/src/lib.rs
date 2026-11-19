@@ -296,6 +296,38 @@ pub struct Project {
     pub slug: String,
 }
 
+/// Credential metadata for the admin surface (D-034): everything about a key or a
+/// token except the secret hash, which never leaves the store.
+#[derive(Debug, Clone)]
+pub struct ProjectInfo {
+    pub id: Uuid,
+    pub slug: String,
+    pub opt_in_keys: Vec<String>,
+    pub created_at: Timestamp,
+}
+
+/// One ingest key's metadata (the hash is never selected).
+#[derive(Debug, Clone)]
+pub struct IngestKeyInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub project_slug: String,
+    pub created_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
+}
+
+/// One token's metadata (the hash is never selected).
+#[derive(Debug, Clone)]
+pub struct TokenInfo {
+    pub id: Uuid,
+    pub actor: String,
+    pub scopes: Vec<String>,
+    pub project_slugs: Vec<String>,
+    pub created_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
+}
+
 /// One row of the operation list.
 #[derive(Debug, Clone)]
 pub struct OperationRow {
@@ -402,6 +434,76 @@ pub struct AuditRow {
     pub target: Option<String>,
     pub decision: String,
     pub reason: String,
+}
+
+/// What a new control record is committed as (`control_insert`'s input).
+#[derive(Debug)]
+pub struct NewControlRecord<'a> {
+    pub project_id: Uuid,
+    pub operation_id: Uuid,
+    /// The `ControlKind` name: `reconcile` or `retry`.
+    pub action: &'a str,
+    pub business_key: &'a str,
+    /// The adapter-validated assertion (bounded on the way in).
+    pub expected_state: &'a serde_json::Value,
+    pub actor: &'a str,
+    pub token_id: Uuid,
+    /// The first active status for the action: `reconciling` for a reconcile (its read is
+    /// about to start), `requested` for a retry (its decision is pending).
+    pub initial_status: &'a str,
+}
+
+/// One `control_records` row (A3): intent + decision + what the authority answered.
+#[derive(Debug, Clone)]
+pub struct ControlRecord {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub operation_id: Uuid,
+    pub action: String,
+    pub business_key: String,
+    pub expected_state: serde_json::Value,
+    pub actor: String,
+    pub token_id: Uuid,
+    pub status: String,
+    pub resolution: Option<String>,
+    pub authority_read: Option<serde_json::Value>,
+    pub submitted_ref: Option<String>,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<Timestamp>,
+    pub deny_reason: Option<String>,
+    pub attempts: i32,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+/// Whether `control_insert` created the row or found its unique key already taken
+/// (`Existing` is the replay path — the caller compares bodies).
+#[derive(Debug)]
+pub enum ControlInsert {
+    Created(ControlRecord),
+    Existing(ControlRecord),
+}
+
+/// A resumable record plus its project's slug (for the executor's adapter pick and its
+/// audit rows).
+#[derive(Debug)]
+pub struct ResumableControl {
+    pub record: ControlRecord,
+    pub project_slug: String,
+}
+
+/// Fields a committed transition may set; `None` leaves the column alone.
+#[derive(Debug, Default)]
+pub struct ControlPatch<'a> {
+    pub status: Option<&'a str>,
+    pub resolution: Option<&'a str>,
+    pub authority_read: Option<&'a serde_json::Value>,
+    pub submitted_ref: Option<&'a str>,
+    pub deny_reason: Option<&'a str>,
+    pub approved_by: Option<&'a str>,
+    pub approved_at: Option<Timestamp>,
+    /// Added to `attempts` (one per submit try; the re-drive budget).
+    pub add_attempts: Option<i32>,
 }
 
 /// Retention values (D-016).
@@ -1009,6 +1111,178 @@ impl Store {
             .collect())
     }
 
+    // ---- control records (A3; invariant 4: everything on the control pool) --------------
+
+    /// The control path's own read of `projects`, on the control pool: a saturated query
+    /// pool cannot starve a control action's authorization.
+    pub async fn control_project_by_slug(&self, slug: &str) -> Result<Option<Project>, StoreError> {
+        let row = sqlx::query("SELECT id, slug FROM projects WHERE slug = $1")
+            .bind(slug)
+            .fetch_optional(&self.control)
+            .await?;
+        Ok(row.map(|r| Project {
+            id: r.get(0),
+            slug: r.get(1),
+        }))
+    }
+
+    /// Whether the operation exists in this project — the control path's own read.
+    pub async fn control_operation_exists(
+        &self,
+        project_id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE project_id = $1 AND operation_id = $2)",
+        )
+        .bind(project_id)
+        .bind(operation_id)
+        .fetch_one(&self.control)
+        .await
+        .map_err(StoreError::from)
+        .map(|exists: bool| exists)
+    }
+
+    /// Commits a new record at its first active status, or returns the row the replay
+    /// key already holds — a repeated call gets `Existing` and re-drives nothing.
+    pub async fn control_insert(
+        &self,
+        n: &NewControlRecord<'_>,
+    ) -> Result<ControlInsert, StoreError> {
+        let id = Uuid::new_v4();
+        let row = sqlx::query(
+            "INSERT INTO control_records (id, project_id, operation_id, action, business_key,
+                expected_state, actor, token_id, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (project_id, operation_id, action, business_key) DO NOTHING
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(n.project_id)
+        .bind(n.operation_id)
+        .bind(n.action)
+        .bind(n.business_key)
+        .bind(n.expected_state)
+        .bind(n.actor)
+        .bind(n.token_id)
+        .bind(n.initial_status)
+        .fetch_optional(&self.control)
+        .await?;
+        if row.is_some() {
+            // The row was just committed by this statement; not finding it means the
+            // store no longer tells a consistent story — the same class as Corrupt.
+            let created = self.control_get(id).await?.ok_or(StoreError::Corrupt)?;
+            return Ok(ControlInsert::Created(created));
+        }
+        let existing = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {CONTROL_COLUMNS} FROM control_records
+             WHERE project_id = $1 AND operation_id = $2 AND action = $3 AND business_key = $4",
+        )))
+        .bind(n.project_id)
+        .bind(n.operation_id)
+        .bind(n.action)
+        .bind(n.business_key)
+        .fetch_one(&self.control)
+        .await?;
+        Ok(ControlInsert::Existing(control_row(&existing)))
+    }
+
+    pub async fn control_get(&self, id: Uuid) -> Result<Option<ControlRecord>, StoreError> {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {CONTROL_COLUMNS} FROM control_records WHERE id = $1"
+        )))
+        .bind(id)
+        .fetch_optional(&self.control)
+        .await?;
+        Ok(row.map(|r| control_row(&r)))
+    }
+
+    /// One operation's control records, newest first.
+    pub async fn control_list(
+        &self,
+        project_id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<Vec<ControlRecord>, StoreError> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {CONTROL_COLUMNS} FROM control_records
+             WHERE project_id = $1 AND operation_id = $2 ORDER BY created_at DESC LIMIT 100"
+        )))
+        .bind(project_id)
+        .bind(operation_id)
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows.iter().map(control_row).collect())
+    }
+
+    /// Records a crash could have stranded mid-work — the executor's boot re-drive and
+    /// its wake-up queue (`is_resumable` in the domain). Each row carries its project's
+    /// slug so a re-driven decision audits under the project's own name.
+    pub async fn control_resumable(&self, limit: i64) -> Result<Vec<ResumableControl>, StoreError> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT {CONTROL_COLUMNS_C}, p.slug FROM control_records c
+             JOIN projects p ON p.id = c.project_id
+             WHERE c.status IN ('requested', 'reconciling', 'authorized', 'submitted')
+             ORDER BY c.created_at LIMIT $1"
+        )))
+        .bind(limit)
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| ResumableControl {
+                record: control_row(r),
+                project_slug: r.get(18),
+            })
+            .collect())
+    }
+
+    /// A transition without its own audit row (in-flight moves: `submitted`, the post-
+    /// submit observation — the authorization decision was already committed and audited).
+    /// `expect_status` is optimistic concurrency: `Ok(false)` means another driver moved
+    /// the record first and the caller must re-read it rather than assume the world.
+    pub async fn control_update(
+        &self,
+        id: Uuid,
+        expect_status: Option<&str>,
+        patch: &ControlPatch<'_>,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.control.begin().await?;
+        let done = control_apply(&mut tx, id, expect_status, patch).await?;
+        tx.commit().await?;
+        Ok(done)
+    }
+
+    /// The decision commit (invariant 4): the transition and its audit row in ONE
+    /// transaction on the control pool — a denial and an authorization are equally
+    /// durable before the external world is ever touched.
+    pub async fn control_decide(
+        &self,
+        id: Uuid,
+        expect_status: Option<&str>,
+        patch: &ControlPatch<'_>,
+        audit: &AuditEntry<'_>,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.control.begin().await?;
+        let done = control_apply(&mut tx, id, expect_status, patch).await?;
+        if done {
+            sqlx::query(
+                "INSERT INTO audit_log (actor, token_id, action, project_slug, target, decision, reason)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(audit.actor)
+            .bind(audit.token_id)
+            .bind(audit.action)
+            .bind(audit.project_slug)
+            .bind(audit.target)
+            .bind(if audit.allowed { "allowed" } else { "denied" })
+            .bind(audit.reason)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(done)
+    }
+
     // ---- admin (CLI only; no HTTP surface) ----------------------------------------------
 
     pub async fn create_project(&self, slug: &str) -> Result<Uuid, StoreError> {
@@ -1106,17 +1380,110 @@ impl Store {
         Ok(id)
     }
 
-    pub async fn revoke_token(&self, id: Uuid) -> Result<(), StoreError> {
-        let done = sqlx::query(
-            "UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+    /// Revokes the token and returns its digest, so the caller can evict it from the
+    /// credential cache — an incident action must stop the credential NOW, not when
+    /// the cache TTL runs out (D-034). The digest never crosses the API.
+    pub async fn revoke_token(&self, id: Uuid) -> Result<[u8; 32], StoreError> {
+        let row = sqlx::query(
+            "UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
+             RETURNING token_hash",
         )
         .bind(id)
-        .execute(&self.control)
+        .fetch_optional(&self.control)
         .await?;
-        if done.rows_affected() == 0 {
+        let Some(row) = row else {
             return Err(StoreError::NotFound("active token"));
-        }
-        Ok(())
+        };
+        let hash: Vec<u8> = row.get(0);
+        <[u8; 32]>::try_from(hash.as_slice()).map_err(|_| StoreError::Corrupt)
+    }
+
+    // ---- the credential surface (D-034) ------------------------------------------------
+    //
+    // The console's admin view: every credential's metadata — name, actor, scopes,
+    // projects, expiry, revocation — and never a hash. All on the control pool; these
+    // are bounded lists (credentials are counted in tens, not millions).
+
+    /// Every project, oldest first.
+    pub async fn list_project_infos(&self) -> Result<Vec<ProjectInfo>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, slug, opt_in_attribute_keys, created_at FROM projects ORDER BY created_at LIMIT 1000",
+        )
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| ProjectInfo {
+                id: r.get(0),
+                slug: r.get(1),
+                opt_in_keys: r.get(2),
+                created_at: from_odt(r.get(3)),
+            })
+            .collect())
+    }
+
+    /// Every ingest key's metadata, oldest first — `key_hash` is never selected.
+    pub async fn list_ingest_key_infos(&self) -> Result<Vec<IngestKeyInfo>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT k.id, k.name, p.slug, k.created_at, k.revoked_at
+             FROM ingest_keys k JOIN projects p ON p.id = k.project_id
+             ORDER BY k.created_at LIMIT 2000",
+        )
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| IngestKeyInfo {
+                id: r.get(0),
+                name: r.get(1),
+                project_slug: r.get(2),
+                created_at: from_odt(r.get(3)),
+                revoked_at: r.get::<Option<OffsetDateTime>, _>(4).map(from_odt),
+            })
+            .collect())
+    }
+
+    /// Every token's metadata, oldest first — `token_hash` is never selected;
+    /// `project_ids` are joined back to their slugs.
+    pub async fn list_token_infos(&self) -> Result<Vec<TokenInfo>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT t.id, t.actor, t.scopes,
+                    COALESCE((SELECT array_agg(p.slug ORDER BY p.slug) FROM projects p
+                              WHERE p.id = ANY(t.project_ids)), '{}') AS slugs,
+                    t.created_at, t.expires_at, t.revoked_at
+             FROM api_tokens t ORDER BY t.created_at LIMIT 2000",
+        )
+        .fetch_all(&self.control)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| TokenInfo {
+                id: r.get(0),
+                actor: r.get(1),
+                scopes: r.get(2),
+                project_slugs: r.get(3),
+                created_at: from_odt(r.get(4)),
+                expires_at: from_odt(r.get(5)),
+                revoked_at: r.get::<Option<OffsetDateTime>, _>(6).map(from_odt),
+            })
+            .collect())
+    }
+
+    /// Revoke an ingest key by its id and return its digest for cache eviction —
+    /// the same incident-action immediacy as token revocation (D-034).
+    pub async fn revoke_ingest_key_id(&self, id: Uuid) -> Result<[u8; 32], StoreError> {
+        let row = sqlx::query(
+            "UPDATE ingest_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
+             RETURNING key_hash",
+        )
+        .bind(id)
+        .fetch_optional(&self.control)
+        .await?;
+        let Some(row) = row else {
+            return Err(StoreError::NotFound("active ingest key"));
+        };
+        let hash: Vec<u8> = row.get(0);
+        <[u8; 32]>::try_from(hash.as_slice()).map_err(|_| StoreError::Corrupt)
     }
 
     // ---- retention (D-016) ------------------------------------------------------------
@@ -1453,4 +1820,74 @@ async fn find_conflicts(
         .into_iter()
         .filter_map(|u| EventId::from_bytes(*u.as_bytes()))
         .collect())
+}
+
+/// The column list every control-record read shares (one order, one mapping).
+const CONTROL_COLUMNS: &str = "id, project_id, operation_id, action, business_key,
+    expected_state, actor, token_id, status, resolution, authority_read, submitted_ref,
+    approved_by, approved_at, deny_reason, attempts, created_at, updated_at";
+
+/// The same list, aliased for the resumable scan's join with `projects`.
+const CONTROL_COLUMNS_C: &str = "c.id, c.project_id, c.operation_id, c.action,
+    c.business_key, c.expected_state, c.actor, c.token_id, c.status, c.resolution,
+    c.authority_read, c.submitted_ref, c.approved_by, c.approved_at, c.deny_reason,
+    c.attempts, c.created_at, c.updated_at";
+
+fn control_row(r: &sqlx::postgres::PgRow) -> ControlRecord {
+    ControlRecord {
+        id: r.get(0),
+        project_id: r.get(1),
+        operation_id: r.get(2),
+        action: r.get(3),
+        business_key: r.get(4),
+        expected_state: r.get(5),
+        actor: r.get(6),
+        token_id: r.get(7),
+        status: r.get(8),
+        resolution: r.get(9),
+        authority_read: r.get(10),
+        submitted_ref: r.get(11),
+        approved_by: r.get(12),
+        approved_at: r.get::<Option<OffsetDateTime>, _>(13).map(from_odt),
+        deny_reason: r.get(14),
+        attempts: r.get(15),
+        created_at: from_odt(r.get(16)),
+        updated_at: from_odt(r.get(17)),
+    }
+}
+
+/// The UPDATE both `control_update` and `control_decide` run. `expect_status` is
+/// optimistic concurrency (`false`: another driver moved the record first).
+async fn control_apply(
+    tx: &mut PgConnection,
+    id: Uuid,
+    expect_status: Option<&str>,
+    patch: &ControlPatch<'_>,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query(
+        "UPDATE control_records SET
+            status = COALESCE($2, status),
+            resolution = COALESCE($3, resolution),
+            authority_read = COALESCE($4, authority_read),
+            submitted_ref = COALESCE($5, submitted_ref),
+            deny_reason = COALESCE($6, deny_reason),
+            approved_by = COALESCE($7, approved_by),
+            approved_at = COALESCE($8, approved_at),
+            attempts = attempts + COALESCE($9, 0),
+            updated_at = now()
+         WHERE id = $1 AND ($10::text IS NULL OR status = $10)",
+    )
+    .bind(id)
+    .bind(patch.status)
+    .bind(patch.resolution)
+    .bind(patch.authority_read)
+    .bind(patch.submitted_ref)
+    .bind(patch.deny_reason)
+    .bind(patch.approved_by)
+    .bind(patch.approved_at.map(to_odt))
+    .bind(patch.add_attempts)
+    .bind(expect_status)
+    .execute(&mut *tx)
+    .await?;
+    Ok(done.rows_affected() > 0)
 }

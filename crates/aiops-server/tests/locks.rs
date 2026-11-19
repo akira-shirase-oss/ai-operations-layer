@@ -193,12 +193,8 @@ fn ingest_request(key: &str, body: String) -> axum::http::Request<axum::body::Bo
 /// Wall time per request and the locks' counters for `tasks` concurrent senders, each
 /// sending `batches` batches of 500 events through the in-process router.
 async fn measure(store: &Store, key: &str, tasks: u32, batches: u32, offset: u32) -> Value {
-    let state = Arc::new(AppState::new(
-        store.clone(),
-        Config::local(""),
-        system_clock(),
-        None,
-    ));
+    let state =
+        Arc::new(AppState::new(store.clone(), Config::local(""), system_clock(), None).unwrap());
     let app = router(state.clone());
     // Warm the credential cache and the name registry, outside the measurement.
     let warm = send(&app, ingest_request(key, reference_batch(offset, 0, 50))).await;

@@ -47,15 +47,28 @@ struct ArticleRequest {
     fault: Option<Fault>,
 }
 
+/// `POST /articles/retry`'s body: resubmit the stored request under this business key.
+#[derive(Debug, Deserialize)]
+struct RetryRequest {
+    business_key: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct Publication {
     business_key: String,
     title: String,
     first_published_at_ms: u128,
+    /// Distinct publish effects under this key — always 1, because `publish` is
+    /// idempotent by business key (D-030): effects dedup at their own authority.
     times_published: u32,
+    /// Publish calls under this key, including deduped ones: a resubmission stays
+    /// visible as an attempt even though its effect dedups.
+    times_attempted: u32,
 }
 
 /// The publisher's own record: the authority for "was this published" (invariant 1).
+/// Idempotent by business key: a repeated publish under a key that already landed adds
+/// an attempt, never a second effect.
 #[derive(Default)]
 struct Publisher {
     records: Mutex<HashMap<String, Publication>>,
@@ -68,11 +81,12 @@ impl Publisher {
             .map_or(0, |d| d.as_millis());
         if let Ok(mut r) = self.records.lock() {
             r.entry(key.to_owned())
-                .and_modify(|p| p.times_published += 1)
+                .and_modify(|p| p.times_attempted += 1)
                 .or_insert_with(|| Publication {
                     business_key: key.to_owned(),
                     title: title.to_owned(),
                     first_published_at_ms: now,
+                    times_attempted: 1,
                     times_published: 1,
                 });
         }
@@ -173,6 +187,9 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 struct Host {
     sdk: Client,
     publisher: Publisher,
+    /// The request each business key was made under (key → topic): a real host keeps
+    /// its work, so `POST /articles/retry` can resubmit it by key. Bounded.
+    pending: Mutex<HashMap<String, String>>,
     log: Log,
     allow_faults: bool,
     model_latency: Duration,
@@ -213,16 +230,11 @@ fn cost(input: u64, output: u64) -> u64 {
     input * INPUT_MICROS_PER_TOKEN + output * OUTPUT_MICROS_PER_TOKEN
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the whole pilot workflow, step by step, in one readable place"
-)]
 async fn create_article(
     State(host): State<Shared>,
     headers: HeaderMap,
     Json(req): Json<ArticleRequest>,
 ) -> Response {
-    let n = host.requests.fetch_add(1, Ordering::Relaxed) + 1;
     let request_id = headers
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
@@ -232,7 +244,61 @@ async fn create_article(
             str::to_owned,
         );
     let fault = if host.allow_faults { req.fault } else { None };
+    // The host keeps its work: the key can be resubmitted later (POST /articles/retry).
+    if let Ok(mut p) = host.pending.lock()
+        && p.len() < 10_000
+    {
+        p.insert(format!("article:{request_id}"), req.topic.clone());
+    }
+    run_article(&host, request_id, req.topic, fault).await
+}
+
+/// `POST /articles/retry {"business_key": "article:<id>"}` — resubmits the stored
+/// request under the same business key (D-030). A resubmission never re-injects a
+/// fault, and its publish dedups at the publisher, so the same effect cannot land
+/// twice. 404 for a key the host does not hold: it cannot resubmit work it never saw.
+async fn retry_article(State(host): State<Shared>, Json(req): Json<RetryRequest>) -> Response {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "the host holds no request under this business key"})),
+        )
+            .into_response()
+    };
+    let Some(request_id) = req
+        .business_key
+        .strip_prefix("article:")
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+    else {
+        return not_found();
+    };
+    let topic = host
+        .pending
+        .lock()
+        .ok()
+        .and_then(|p| p.get(&req.business_key).cloned());
+    match topic {
+        Some(topic) => run_article(&host, request_id.to_owned(), topic, None).await,
+        None => not_found(),
+    }
+}
+
+/// The pilot workflow, shared by `POST /articles` and `POST /articles/retry`: request →
+/// generation → validation → fact-check → publish, every step telemetry-described, the
+/// publish's effect owned by the publisher.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the whole pilot workflow, step by step, in one readable place"
+)]
+async fn run_article(
+    host: &Shared,
+    request_id: String,
+    topic: String,
+    fault: Option<Fault>,
+) -> Response {
+    let n = host.requests.fetch_add(1, Ordering::Relaxed) + 1;
     let key = format!("article:{request_id}");
+    let req = ArticleRequest { topic, fault };
     let log = &host.log;
     let op = host
         .sdk
@@ -475,6 +541,7 @@ async fn main() -> anyhow::Result<()> {
     let host = Arc::new(Host {
         sdk: sdk.clone(),
         publisher: Publisher::default(),
+        pending: Mutex::new(HashMap::new()),
         log: Log::start(std::env::var("REFHOST_LOG_FILE").ok())?,
         allow_faults: std::env::var("REFHOST_ALLOW_FAULTS").is_ok_and(|v| v == "1"),
         model_latency: env_ms("REFHOST_MODEL_LATENCY_MS", 20)?,
@@ -484,6 +551,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/articles", post(create_article))
+        .route("/articles/retry", post(retry_article))
         .route("/publications/{key}", get(publication))
         .route("/aiops/stats", get(sdk_stats))
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(

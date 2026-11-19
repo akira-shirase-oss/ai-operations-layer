@@ -36,6 +36,12 @@ pub enum ApiError {
     UnstorableText,
     #[error("the batch's source instance belongs to another ingest key")]
     InstanceConflict,
+    /// A repeated control call whose body differs from the stored record's — the record
+    /// stands; the caller resolves the difference explicitly.
+    #[error(
+        "a control record for this operation, action and business key exists with a different body"
+    )]
+    ControlConflict,
     #[error("rate limit exceeded")]
     RateLimited { retry_after_secs: u64 },
     #[error("the collector is at capacity; retry later")]
@@ -78,7 +84,7 @@ impl ApiError {
             | Self::InvalidSource(_)
             | Self::UnstorableText => StatusCode::BAD_REQUEST,
             Self::TooManyEvents(_) | Self::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::InstanceConflict => StatusCode::CONFLICT,
+            Self::InstanceConflict | Self::ControlConflict => StatusCode::CONFLICT,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Overloaded | Self::StoreUnavailable | Self::AuditUnavailable => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -100,6 +106,7 @@ impl ApiError {
             Self::BodyTooLarge => "payload_too_large",
             Self::UnstorableText => "unstorable_text",
             Self::InstanceConflict => "instance_owned_by_another_key",
+            Self::ControlConflict => "conflicting_request",
             Self::RateLimited { .. } => "rate_limited",
             Self::Overloaded => "overloaded",
             Self::StoreUnavailable => "store_unavailable",

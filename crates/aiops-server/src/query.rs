@@ -10,8 +10,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 
+use uuid::Uuid;
+
 use crate::app::{AppState, Metrics, MetricsView, SharedState};
-use crate::auth::{TOKEN_PREFIX, bearer, hash};
+use crate::auth::{Buckets, TOKEN_PREFIX, bearer, hash};
 use crate::error::ApiError;
 
 pub const SCOPE_READ: &str = "read";
@@ -24,6 +26,16 @@ pub struct Actor {
 }
 
 pub async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<Actor, ApiError> {
+    authenticate_with(app, headers, &app.query_buckets).await
+}
+
+/// `authenticate` under a caller-chosen bucket: the query path and the control path each
+/// rate-limit their own, so one flood cannot starve the other.
+pub async fn authenticate_with(
+    app: &AppState,
+    headers: &HeaderMap,
+    buckets: &Buckets<Uuid>,
+) -> Result<Actor, ApiError> {
     let Some(secret) = bearer(headers, TOKEN_PREFIX) else {
         Metrics::add(&app.metrics.unauthenticated, 1);
         return Err(ApiError::Unauthenticated);
@@ -35,7 +47,7 @@ pub async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<Actor, 
     let now = app.now();
     match found {
         Some(token) if !token.revoked && token.expires_at > now => {
-            if let Err(retry_after_secs) = app.query_buckets.take(token.id, 1, now.unix_micros()) {
+            if let Err(retry_after_secs) = buckets.take(token.id, 1, now.unix_micros()) {
                 Metrics::add(&app.metrics.rate_limited, 1);
                 return Err(ApiError::RateLimited { retry_after_secs });
             }
