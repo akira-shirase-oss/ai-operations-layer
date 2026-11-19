@@ -443,4 +443,6 @@ named decision when the relevant milestone starts.
   from the same surface: an `admin`-scoped call, a confirm dialog, an
   audited row, because revocation is an incident action that has to be
   fast. `set-opt-in` stays visible in the console; toggling it stays CLI.
+  Revocation evicts the resolver cache in the serving process; a
+  multi-instance deployment still relies on each peer's cache TTL.
   The UI audit records these exclusions with this rationale.
