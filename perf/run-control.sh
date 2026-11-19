@@ -62,6 +62,10 @@ fi
 psql_admin -c "CREATE DATABASE $db"
 cleanup() {
   [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null
+  # The logs outlive the work dir — the last failed run deleted its own evidence.
+  mkdir -p perf/results
+  [ -f "$work/server.log" ] && cp "$work/server.log" "${out}.server.log" || true
+  [ -f "$work/control.txt" ] && cp "$work/control.txt" "${out}.k6.txt" || true
   psql_admin -c "DROP DATABASE IF EXISTS $db" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -104,6 +108,7 @@ done
 # the same stand-in pattern as perf-psql for SQL.
 if curl --version >/dev/null 2>&1; then
   http_get() { curl -fsS -m 5 ${2:+-H "$2"} "$1"; }
+  probe_code() { curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || echo 000; }
 else
   http_get() {
     python3 - "$1" "$2" <<'PY'
@@ -118,6 +123,20 @@ except Exception as e:
     sys.exit(1)
 PY
   }
+  probe_code() {
+    python3 - "$1" "$2" <<'PY'
+import sys, urllib.request, urllib.error
+req = urllib.request.Request(sys.argv[1])
+if sys.argv[2]:
+    req.add_header("authorization", sys.argv[2])
+try:
+    print(urllib.request.urlopen(req, timeout=5).status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print("000")
+PY
+  }
 fi
 
 AIOPS_LISTEN="127.0.0.1:$port" \
@@ -130,6 +149,20 @@ for _ in $(seq 1 100); do
   http_get "http://127.0.0.1:$port/readyz" >/dev/null 2>&1 && break
   sleep 0.2
 done
+
+# Pre-flight (CI 44544883621 burned 57 minutes against a dead listener): the
+# readyz loop only waits — it can't fail. Verify before any load: /healthz
+# answers, then one authenticated control call proves auth+pool+project. A
+# miss here aborts with the collector's log tail instead of an all-zero run.
+fail_preflight() {
+  echo "PREFLIGHT FAILED: $1" >&2
+  [ -f "$work/server.log" ] && { echo '--- collector log (tail) ---' >&2; tail -30 "$work/server.log" >&2; }
+  exit 2
+}
+code="$(probe_code "http://127.0.0.1:$port/healthz")"
+[ "$code" = 200 ] || fail_preflight "GET /healthz answered HTTP $code — the collector is not up; load would only see connection-refused."
+code="$(probe_code "http://127.0.0.1:$port/v1/admin/credentials" "authorization: Bearer ${admin_list%%,*}")"
+[ "$code" = 200 ] || fail_preflight "GET /v1/admin/credentials with a minted admin token answered HTTP $code (expected 200)."
 
 commit="$(git rev-parse --short HEAD)$(git diff --quiet || echo '-dirty')"
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -238,6 +271,12 @@ ${machine_rows}
 | Tokens revoked by the run | ${tokens_revoked} |
 | Collector RSS after the run | ${rss_kb:-unavailable (process tools denied here)}${rss_kb:+ KiB} |
 | Collector counters | \`${collector_stats}\` |
+
+## First failures (verbatim — status 0 means the request never left k6)
+
+\`\`\`
+$(grep 'AIOPS_FIRST_FAILURE ' "$work/control.txt" | head -10 | sed 's/^AIOPS_FIRST_FAILURE //' || true)
+\`\`\`
 
 ## Threshold verdicts
 
