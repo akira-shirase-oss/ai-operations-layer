@@ -23,6 +23,7 @@ revocation is UI under `admin`, audited.
 | `GET …/controls/{id}` | read | same fields as the list rows render (the single-get is for API clients; the console's per-record row shows the same `ControlView`) | ✓ covered via list |
 | `GET /v1/collector/stats` | admin | `/credentials` collector-counters card — drops, refusals, denials shown (gaps are data) | ✓ (this branch) |
 | `GET /v1/admin/credentials` | admin | `/credentials` — projects, ingest keys, tokens | ✓ (this branch) |
+| `GET /v1/admin/audit` | admin | `/audit` — filterable log, keyset "Older" paging; the read itself is not audited (a denial always is) | ✓ (this branch) |
 | `POST …/tokens/{id}/revoke` | admin | `/credentials` confirm-then-revoke | ✓ (this branch) |
 | `POST …/ingest-keys/{id}/revoke` | admin | `/credentials` confirm-then-revoke | ✓ (this branch) |
 
@@ -52,10 +53,13 @@ revocation is UI under `admin`, audited.
   1440 px, light and dark, per the workspace rule) need a browser — sandboxed out
   here. `scripts/console-e2e.sh` runs them on a workstation; the data-testids added
   this branch (`control-form`, `control-note`, `control-record`, `ingest-key`,
-  `token`, `collector-stats`, `revoke-note`) are the anchors.
-- **Denial visibility**: `recent_audit` exists for tests but no `/v1/audit` read —
-  a denied revocation is visible to the *actor* immediately, and to auditors only
-  in the table. An audit-view page is a candidate for A4 if the coordinator wants it.
+  `token`, `collector-stats`, `revoke-note`, `audit-row`, `audit-empty`) are the
+  anchors.
+- **Denial visibility**: `GET /v1/admin/audit` + the `/audit` page closed this —
+  every denial is now readable under `admin` (filters on action, actor, token id
+  and time window; keyset pages stay stable while rows arrive). The read is not
+  itself audited — a read that grew the log would be a write in disguise — while
+  a denied read is.
 - The op page's Recovery form uses the `published` assertion shape both adapters
   validate in v1; new adapters with different `expected_state` schemas will need
   their own form inputs (recorded in `docs/modules/control-recovery.md`).
