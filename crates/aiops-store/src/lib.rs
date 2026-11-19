@@ -1276,18 +1276,29 @@ impl Store {
         Ok(row.map(|r| control_row(&r)))
     }
 
-    /// One operation's control records, newest first.
+    /// One operation's control records, newest first — a `(created_at, id)` keyset
+    /// page like `audit_page`: records created mid-walk can only fall ahead of the
+    /// cursor, so pages neither repeat nor skip.
     pub async fn control_list(
         &self,
         project_id: Uuid,
         operation_id: Uuid,
+        before: Option<(Timestamp, Uuid)>,
+        limit: i64,
     ) -> Result<Vec<ControlRecord>, StoreError> {
+        let (before_t, before_id) =
+            before.map_or((None, None), |(t, id)| (Some(to_odt(t)), Some(id)));
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {CONTROL_COLUMNS} FROM control_records
-             WHERE project_id = $1 AND operation_id = $2 ORDER BY created_at DESC LIMIT 100"
+             WHERE project_id = $1 AND operation_id = $2
+               AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4::uuid))
+             ORDER BY created_at DESC, id DESC LIMIT $5"
         )))
         .bind(project_id)
         .bind(operation_id)
+        .bind(before_t)
+        .bind(before_id)
+        .bind(limit)
         .fetch_all(&self.control)
         .await?;
         Ok(rows.iter().map(control_row).collect())

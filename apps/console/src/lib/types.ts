@@ -271,7 +271,7 @@ export type ControlView = {
 	replayed: boolean;
 };
 
-export type Controls = { controls: ControlView[] };
+export type Controls = { controls: ControlView[]; next: [string, string] | null };
 
 /** The credential surface (GET /v1/admin/credentials, D-034): metadata only — the
  * wire never carries a secret or a hash. */

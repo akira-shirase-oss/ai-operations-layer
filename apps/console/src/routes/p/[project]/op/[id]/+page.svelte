@@ -35,7 +35,18 @@
 		loadControls();
 	}
 	function loadControls() {
-		api<Controls>(`${opPath}/controls`).then((r) => (controls = r));
+		api<Controls>(`${opPath}/controls?limit=100`).then((r) => (controls = r));
+	}
+
+	/** More history, one keyset page per click — stable while records arrive. */
+	async function olderControls() {
+		if (controls?.state !== 'ok' || !controls.data.next) return;
+		const r = await api<Controls>(
+			`${opPath}/controls?limit=100&before_time=${encodeURIComponent(controls.data.next[0])}&before_id=${encodeURIComponent(controls.data.next[1])}`
+		);
+		if (r.state === 'ok' && controls.state === 'ok') {
+			controls = { ...r, data: { controls: [...controls.data.controls, ...r.data.controls], next: r.data.next } };
+		}
 	}
 	$effect(load);
 
@@ -707,6 +718,9 @@
 					{/each}
 				</TableBody>
 			</Table>
+			{#if controls.data.next}
+				<button class="mt-3 rounded-md border px-3 py-1.5 text-sm" onclick={olderControls}>Older</button>
+			{/if}
 		{/if}
 	{:else if controls.state === 'forbidden' || controls.state === 'needsAuth'}
 		<p class="text-sm text-muted-foreground">

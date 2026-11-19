@@ -21,7 +21,7 @@ use aiops_store::{
     ResumableControl,
 };
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -750,11 +750,21 @@ pub async fn retry(
     }
 }
 
-/// `GET …/controls` — one operation's control records (a `read` scope call).
+#[derive(Deserialize)]
+pub struct ControlsParams {
+    limit: Option<i64>,
+    before_time: Option<String>,
+    before_id: Option<String>,
+}
+
+/// `GET …/controls` — one operation's control records (a `read` scope call), one
+/// keyset page newest first. `next` is the `[before_time, before_id]` pair to pass
+/// back; absent on the last page (the audit page's shape).
 pub async fn controls(
     State(app): State<SharedState>,
     headers: HeaderMap,
     Path((slug, operation_id)): Path<(String, String)>,
+    Query(params): Query<ControlsParams>,
 ) -> Result<Json<Value>, ApiError> {
     let (_actor, project) = authorize_control(
         &app,
@@ -767,12 +777,34 @@ pub async fn controls(
     .await?;
     let op = OperationId::parse(&operation_id)
         .map_err(|_| ApiError::BadRequest("operation_id must be the 32-hex operation id"))?;
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
+    let before = match (params.before_time.as_deref(), params.before_id.as_deref()) {
+        (None, None) => None,
+        (Some(t), Some(id)) => Some((
+            aiops_domain::Timestamp::parse_rfc3339(t)
+                .map_err(|_| ApiError::BadRequest("before_time"))?,
+            Uuid::parse_str(id).map_err(|_| ApiError::BadRequest("before_id"))?,
+        )),
+        _ => {
+            return Err(ApiError::BadRequest(
+                "before_time and before_id go together",
+            ));
+        }
+    };
     let records = app
         .store
-        .control_list(project.id, Uuid::from_bytes(*op.as_bytes()))
+        .control_list(project.id, Uuid::from_bytes(*op.as_bytes()), before, limit)
         .await?;
+    let next = (records.len() == usize::try_from(limit).unwrap_or(0))
+        .then(|| {
+            records
+                .last()
+                .map(|r| (r.created_at.to_rfc3339(), r.id.to_string()))
+        })
+        .flatten();
     Ok(Json(json!({
-        "controls": records.iter().map(|r| view(r, false)).collect::<Vec<_>>()
+        "controls": records.iter().map(|r| view(r, false)).collect::<Vec<_>>(),
+        "next": next
     })))
 }
 

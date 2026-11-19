@@ -852,7 +852,11 @@ async fn control_records_commit_replay_and_resume(pool: PgPool) {
             .unwrap()
     );
     assert!(f.store.control_resumable(10).await.unwrap().is_empty());
-    let list = f.store.control_list(f.project, op_uuid).await.unwrap();
+    let list = f
+        .store
+        .control_list(f.project, op_uuid, None, 100)
+        .await
+        .unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].deny_reason.as_deref(), Some("effect_confirmed"));
 
@@ -959,7 +963,14 @@ async fn a_saturated_query_pool_does_not_block_control_writes(pool: PgPool) {
             .await
             .unwrap()
     );
-    assert_eq!(store.control_list(project, op_uuid).await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .control_list(project, op_uuid, None, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(1),

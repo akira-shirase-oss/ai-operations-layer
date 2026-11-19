@@ -298,6 +298,108 @@ async fn malformed_control_requests_are_400(pool: PgPool) {
     }
 }
 
+/// `GET …/controls` pages newest-first through a `(created_at, control_id)` keyset:
+/// a `next` pair on a full page, a capped page size, and a cursor that rows inserted
+/// mid-walk can only move past, never duplicate (the audit page's shape).
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn controls_pages_follow_a_stable_keyset(pool: PgPool) {
+    let (url, _host) = stub_host().await;
+    let e = env_with_adapter(pool, &url).await;
+    send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
+    let op = op_hex(1);
+    let project = e.store.project_by_slug("pilot").await.unwrap().unwrap();
+    let op_uuid = Uuid::from_bytes(*aiops_domain::OperationId::parse(&op).unwrap().as_bytes());
+    // 120 records, every (action, key) pair unique; reconcile rows on distinct keys.
+    let expected = json!({"published": false});
+    for i in 0..120 {
+        e.store
+            .control_insert(&aiops_store::NewControlRecord {
+                project_id: project.id,
+                operation_id: op_uuid,
+                action: "reconcile",
+                business_key: &format!("article:key-{i:03}"),
+                expected_state: &expected,
+                actor: "ana",
+                token_id: Uuid::new_v4(),
+                initial_status: "reconciled",
+            })
+            .await
+            .unwrap();
+    }
+    let list = |q: &str| {
+        get_req(
+            &format!("/v1/projects/pilot/operations/{op}/controls{q}"),
+            &e.reader,
+        )
+    };
+
+    // Page 1: the cap applies and `next` is the [before_time, before_id] pair.
+    let r = send(&e.app, list("?limit=50")).await;
+    assert_eq!(r.status, 200, "{:?}", r.body);
+    let page1 = r.body["controls"].as_array().unwrap();
+    assert_eq!(page1.len(), 50);
+    let next = r.body["next"].as_array().unwrap();
+    let (t, id) = (next[0].as_str().unwrap(), next[1].as_str().unwrap());
+
+    // A row inserted mid-walk can only fall ahead of the cursor.
+    for i in 120..123 {
+        e.store
+            .control_insert(&aiops_store::NewControlRecord {
+                project_id: project.id,
+                operation_id: op_uuid,
+                action: "reconcile",
+                business_key: &format!("article:key-{i:03}"),
+                expected_state: &expected,
+                actor: "ana",
+                token_id: Uuid::new_v4(),
+                initial_status: "reconciled",
+            })
+            .await
+            .unwrap();
+    }
+
+    let mut seen: std::collections::HashSet<String> = page1
+        .iter()
+        .map(|c| c["control_id"].as_str().unwrap().to_owned())
+        .collect();
+    let mut cursor = format!("?limit=50&before_time={t}&before_id={id}");
+    let mut pages = 1;
+    loop {
+        let r = send(&e.app, list(&cursor)).await;
+        assert_eq!(r.status, 200, "{:?}", r.body);
+        let rows = r.body["controls"].as_array().unwrap();
+        for c in rows {
+            assert!(
+                seen.insert(c["control_id"].as_str().unwrap().to_owned()),
+                "a row repeated"
+            );
+        }
+        match r.body["next"].as_array() {
+            Some(n) => {
+                cursor = format!(
+                    "?limit=50&before_time={}&before_id={}",
+                    n[0].as_str().unwrap(),
+                    n[1].as_str().unwrap()
+                );
+                pages += 1;
+            }
+            None => break,
+        }
+        assert!(pages < 10, "the walk did not terminate");
+    }
+    assert_eq!(
+        seen.len(),
+        120,
+        "the three mid-walk inserts stay ahead of the cursor"
+    );
+
+    // The cap bounds the page size; a half cursor is refused.
+    let r = send(&e.app, list("?limit=200")).await;
+    assert!(r.body["controls"].as_array().unwrap().len() <= 100);
+    let r = send(&e.app, list("?before_time=2026-11-19T00:00:00Z")).await;
+    assert_eq!(r.status, 400);
+}
+
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn reconcile_reads_the_authority_and_stores_its_answer(pool: PgPool) {
     let (url, host) = stub_host().await;
