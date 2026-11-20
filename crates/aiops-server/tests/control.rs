@@ -1092,7 +1092,8 @@ async fn a_dr_reconcile_reads_the_effect_authority_not_the_runner(pool: PgPool) 
 /// The stale-cache fallback is the read path's flood resilience — a control or
 /// admin call under a saturated lookup gate must refuse, never trust a record
 /// past its TTL (white-hat S2-5: saturating the four lookup permits kept a
-/// revoked record serving ~330 s past TTL).
+/// revoked record serving ~330 s past TTL). Since N6 the privileged lane must
+/// be flooded too for the refusal — a stranger's flood alone no longer 503s.
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn a_saturated_lookup_gate_fails_closed_on_controls(pool: PgPool) {
     let e = env_with(pool, |s| {
@@ -1108,9 +1109,10 @@ async fn a_saturated_lookup_gate_fails_closed_on_controls(pool: PgPool) {
     let r = send(&e.app, get_req("/v1/projects", &e.reader)).await;
     assert_eq!(r.status, 200, "{:?}", r.body); // the read token's record, too
 
-    // Every lookup permit held — no credential query can run.
+    // Every lookup permit held on BOTH gates — no credential query can run.
     let held: Vec<_> = (0..4)
         .map(|_| e.state.lookup_gate.try_acquire().unwrap())
+        .chain((0..2).map(|_| e.state.privileged_lookup_gate.try_acquire().unwrap()))
         .collect();
 
     // The read path still answers from the stale record (its documented trade).
@@ -1119,5 +1121,36 @@ async fn a_saturated_lookup_gate_fails_closed_on_controls(pool: PgPool) {
     // The control path fails closed: the stale record is not authority here.
     let r = send(&e.app, post_json(&path, &e.no_read, &req)).await;
     assert_eq!(r.status, 503, "{:?}", r.body);
+    drop(held);
+}
+
+/// White-hat N6: a random-token flood holds every shared lookup permit — a
+/// control or admin call rides the reserved lane, so its credential still
+/// resolves fresh from PostgreSQL (and the denial it reaches is an honest 403,
+/// never a flood-induced 503).
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_flooded_lookup_gate_cannot_starve_controls(pool: PgPool) {
+    let e = env_with(pool, |s| {
+        s.tokens = CredentialCache::new(Duration::ZERO, Duration::ZERO, 10_000);
+    })
+    .await;
+    let path = format!("/v1/projects/pilot/operations/{}/reconcile", op_hex(1));
+    let req = body("article:x", &json!({"published": false}));
+    let r = send(&e.app, post_json(&path, &e.no_read, &req)).await;
+    assert_eq!(r.status, 403, "{:?}", r.body);
+
+    // The shared gate spent — as a random-token flood leaves it.
+    let held: Vec<_> = (0..4)
+        .map(|_| e.state.lookup_gate.try_acquire().unwrap())
+        .collect();
+
+    // The reserved lane resolves the control caller's token fresh: the call
+    // reaches its own checks instead of shedding as Overloaded.
+    let r = send(&e.app, post_json(&path, &e.no_read, &req)).await;
+    assert_eq!(
+        r.status, 403,
+        "the reserved lane resolved the credential: {:?}",
+        r.body
+    );
     drop(held);
 }

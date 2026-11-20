@@ -136,6 +136,11 @@ pub struct AppState {
     /// Credential lookups that missed the cache and may query PostgreSQL, at most this
     /// many at once (review finding 4): unknown keys can never tie up ingest.
     pub lookup_gate: Arc<Semaphore>,
+    /// Lookups reserved for the paths that cannot serve stale — control and admin
+    /// (`allow_stale == false`). A random-token flood can hold every `lookup_gate`
+    /// permit; it cannot hold these, so a privileged call never sees 503 from a
+    /// stranger's flood (white-hat N6).
+    pub privileged_lookup_gate: Arc<Semaphore>,
     pub ingest_keys: CredentialCache<IngestKey>,
     pub tokens: CredentialCache<Token>,
     pub ingest_buckets: Buckets<Uuid>,
@@ -173,6 +178,9 @@ pub struct AppState {
 /// Runner reads in flight at most; past it the console is told "busy".
 const AUTHORITY_READS: usize = 8;
 
+/// Credential lookups the privileged lane holds at once (white-hat N6).
+const PRIVILEGED_LOOKUPS: usize = 2;
+
 /// Distinct projects held in the cache at most.
 const PROJECT_CACHE_CAP: usize = 1_000;
 
@@ -200,6 +208,7 @@ impl AppState {
             ingest_gate: Arc::new(Semaphore::new(config.ingest_max_in_flight)),
             ingest_body_budget: Arc::new(Semaphore::new(config.ingest_body_budget_kib)),
             lookup_gate: Arc::new(Semaphore::new(config.auth_lookups_in_flight)),
+            privileged_lookup_gate: Arc::new(Semaphore::new(PRIVILEGED_LOOKUPS)),
             ingest_keys: CredentialCache::new(
                 Duration::from_secs(30),
                 Duration::from_secs(5),
@@ -273,7 +282,15 @@ impl AppState {
             Cached::Stale(v) if allow_stale => Some(v),
             Cached::Stale(_) | Cached::Miss => None,
         };
-        let Ok(_permit) = self.lookup_gate.try_acquire() else {
+        // `!allow_stale` marks the control/admin callers — the paths that must
+        // resolve fresh or fail. They take the reserved lane, unreachable by a
+        // random-token flood on the shared gate (white-hat N6).
+        let gate = if allow_stale {
+            &self.lookup_gate
+        } else {
+            &self.privileged_lookup_gate
+        };
+        let Ok(_permit) = gate.try_acquire() else {
             Metrics::add(&self.metrics.auth_shed, 1);
             return stale.map(Some).ok_or(ApiError::Overloaded);
         };
