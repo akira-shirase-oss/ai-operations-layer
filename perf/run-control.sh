@@ -61,7 +61,8 @@ else
 fi
 psql_admin -c "CREATE DATABASE $db"
 cleanup() {
-  [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null
+  # `wait` returns the killed child's status (143) — it must not abort the trap.
+  { [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null; } || true
   # The logs outlive the work dir — the last failed run deleted its own evidence.
   mkdir -p perf/results
   [ -f "$work/server.log" ] && cp "$work/server.log" "${out}.server.log" || true
@@ -108,7 +109,7 @@ done
 # the same stand-in pattern as perf-psql for SQL.
 if curl --version >/dev/null 2>&1; then
   http_get() { curl -fsS -m 5 ${2:+-H "$2"} "$1"; }
-  probe_code() { curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || echo 000; }
+  probe_code() { local c; c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || true)"; echo "${c:-000}"; }
 else
   http_get() {
     python3 - "$1" "$2" <<'PY'

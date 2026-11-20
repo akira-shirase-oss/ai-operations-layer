@@ -64,7 +64,8 @@ else
 fi
 psql_admin -c "CREATE DATABASE $db"
 cleanup() {
-  [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null
+  # `wait` returns the killed child's status (143) — it must not abort the trap.
+  { [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null; } || true
   # The logs outlive the work dir — a failed run must not delete its own evidence.
   mkdir -p perf/results
   [ -f "$work/server.log" ] && cp "$work/server.log" "${out}.server.log" || true
@@ -78,7 +79,7 @@ trap cleanup EXIT
 # pre-flight needs the verdict's code, not the body. python3 stand-in where
 # curl is out of reach — the same pattern as perf-psql.
 if curl --version >/dev/null 2>&1; then
-  probe_code() { curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || echo 000; }
+  probe_code() { local c; c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || true)"; echo "${c:-000}"; }
 else
   probe_code() {
     python3 - "$1" "$2" <<'PY'
