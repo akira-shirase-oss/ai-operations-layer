@@ -171,10 +171,13 @@ fn regression_the_covered_shapes_still_hold() {
 
 #[test]
 fn the_partial_boundary_is_named_not_hidden() {
-    // A bare lowercase 40-hex string is a commit SHA's shape exactly: it is NOT
-    // redacted, and that is a documented boundary, not a miss.
+    // A bare lowercase-hex run is a commit SHA's shape AND a hex credential's —
+    // indistinguishable. The re-review (N7) called the miss a leak, so the
+    // boundary moved: ≥40 hex dies, the abbreviated SHA a log actually shows
+    // stays readable. That is a documented boundary, not a miss.
     assert_eq!(
-        redact("deploy sha 0123456789abcdef0123456789abcdef01234567"),
-        None
+        redact("deploy sha 0123456789abcdef0123456789abcdef01234567").as_deref(),
+        Some("deploy sha [redacted]")
     );
+    assert_eq!(redact("deploy sha 0123456789abcdef"), None);
 }

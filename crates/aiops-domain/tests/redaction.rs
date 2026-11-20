@@ -103,7 +103,10 @@ fn operational_text_is_left_alone() {
         "publisher answered 503 after 2.1s",
         "tokens=42 secretary: Ana author=Bo",
         "retrying attempt 2 of 3 for step generate",
-        "commit 3fb3c23a9d1e4f5b6c7d8e9f0a1b2c3d4e5f6a7b",
+        // An abbreviated commit id stays readable; a full 40-hex is now the
+        // lowercase-hex credential shape the review demanded (N7) — a whole
+        // SHA is the accepted cost of that coverage.
+        "commit 3fb3c23a9d1e",
         "request 0123e4567-e89b-12d3-a456-426614174000 timed out",
         "GET https://example.com/articles/42 returned 404",
         "cache key=article:42 missed",

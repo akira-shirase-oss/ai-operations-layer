@@ -221,30 +221,100 @@ fn starts_with_ignore_case(hay: &[u8], needle: &str) -> bool {
     hay.len() >= needle.len() && hay[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
 }
 
-/// Replaces secret-shaped substrings with [`REDACTED`]. Returns `None` when nothing
-/// matched (the common case allocates nothing). Linear in the input for a fixed pattern
-/// set; inputs are already capped (≤ 512 bytes).
-pub fn redact(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut out: Option<String> = None;
-    let mut copied = 0; // bytes of `text` already copied into `out`
+/// Each decoded byte's `(offset, len)` in the raw text.
+type RawMap = Vec<(usize, usize)>;
+
+/// Percent-decoded view of `bytes`, plus each decoded byte's `(offset, len)`
+/// in the raw text (`%XX` decodes to one byte spanning three). `None` when
+/// there is nothing to decode — the common case allocates nothing.
+fn percent_decode(bytes: &[u8]) -> Option<(Vec<u8>, RawMap)> {
+    if !bytes.contains(&b'%') {
+        return None;
+    }
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut raw = Vec::with_capacity(bytes.len());
+    let mut changed = false;
     let mut i = 0;
     while i < bytes.len() {
-        if let Some((keep, end)) = match_secret(bytes, i) {
-            let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
-            // Every match starts and ends on an ASCII byte, so these are char boundaries.
-            buf.push_str(&text[copied..i + keep]);
-            buf.push_str(REDACTED);
-            copied = end;
+        if bytes[i] == b'%'
+            && let (Some(a), Some(b)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && a.is_ascii_hexdigit()
+            && b.is_ascii_hexdigit()
+        {
+            decoded.push(hex_val(*a) << 4 | hex_val(*b));
+            raw.push((i, 3));
+            i += 3;
+            changed = true;
+        } else {
+            decoded.push(bytes[i]);
+            raw.push((i, 1));
+            i += 1;
+        }
+    }
+    changed.then_some((decoded, raw))
+}
+
+fn hex_val(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        _ => b - b'A' + 10,
+    }
+}
+
+/// The `(start, end)` spans of every secret shape in `view` — one scan.
+fn secret_spans(view: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < view.len() {
+        if let Some((keep, end)) = match_secret(view, i) {
+            spans.push((i + keep, end));
             i = end;
             continue;
         }
         i += 1;
     }
-    out.map(|mut buf| {
-        buf.push_str(&text[copied..]);
-        buf
-    })
+    spans
+}
+
+/// Replaces secret-shaped substrings with [`REDACTED`]. Returns `None` when nothing
+/// matched (the common case allocates nothing). Linear in the input for a fixed pattern
+/// set; inputs are already capped (≤ 512 bytes).
+pub fn redact(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut spans = secret_spans(bytes);
+    // Percent-encoded text hides keys and separators from the raw scanner
+    // (review N7): `%63%6C…` is `client…`, `%3A` the `:`. An escape can also
+    // FAKE a byte — `%0C` reads as a form feed but is three plain bytes — so
+    // the decoded view is scanned in ADDITION and its matches mapped back
+    // onto raw spans; it never replaces the raw scan.
+    if let Some((decoded, raw)) = percent_decode(bytes) {
+        for (start, end) in secret_spans(&decoded) {
+            spans.push((raw[start].0, raw[end - 1].0 + raw[end - 1].1));
+        }
+        spans.sort_unstable();
+        spans.dedup();
+    }
+    // Merge overlapping spans — a secret found on both views maps to the same
+    // raw bytes — and emit one redaction each. Every span boundary is ASCII.
+    let mut spans = spans.into_iter();
+    let mut cur = spans.next()?;
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for span in spans {
+        if span.0 <= cur.1 {
+            cur.1 = cur.1.max(span.1);
+        } else {
+            out.push_str(&text[copied..cur.0]);
+            out.push_str(REDACTED);
+            copied = cur.1;
+            cur = span;
+        }
+    }
+    out.push_str(&text[copied..cur.0]);
+    out.push_str(REDACTED);
+    out.push_str(&text[cur.1..]);
+    Some(out)
 }
 
 /// URL userinfo: `scheme://user:password@host` keeps the user and hides the password.
@@ -281,10 +351,11 @@ fn is_quoting(b: u8) -> bool {
     matches!(b, b' ' | b'"' | b'\'' | b'\\')
 }
 
-/// A secret's value that starts a JSON object: to the matching `}` (braces inside
-/// quoted strings don't count); unclosed runs to the line's end — hiding too much is
-/// safer than leaving the tail (review S1-2).
-fn json_object_len(value: &[u8]) -> usize {
+/// A secret's value that starts a JSON container: to the matching close
+/// (brackets inside quoted strings don't count, and `{`/`[` nest together);
+/// unclosed runs to the line's end — hiding too much is safer than leaving
+/// the tail (reviews S1-2, N7). The caller guarantees `{` or `[` at byte 0.
+fn json_container_len(value: &[u8]) -> usize {
     let mut depth = 0usize;
     let mut in_string = false;
     let mut k = 0;
@@ -298,9 +369,9 @@ fn json_object_len(value: &[u8]) -> usize {
             }
         } else if b == b'"' {
             in_string = true;
-        } else if b == b'{' {
+        } else if b == b'{' || b == b'[' {
             depth += 1;
-        } else if b == b'}' {
+        } else if b == b'}' || b == b']' {
             depth -= 1;
             if depth == 0 {
                 return k + 1;
@@ -343,8 +414,8 @@ fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
     let last_part = key_parts(key).pop().unwrap_or_default();
     let len = if last_part == b"authorization" || last_part == b"cookie" {
         value.iter().take_while(|b| !b"\r\n".contains(b)).count()
-    } else if value.first() == Some(&b'{') {
-        json_object_len(value)
+    } else if value.first() == Some(&b'{') || value.first() == Some(&b'[') {
+        json_container_len(value)
     } else if let Some(q) = quote {
         // To the closing quote (or an escaped one), spaces included.
         value
@@ -395,7 +466,9 @@ fn high_confidence(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     if rest.starts_with(b"eyJ") {
         let run = token_run(rest, b"_-.");
         let dots = rest[..run].split(|b| *b == b'.').count() - 1;
-        if run >= 20 && dots >= 2 {
+        // A whole JWT (header.payload.sig) or a piece still ≥30 — a split
+        // line can cut the dots off a long `eyJ` run (review N7).
+        if (run >= 20 && dots >= 2) || run >= 30 {
             return Some((0, i + run));
         }
     }
@@ -443,17 +516,18 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             return Some((key_len + keep, i + key_len + len));
         }
     }
-    // A long mixed-case alphanumeric run is a credential shape (API keys, signing keys);
-    // lowercase hex (commit and content hashes) and UUIDs are not. Base64's `/ + =`
-    // join the run — otherwise they split it into pieces under the limit (review
-    // S1-2), which is also how a multi-segment webhook path stays one run.
+    // A long mixed-case alphanumeric run is a credential shape (API keys, signing
+    // keys; one digit suffices — a JWT piece may carry few, review N7); UUIDs are
+    // not. Base64's `/ + =` join the run — otherwise they split it into pieces
+    // under the limit (review S1-2) — which is also how a webhook path stays one.
     if rest.first().is_some_and(u8::is_ascii_alphanumeric) {
         let run = token_run(rest, b"+/=_-");
         let token = &rest[..run];
         if run >= 32
             && token.iter().any(u8::is_ascii_uppercase)
             && token.iter().any(u8::is_ascii_lowercase)
-            && token.iter().filter(|b| b.is_ascii_digit()).count() >= 2
+            && token.iter().any(u8::is_ascii_digit)
+            && !looks_like_uuid(token)
         {
             if !token.contains(&b'/') {
                 return Some((0, i + run));
@@ -481,8 +555,27 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
                 return Some((at.unwrap_or(0), i + run));
             }
         }
+        // A bare lowercase-hex run is a hash or a hex credential — at
+        // commit length and beyond the review calls the miss a leak (N7).
+        // A run that continues as a word is a longer identifier, not a hex
+        // string; a commit SHA is the accepted cost of the coverage.
+        let hex_run = rest
+            .iter()
+            .take_while(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(*b))
+            .count();
+        if hex_run >= 40 && !rest.get(hex_run).is_some_and(|b| is_word(*b)) {
+            return Some((0, i + hex_run));
+        }
     }
     None
+}
+
+/// `8-4-4-4-12` hex with dashes is a UUID — an identifier, never a credential —
+/// whichever digit count the run carries.
+fn looks_like_uuid(token: &[u8]) -> bool {
+    const PARTS: [usize; 5] = [8, 4, 4, 4, 12];
+    token.iter().all(|b| b.is_ascii_hexdigit() || *b == b'-')
+        && token.split(|b| *b == b'-').map(<[u8]>::len).eq(PARTS)
 }
 
 #[cfg(test)]
@@ -660,6 +753,43 @@ mod tests {
             ))
             .as_deref(),
             Some("sig [redacted] end")
+        );
+    }
+
+    #[test]
+    fn the_encoded_and_split_shapes_the_review_found() {
+        // N7a: a fully percent-encoded JSON secret — the key and separator
+        // are escape bytes, invisible to the raw scanner.
+        let encoded = "%7B%22client_secret%22%3A%22Zq81aa%22%7D";
+        let out = redact(&format!("got {encoded}"))
+            .unwrap_or_else(|| panic!("encoded secret must die: {encoded}"));
+        assert!(!out.contains("Zq81aa"), "{encoded} → {out:?}");
+        // N7b: a secret key whose value is a JSON array — like `{`, the
+        // whole container is credential.
+        assert_eq!(
+            redact(r#"{"auth": ["hunter2", "hunter3"]}"#).as_deref(),
+            Some(r#"{"auth": [redacted]}"#)
+        );
+        // N7c: unquoted values end at , ; & — only the value dies.
+        assert_eq!(
+            redact("password=hunter2,theme=dark;sid=abc123&x=1").as_deref(),
+            Some("password=[redacted],theme=dark;sid=[redacted]&x=1")
+        );
+        // N7d: a bare lowercase-hex run is a credential shape at 40+ chars —
+        // a commit-length SHA is the accepted cost (hashes name nothing a
+        // caller can spend).
+        let hex = "a".repeat(40);
+        assert_eq!(
+            redact(&format!("signing {hex} done")).as_deref(),
+            Some("signing [redacted] done")
+        );
+        // N7e: a base64url piece with a single digit — the JWT-signature
+        // tail the two-digit rule missed — and a split `eyJ` run.
+        let piece = "aB".repeat(16) + "3";
+        assert_eq!(
+            redact(&format!("sig {piece} end")).as_deref(),
+            Some("sig [redacted] end"),
+            "base64url run ≥32 with _ or - needs only one digit"
         );
     }
 

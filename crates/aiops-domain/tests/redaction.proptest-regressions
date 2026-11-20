@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 7dc408541d145dc4ec833de306eb65d60ce7f46763dfcb673dfc1021586a81ee # shrinks to scheme = "postgres", user = "aaa", password = "*0aA$a", host = "aaa.aa"
 cc e4d81b3fa437f6a5967b6fd78362ef841688babbd9826182e5df9bf27d7846fa # shrinks to key = "x-api-key", sep = "=", value = "AaAAa0", before = "", after = ""
+cc 11af540de0b47876a0309e45f1b972866999375328f4e2a9a7ea0af5077b7a01 # shrinks to scheme = "postgres", user = "aaa", password = "%0C$Aa", host = "aaa.aa"
