@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aiops_server::auth::{CredentialCache, TOKEN_PREFIX, generate, hash};
-use aiops_server::control::{CONTROL_BURST, ControlAdapter, ReferenceHost, drive_resumable};
+use aiops_server::control::{
+    CONTROL_BURST, CONTROL_RATE, ControlAdapter, ReferenceHost, drive_resumable,
+};
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::Request;
@@ -878,17 +880,44 @@ async fn a_crash_before_submit_redrives_exactly_once(pool: PgPool) {
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn controls_have_their_own_rate_bucket(pool: PgPool) {
     let (url, _host) = stub_host().await;
-    let e = env_with_adapter(pool, &url).await;
+    // The bucket's refill is the test's own clock: frozen, a burst is exactly
+    // CONTROL_BURST — a loaded machine cannot let a token trickle back between
+    // two sequential calls (FLAKE = BUG: `limited > 0` raced the wall clock).
+    let clock = common::TestClock::new();
+    let installed = clock.clone();
+    let adapter = ControlAdapter::ReferenceHost(ReferenceHost::new(&url));
+    let e = env_with(pool, move |s| {
+        s.adapters.insert("pilot".into(), adapter);
+        installed.install(s);
+    })
+    .await;
     let path = op_path(&e, "reconcile").await;
     let req_body = body("article:none", &json!({"published": false}));
-    let mut limited = 0;
+    let mut statuses = Vec::new();
     for _ in 0..CONTROL_BURST + 8 {
         let r = send(&e.app, post_json(&path, &e.no_read, &req_body)).await;
-        if r.status == 429 {
-            limited += 1;
-        }
+        statuses.push(r.status);
     }
-    assert!(limited > 0, "the control bucket must bound the caller");
+    let limited = statuses.iter().filter(|s| **s == 429).count();
+    assert_eq!(
+        (statuses.iter().filter(|s| **s == 200).count(), limited),
+        (CONTROL_BURST as usize, 8),
+        "frozen clock: the burst then refusals: {statuses:?}"
+    );
+
+    // The refill is as deterministic as the drain: +1 s earns CONTROL_RATE.
+    clock.advance(Duration::from_secs(1));
+    let mut statuses = Vec::new();
+    for _ in 0..=CONTROL_RATE {
+        let r = send(&e.app, post_json(&path, &e.no_read, &req_body)).await;
+        statuses.push(r.status);
+    }
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        CONTROL_RATE as usize,
+        "one second refills the rate, no more: {statuses:?}"
+    );
+    assert_eq!(statuses.last(), Some(&429), "{statuses:?}");
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]

@@ -49,6 +49,50 @@ pub(crate) fn now() -> Timestamp {
     (system_clock())()
 }
 
+/// `now()` on the database's own clock — the only clock `audit_log.at` knows.
+/// Window bounds must come from it: the host's `SystemTime` is a different
+/// timeline (a VM's clock drifts; a transaction's `now()` is its start time),
+/// and two clocks inside a milliseconds window is a race (FLAKE = BUG).
+pub(crate) async fn db_now(pool: &PgPool) -> Timestamp {
+    let micros: i64 = sqlx::query_scalar("SELECT (EXTRACT(EPOCH FROM now()) * 1000000)::bigint")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    Timestamp::from_unix_micros(micros)
+}
+
+/// A clock the test owns: `install` replaces the state's clock, and `now()` then
+/// moves only when `advance` says. A token bucket's refill is driven by the
+/// test, not the wall clock — load cannot refill a limit mid-assertion
+/// (FLAKE = BUG).
+#[derive(Clone)]
+pub(crate) struct TestClock(std::sync::Arc<std::sync::atomic::AtomicI64>);
+
+impl TestClock {
+    pub(crate) fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+            now().unix_micros(),
+        )))
+    }
+
+    /// `env_with(pool, |s| clock.install(s))` — frozen at the real "now" when the
+    /// env was built, so minted tokens stay unexpired.
+    pub(crate) fn install(&self, s: &mut AppState) {
+        let t = self.0.clone();
+        s.clock = std::sync::Arc::new(move || {
+            Timestamp::from_unix_micros(t.load(std::sync::atomic::Ordering::Relaxed))
+        });
+    }
+
+    /// Moves `now()` forward — refills buckets by exactly what `d` earns.
+    pub(crate) fn advance(&self, d: std::time::Duration) {
+        self.0.fetch_add(
+            i64::try_from(d.as_micros()).unwrap_or(i64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 pub(crate) struct Reply {
     pub(crate) status: u16,
     pub(crate) headers: axum::http::HeaderMap,

@@ -48,8 +48,13 @@ async fn a_malformed_flood_still_spends_the_ingest_budget(pool: PgPool) {
     // The rate charge used to sit AFTER the full body parse: bodies that never
     // parsed spent nothing — an unbounded, free way to burn a MiB of work per
     // call (white-hat S3). Admission now costs a token before the body is read.
+    // The refill is the test's clock, not the wall's: a loaded machine cannot
+    // let a token back between two requests and turn the 4th into a 400
+    // (FLAKE = BUG).
+    let clock = common::TestClock::new();
     let e = env_with(pool, |s| {
         s.ingest_buckets = Buckets::new(1, 3);
+        clock.install(s);
     })
     .await;
     let mut statuses = Vec::new();
@@ -263,10 +268,13 @@ async fn missing_events_are_counted_not_hidden(pool: PgPool) {
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn a_flooding_host_is_limited_and_another_host_is_not(pool: PgPool) {
-    // One event a second: the second batch cannot be refilled in time, however slowly the
-    // first is stored on a loaded machine.
+    // One event a second: the second batch cannot be refilled — the clock is the
+    // test's own, frozen, so load cannot trickle a token back between the two
+    // calls (FLAKE = BUG: the "in time" assumption raced the wall clock).
+    let clock = common::TestClock::new();
     let e = env_with(pool, |s| {
         s.ingest_buckets = aiops_server::auth::Buckets::new(1, 10);
+        clock.install(s);
     })
     .await;
     let r = send(&e.app, post_ingest(&e.ingest_key, batch(&journey(1, 0)))).await;
@@ -387,8 +395,12 @@ async fn an_unknown_slug_flood_is_bounded_by_the_query_limit(pool: PgPool) {
     // unknown slugs would otherwise turn denials into an audit-write flood. The bound is
     // the token's own query bucket: a rate-limited request never reaches authorize(), so
     // it writes no row. Audited rows must equal the denials the limiter admitted.
+    // Frozen clock: the burst is exactly five — no refill can slip in under
+    // load and turn a 429 back into an audited 403 (FLAKE = BUG).
+    let clock = common::TestClock::new();
     let e = env_with(pool, |s| {
         s.query_buckets = aiops_server::auth::Buckets::new(1, 5);
+        clock.install(s);
     })
     .await;
     let (mut denied, mut limited) = (0usize, 0usize);
@@ -410,11 +422,11 @@ async fn an_unknown_slug_flood_is_bounded_by_the_query_limit(pool: PgPool) {
         audit.len() == denied,
         "every denial audited exactly once; a 429 never audits"
     );
-    assert!(
-        denied <= 10,
-        "burst 5 plus a slow refill admits a few, not a flood: {denied}"
+    assert_eq!(
+        (denied, limited),
+        (5, 35),
+        "burst 5 denies, the rest are refused unaudited"
     );
-    assert!(limited >= 30, "the limiter refused most of the flood");
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]

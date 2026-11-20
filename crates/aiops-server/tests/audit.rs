@@ -12,7 +12,7 @@ mod common;
 use aiops_store::AuditEntry;
 use axum::body::Body;
 use axum::http::Request;
-use common::{audit_rows, env, get as get_req, now, send};
+use common::{audit_rows, db_now, env, get as get_req, send};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -122,16 +122,37 @@ fn urlencoded(s: &str) -> String {
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn filters_select_action_actor_token_and_the_window(pool: PgPool) {
-    let e = env(pool).await;
+    let e = env(pool.clone()).await;
     let tid = Uuid::new_v4();
     seed(&e, "ops", "credentials.list", None).await;
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let t0 = now();
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    seed(&e, "ops", "admin.revoke_token", Some(tid)).await;
-    seed(&e, "ana", "operations.list", None).await;
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let t1 = now();
+
+    // The window's bounds are the database's clock (`at` is `DEFAULT now()`, the
+    // insert transaction's start). The two rows land inside a transaction that
+    // sleeps before its inserts — their `at` predates the app's idea of "when the
+    // write happened", the same skew a host clock's `t0` raced (FLAKE = BUG).
+    let t0 = db_now(&pool).await;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_sleep(0.05)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    for (actor, action, token) in [
+        ("ops", "admin.revoke_token", Some(tid)),
+        ("ana", "operations.list", None),
+    ] {
+        sqlx::query(
+            "INSERT INTO audit_log (actor, token_id, action, project_slug, target, decision, reason)
+             VALUES ($1, $2, $3, 'pilot', 't', 'allowed', 'r')",
+        )
+        .bind(actor)
+        .bind(token)
+        .bind(action)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let t1 = db_now(&pool).await;
 
     let r = send(
         &e.app,
