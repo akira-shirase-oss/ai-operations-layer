@@ -455,7 +455,31 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             && token.iter().any(u8::is_ascii_lowercase)
             && token.iter().filter(|b| b.is_ascii_digit()).count() >= 2
         {
-            return Some((0, i + run));
+            if !token.contains(&b'/') {
+                return Some((0, i + run));
+            }
+            // A `/`-joined run is a path by default — model ids, file paths,
+            // URL routes are long mixed runs too (review N4). It is only a
+            // credential when at least two segments each look like a key
+            // (≥6 chars with an uppercase and a digit: T0ABCDEF12,
+            // B0CDEF1234). The redaction starts at the first of them so the
+            // readable prefix — a domain, a directory, a namespace — survives.
+            let mut qualified = 0;
+            let mut at = None;
+            let mut off = 0;
+            for seg in token.split(|b| *b == b'/') {
+                if seg.len() >= 6
+                    && seg.iter().any(u8::is_ascii_uppercase)
+                    && seg.iter().any(u8::is_ascii_digit)
+                {
+                    qualified += 1;
+                    at.get_or_insert(off);
+                }
+                off += seg.len() + 1;
+            }
+            if qualified >= 2 {
+                return Some((at.unwrap_or(0), i + run));
+            }
         }
     }
     None
@@ -569,7 +593,7 @@ mod tests {
         );
         assert_eq!(
             redact("GET https://hooks.example.com/services/T0ABCDEF12/B0CDEF1234/xyZab").as_deref(),
-            Some("GET https://hooks.example.[redacted]")
+            Some("GET https://hooks.example.com/services/[redacted]")
         );
     }
 
@@ -601,6 +625,42 @@ mod tests {
         let _ = redact("token: {\"\\");
         let _ = redact("secret={\"a\":\"b\\");
         let _ = redact("password: \"\\");
+    }
+
+    #[test]
+    fn paths_and_model_ids_in_free_text_are_not_secrets() {
+        // N4: a `/`-joined run is not a credential by shape alone — paths,
+        // model ids and URL paths are long mixed runs too. A run that
+        // contains `/` counts only when at least two segments each look
+        // like a key (≥6 chars, an uppercase letter and a digit), and the
+        // redaction starts at the first of them so the readable prefix —
+        // a domain, a directory, a model namespace — survives.
+        for text in [
+            "model mistralai/Mistral-7B-Instruct-v0.3 refused the prompt",
+            "model mistralai/Mixtral-8x22B-Instruct-v0p1 refused the prompt",
+            "read /var/log/aiops-collector/RunId42-Error/trace-2026.log tail",
+            "GET /api/v2/Operations/RunId42/status 200",
+            "release/2024-11-20/publish ok",
+        ] {
+            assert_eq!(redact(text), None, "{text:?} is operational text");
+        }
+        // A webhook path still dies — two key-looking segments is the shape —
+        // and the domain + path prefix survive to explain where it went.
+        assert_eq!(
+            redact("GET https://hooks.example.com/services/T0ABCDEF12/B0CDEF1234/xyZab").as_deref(),
+            Some("GET https://hooks.example.com/services/[redacted]")
+        );
+        // Base64 `+`/`/`/`=` still keeps a bare blob one run (S1-2).
+        assert_eq!(
+            redact(&format!(
+                "sig {} end",
+                concat!(
+                    "aB3xY9", "+Qw/ER", "TyuiopAS", "DFGHJKLz", "xcvbnm12", "34567890", "=="
+                )
+            ))
+            .as_deref(),
+            Some("sig [redacted] end")
+        );
     }
 
     #[test]
