@@ -26,15 +26,18 @@ pub struct Actor {
 }
 
 pub async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<Actor, ApiError> {
-    authenticate_with(app, headers, &app.query_buckets).await
+    authenticate_with(app, headers, &app.query_buckets, true).await
 }
 
 /// `authenticate` under a caller-chosen bucket: the query path and the control path each
-/// rate-limit their own, so one flood cannot starve the other.
+/// rate-limit their own, so one flood cannot starve the other. `allow_stale` lets the
+/// read path keep serving a recently-valid record when the lookup budget is spent —
+/// control/admin callers pass `false` and fail closed instead.
 pub async fn authenticate_with(
     app: &AppState,
     headers: &HeaderMap,
     buckets: &Buckets<Uuid>,
+    allow_stale: bool,
 ) -> Result<Actor, ApiError> {
     let Some(secret) = bearer(headers, TOKEN_PREFIX) else {
         Metrics::add(&app.metrics.unauthenticated, 1);
@@ -42,7 +45,9 @@ pub async fn authenticate_with(
     };
     let digest = hash(secret);
     let found = app
-        .resolve(&app.tokens, digest, || app.store.find_token(&digest))
+        .resolve(&app.tokens, digest, allow_stale, || {
+            app.store.find_token(&digest)
+        })
         .await?;
     let now = app.now();
     match found {

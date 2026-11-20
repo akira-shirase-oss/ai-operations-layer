@@ -30,7 +30,7 @@ pub(crate) async fn authorize_admin(
     headers: &HeaderMap,
     action: &str,
 ) -> Result<crate::query::Actor, ApiError> {
-    let actor = authenticate_with(app, headers, &app.control_buckets).await?;
+    let actor = authenticate_with(app, headers, &app.control_buckets, false).await?;
     if !actor.token.scopes.iter().any(|s| s == SCOPE_ADMIN) {
         return Err(control::deny(app, &actor, action, None, None, "scope_missing").await);
     }

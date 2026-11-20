@@ -230,7 +230,7 @@ async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<IngestKey, 
     };
     let digest = hash(secret);
     let found = app
-        .resolve(&app.ingest_keys, digest, || {
+        .resolve(&app.ingest_keys, digest, true, || {
             app.store.find_ingest_key(&digest)
         })
         .await?;

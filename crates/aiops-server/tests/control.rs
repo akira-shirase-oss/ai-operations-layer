@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aiops_server::auth::{TOKEN_PREFIX, generate, hash};
+use aiops_server::auth::{CredentialCache, TOKEN_PREFIX, generate, hash};
 use aiops_server::control::{CONTROL_BURST, ControlAdapter, ReferenceHost, drive_resumable};
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -1033,4 +1033,37 @@ async fn a_dr_reconcile_reads_the_effect_authority_not_the_runner(pool: PgPool) 
     assert_eq!(r.body["resolution"], "effect_present");
     // The effect authority answered; the runner itself saw no submit and no read.
     assert_eq!(runner_host.submits.load(Ordering::SeqCst), 0);
+}
+
+/// The stale-cache fallback is the read path's flood resilience — a control or
+/// admin call under a saturated lookup gate must refuse, never trust a record
+/// past its TTL (white-hat S2-5: saturating the four lookup permits kept a
+/// revoked record serving ~330 s past TTL).
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_saturated_lookup_gate_fails_closed_on_controls(pool: PgPool) {
+    let e = env_with(pool, |s| {
+        s.tokens = CredentialCache::new(Duration::ZERO, Duration::ZERO, 10_000);
+    })
+    .await;
+    let path = format!("/v1/projects/pilot/operations/{}/reconcile", op_hex(1));
+    let req = body("article:x", &json!({"published": false}));
+    // Warm the token cache: the first call resolves on a free permit, and with a
+    // zero TTL its record is stale the instant it lands.
+    let r = send(&e.app, post_json(&path, &e.no_read, &req)).await;
+    assert_eq!(r.status, 403, "{:?}", r.body); // no adapter — audited denial, cache warm
+    let r = send(&e.app, get_req("/v1/projects", &e.reader)).await;
+    assert_eq!(r.status, 200, "{:?}", r.body); // the read token's record, too
+
+    // Every lookup permit held — no credential query can run.
+    let held: Vec<_> = (0..4)
+        .map(|_| e.state.lookup_gate.try_acquire().unwrap())
+        .collect();
+
+    // The read path still answers from the stale record (its documented trade).
+    let r = send(&e.app, get_req("/v1/projects", &e.reader)).await;
+    assert_eq!(r.status, 200, "{:?}", r.body);
+    // The control path fails closed: the stale record is not authority here.
+    let r = send(&e.app, post_json(&path, &e.no_read, &req)).await;
+    assert_eq!(r.status, 503, "{:?}", r.body);
+    drop(held);
 }

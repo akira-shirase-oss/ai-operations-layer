@@ -552,7 +552,7 @@ async fn authorize_control(
     target: Option<&str>,
     scope: &'static str,
 ) -> Result<(Actor, Project), ApiError> {
-    let actor = authenticate_with(app, headers, &app.control_buckets).await?;
+    let actor = authenticate_with(app, headers, &app.control_buckets, false).await?;
     if !actor.token.scopes.iter().any(|s| s == scope) {
         return Err(deny(app, &actor, action, Some(slug), target, "scope_missing").await);
     }

@@ -254,11 +254,14 @@ impl AppState {
 
     /// A credential's record: from the cache when fresh, else from PostgreSQL under the
     /// lookup budget. With the budget spent, a recently valid credential is still served
-    /// from the cache (stale) and anything else is refused as overloaded, without a query.
+    /// from the cache (stale) — but only where `allow_stale` says that trade is safe:
+    /// control and admin calls fail closed instead, so saturation can never stretch a
+    /// revoked credential's life past its cache TTL.
     pub async fn resolve<V, Fut>(
         &self,
         cache: &CredentialCache<V>,
         digest: [u8; 32],
+        allow_stale: bool,
         lookup: impl FnOnce() -> Fut,
     ) -> Result<Option<V>, ApiError>
     where
@@ -267,8 +270,8 @@ impl AppState {
     {
         let stale = match cache.get(&digest) {
             Cached::Fresh(found) => return Ok(found),
-            Cached::Stale(v) => Some(v),
-            Cached::Miss => None,
+            Cached::Stale(v) if allow_stale => Some(v),
+            Cached::Stale(_) | Cached::Miss => None,
         };
         let Ok(_permit) = self.lookup_gate.try_acquire() else {
             Metrics::add(&self.metrics.auth_shed, 1);
