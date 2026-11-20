@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { resolve } from '$app/paths';
 	import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@aiops/ui/ui/table';
 	import { api, type Result } from '#lib/api.js';
@@ -53,7 +54,9 @@
 			}
 		});
 	}
-	$effect(apply);
+	// Once, on arrival — the fields stay untracked so typing does not refire it.
+	// Filters apply on Apply, Clear or Enter (the form's submit), not per key.
+	$effect(() => untrack(apply));
 
 	function older() {
 		if (!next) return;

@@ -31,6 +31,10 @@
 		setToken(t);
 		const r = await api<ProjectsView>('/v1/projects');
 		checking = false;
+		// Aborted is not a verdict: the page navigating away cancels the fetch, and
+		// rolling the token back in this dying document signs the user out of the
+		// page they are already loading. Keep the token; the next page decides.
+		if (r.state === 'aborted') return;
 		if (r.state === 'ok' || r.state === 'forbidden') {
 			// 403 is a verdict too: the token is real, just narrower than this ask —
 			// the destination pages render their own denial (audit log, a project).

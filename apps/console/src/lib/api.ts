@@ -28,6 +28,7 @@ export type Result<T> =
 	| { state: 'forbidden'; message: string }
 	| { state: 'missing' }
 	| { state: 'rateLimited'; retryAfter: number }
+	| { state: 'aborted' }
 	| { state: 'unreachable'; message: string };
 
 export async function api<T>(path: string, fetcher: typeof fetch = fetch): Promise<Result<T>> {
@@ -59,6 +60,10 @@ async function apiCall<T>(path: string, init: RequestInit, fetcher: typeof fetch
 		const headers = { ...(init.headers ?? {}), authorization: `Bearer ${t}` };
 		response = await fetcher(path, { ...init, headers });
 	} catch (e) {
+		// A navigation or an AbortController cancels the fetch — that is the caller
+		// going away, not the collector's answer, and it must never count as a
+		// verdict (a sign-in check aborted mid-navigation is not a refused token).
+		if (e instanceof Error && e.name === 'AbortError') return { state: 'aborted' };
 		return { state: 'unreachable', message: e instanceof Error ? e.message : 'network error' };
 	}
 	if (response.ok) return { state: 'ok', data: (await response.json()) as T };

@@ -10,10 +10,18 @@ const ADMIN = process.env['AIOPS_E2E_ADMIN_TOKEN'] ?? '';
 function watch(page: Page): string[] {
 	const problems: string[] = [];
 	page.on('console', (m) => {
-		if (m.type() === 'error') problems.push(m.text());
+		// The location is kept with the text so an expected 4xx can be matched to
+		// the exact endpoint that produced it — a blanket "contains 403" would
+		// also forgive a real failure somewhere else.
+		if (m.type() === 'error') problems.push(`${m.text()} (${m.location().url})`);
 	});
 	page.on('pageerror', (e) => problems.push(e.message));
 	return problems;
+}
+
+// The browser logs a read token's expected 403 as a console error; nothing else may fail.
+function unexpected(problems: string[]): string[] {
+	return problems.filter((p) => !(p.includes('403 (Forbidden)') && p.includes('/v1/admin/audit')));
 }
 
 async function signIn(page: Page, t: string) {
@@ -44,7 +52,7 @@ test('a read token is refused and the refusal itself lands in the log', async ({
 	await expect(page.getByText(/needs the/)).toContainText('admin');
 	await page.waitForTimeout(500);
 	expect(fetches, 'the audit page refetches in a loop').toBe(1);
-	expect(problems).toEqual([]);
+	expect(unexpected(problems)).toEqual([]);
 	await page.unroute('**/v1/admin/audit**');
 
 	await signOut(page);
@@ -59,28 +67,42 @@ test('a read token is refused and the refusal itself lands in the log', async ({
 	await expect(denial.first()).toContainText('e2e');
 	// Metadata only: no secret or digest ever renders in the log.
 	await expect(page.locator('tbody')).not.toContainText(/hash|secret|digest|aiops_tk_/);
-	expect(problems).toEqual([]);
+	expect(unexpected(problems)).toEqual([]);
 });
 
 test('filters narrow the log and the empty state names them', async ({ page }) => {
 	const problems = watch(page);
+	let fetches = 0;
+	await page.route('**/v1/admin/audit**', (r) => {
+		fetches++;
+		return r.continue();
+	});
 	await signIn(page, ADMIN);
 	await page.getByRole('link', { name: 'Audit' }).click();
 	await expect(page.getByTestId('audit-row').first()).toBeVisible();
+	expect(fetches).toBe(1); // the load on arrival
+
+	// Typing applies nothing: filters fire on Apply, Clear or Enter — a request
+	// per keystroke is a read-scope user's request storm in miniature.
+	fetches = 0;
+	await page.getByPlaceholder('audit.list').pressSequentially('no-such-ac');
+	await page.waitForTimeout(400);
+	expect(fetches, 'typing fetched before Apply').toBe(0);
 
 	await page.getByPlaceholder('audit.list').fill('audit.list');
 	await page.getByRole('button', { name: 'Apply' }).click();
 	for (const row of await page.getByTestId('audit-row').all()) {
 		await expect(row).toContainText('audit.list');
 	}
+	expect(fetches, 'Apply did not fetch exactly once').toBe(1);
 
 	await page.getByPlaceholder('ops').fill('no-such-actor');
-	await page.getByRole('button', { name: 'Apply' }).click();
+	await page.getByPlaceholder('ops').press('Enter');
 	const empty = page.getByTestId('audit-empty');
 	await expect(empty).toBeVisible();
 	await expect(empty).toContainText('these filters');
 
 	await page.getByRole('button', { name: 'Clear' }).click();
 	await expect(page.getByTestId('audit-row').first()).toBeVisible();
-	expect(problems).toEqual([]);
+	expect(unexpected(problems)).toEqual([]);
 });

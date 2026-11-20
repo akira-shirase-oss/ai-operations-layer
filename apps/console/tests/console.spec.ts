@@ -98,6 +98,8 @@ test('a token without the project sees a denial, not data', async ({ page }) => 
 	await page.goto('/console/');
 	await page.getByPlaceholder('aiops_tk_…').fill(process.env['AIOPS_E2E_OTHER_TOKEN'] ?? '');
 	await page.getByRole('button', { name: 'Sign in' }).click();
+	// The check is async — navigating while it is in flight aborts its own fetch.
+	await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 	await page.goto(`/console/p/pilot/op/${DOWN}`);
 	await expect(page.getByText('This token cannot read this project.')).toBeVisible();
 	await expect(page.getByText('The denial was recorded in the audit log.', { exact: false })).toBeVisible();

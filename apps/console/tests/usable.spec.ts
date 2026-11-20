@@ -274,3 +274,21 @@ test('a valid token narrower than the page ask still signs in — the page shows
 	await page.getByRole('button', { name: 'Sign in' }).click();
 	await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 });
+
+test('a navigation that aborts the sign-in check keeps the token', async ({ page }) => {
+	// An aborted check is not a verdict: the navigation itself cancels the fetch,
+	// and rolling the token back in that dying document signs the user out of the
+	// next page (console.spec.ts once signed itself out this way).
+	await page.route('**/v1/projects', async (r) => {
+		await new Promise((resolve) => setTimeout(resolve, 5000));
+		return r.continue();
+	});
+	await page.goto('/console/');
+	await page.getByPlaceholder('aiops_tk_…').fill(TOKEN);
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	// Do not wait for the check — navigate while it is still in flight so the
+	// browser aborts it. The token must survive to the next document.
+	await page.goto('/console/audit');
+	await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Sign in' })).toHaveCount(0);
+});
