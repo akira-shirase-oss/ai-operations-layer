@@ -50,7 +50,7 @@ env:
 
 jobs:
   ingest:
-    if: inputs.scenario != 'control'
+    if: inputs.scenario == 'all' || inputs.scenario == 'ingest'
     name: "ingest run: ${{ inputs.name }} (${{ inputs.rate }} batches/s for ${{ inputs.duration }})"
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -99,7 +99,7 @@ jobs:
           if-no-files-found: error
 
   control:
-    if: inputs.scenario != 'ingest'
+    if: inputs.scenario == 'all' || inputs.scenario == 'control'
     name: "control run: ${{ inputs.name }} (${{ inputs.control_rate }} req/s for ${{ inputs.control_duration }}, ingest concurrent)"
     runs-on: ubuntu-24.04
     # The mix runs ~57 min at the default rate; the release build and the credential

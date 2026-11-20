@@ -50,6 +50,7 @@ jobs:
       - run: scripts/check-isolated.sh
       - run: cargo test --workspace --locked
       - run: scripts/check-architecture.sh
+      - run: scripts/check-perf-scenarios.sh
 
   console:
     name: console (svelte-check, build)
