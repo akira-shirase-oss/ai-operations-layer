@@ -219,6 +219,32 @@ async fn the_wire_carries_metadata_only(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_forged_slug_or_target_is_never_stored_verbatim(pool: PgPool) {
+    let e = env(pool).await;
+    let before = audit_rows(&e.store, 50).await.len();
+
+    // The path's slug and operation id are attacker text: a denial today writes
+    // them raw — newlines and bidi into a row an admin later reads.
+    let r = send(
+        &e.app,
+        get_req(
+            "/v1/projects/evil%0A%E2%80%AEslug/operations/not-hex%0Ainjected",
+            &e.reader,
+        ),
+    )
+    .await;
+    assert_eq!(r.status, 403);
+
+    let rows = audit_rows(&e.store, 50).await;
+    let forged = rows[before..]
+        .iter()
+        .find(|a| a.action == "timeline.read" && a.decision == "denied")
+        .unwrap_or_else(|| panic!("the denial must be audited: {rows:?}"));
+    assert_eq!(forged.project_slug.as_deref(), Some("<invalid>"));
+    assert_eq!(forged.target.as_deref(), Some("<invalid>"));
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn a_half_cursor_and_bad_filters_are_400(pool: PgPool) {
     let e = env(pool).await;
     for path in [

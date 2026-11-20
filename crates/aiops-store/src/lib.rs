@@ -593,6 +593,33 @@ fn finish_parts(outcome: Option<Outcome>) -> (Option<&'static str>, Option<&'sta
     }
 }
 
+/// Audit fields are attacker text (the path's slug and operation id go in raw):
+/// store only the two shapes the log is allowed to carry — a project slug
+/// (`[a-z0-9][a-z0-9-]{0,62}`) — else `"<invalid>"`, never the bytes sent.
+fn audit_slug(s: &str) -> &str {
+    let b = s.as_bytes();
+    let ok = !b.is_empty()
+        && b.len() <= 63
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-');
+    if ok { s } else { "<invalid>" }
+}
+
+/// An audit target is a 32-hex operation id or a 36-char UUID — anything else
+/// (newlines, bidi, a raw path tail) is recorded as `"<invalid>"`.
+fn audit_target(s: &str) -> &str {
+    let b = s.as_bytes();
+    let hex32 = b.len() == 32 && b.iter().all(u8::is_ascii_hexdigit);
+    let uuid = b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        });
+    if hex32 || uuid { s } else { "<invalid>" }
+}
+
 async fn pool(
     cfg: &StoreConfig,
     base: &PgConnectOptions,
@@ -1128,8 +1155,8 @@ impl Store {
         .bind(entry.actor)
         .bind(entry.token_id)
         .bind(entry.action)
-        .bind(entry.project_slug)
-        .bind(entry.target)
+        .bind(entry.project_slug.map(audit_slug))
+        .bind(entry.target.map(audit_target))
         .bind(if entry.allowed { "allowed" } else { "denied" })
         .bind(entry.reason)
         .execute(&self.audit)
@@ -1362,8 +1389,8 @@ impl Store {
             .bind(audit.actor)
             .bind(audit.token_id)
             .bind(audit.action)
-            .bind(audit.project_slug)
-            .bind(audit.target)
+            .bind(audit.project_slug.map(audit_slug))
+            .bind(audit.target.map(audit_target))
             .bind(if audit.allowed { "allowed" } else { "denied" })
             .bind(audit.reason)
             .execute(&mut *tx)
