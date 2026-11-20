@@ -1,0 +1,3 @@
+durable-server listening on 127.0.0.1:65040
+durable-server: terminating: draining
+durable-server: drained; exiting

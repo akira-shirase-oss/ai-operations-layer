@@ -1,0 +1,84 @@
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    events_lost
+    ✓ 'count==0' count=0
+
+    http_req_duration{name:audit}
+    ✓ 'p(95)<150' p(95)=4.34ms
+    ✓ 'p(99)<300' p(99)=6.47ms
+
+    http_req_duration{name:controls}
+    ✓ 'p(95)<150' p(95)=4.77ms
+    ✓ 'p(99)<300' p(99)=6.62ms
+
+    http_req_duration{name:credentials}
+    ✓ 'p(95)<200' p(95)=6.99ms
+    ✓ 'p(99)<400' p(99)=8.42ms
+
+    http_req_duration{name:denied}
+    ✓ 'p(95)<200' p(95)=2.5ms
+    ✓ 'p(99)<400' p(99)=2.53ms
+
+    http_req_duration{name:revoke}
+    ✓ 'p(95)<250' p(95)=7.39ms
+    ✓ 'p(99)<500' p(99)=8.13ms
+
+    http_req_duration{scenario:ingest}
+    ✓ 'p(95)<100' p(95)=9.03ms
+    ✓ 'p(99)<250' p(99)=17.67ms
+
+    http_req_failed
+    ✓ 'rate==0' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 164     8.476858/s
+    checks_succeeded...: 100.00% 164 out of 164
+    checks_failed......: 0.00%   0 out of 164
+
+    ✓ controls answered
+    ✓ ingest 200
+    ✓ every event stored
+    ✓ audit page answered
+    ✓ audit page is a page
+    ✓ credentials answered
+    ✓ denied answered
+    ✓ revoke answered
+
+    CUSTOM
+    audit_pages_walked.............: 27     1.39558/s
+    control_requests...............: 75     3.876612/s
+    events_lost....................: 0      0/s
+    events_sent....................: 310    16.02333/s
+    rate_limited...................: 1      0.051688/s
+
+    HTTP
+    http_req_duration..............: min=206µs  med=2.47ms avg=3.37ms p(90)=6.65ms p(95)=8.34ms p(99)=20.23ms max=31.07ms
+      { expected_response:true }...: min=206µs  med=2.47ms avg=3.37ms p(90)=6.65ms p(95)=8.34ms p(99)=20.23ms max=31.07ms
+      { name:audit }...............: min=1.37ms med=2.34ms avg=2.69ms p(90)=3.78ms p(95)=4.34ms p(99)=6.47ms  max=7.15ms 
+      { name:controls }............: min=426µs  med=2.19ms avg=2.45ms p(90)=3.59ms p(95)=4.77ms p(99)=6.62ms  max=7.09ms 
+      { name:credentials }.........: min=2.63ms med=3.45ms avg=4.12ms p(90)=5.2ms  p(95)=6.99ms p(99)=8.42ms  max=8.78ms 
+      { name:denied }..............: min=1.73ms med=2.03ms avg=2.08ms p(90)=2.46ms p(95)=2.5ms  p(99)=2.53ms  max=2.54ms 
+      { name:revoke }..............: min=2.48ms med=4ms    avg=4.48ms p(90)=6.46ms p(95)=7.39ms p(99)=8.13ms  max=8.32ms 
+      { scenario:ingest }..........: min=2.66ms med=5.82ms avg=6.34ms p(90)=8.59ms p(95)=9.03ms p(99)=17.67ms max=21.24ms
+    http_req_failed................: 0.00%  0 out of 186
+    http_reqs......................: 186    9.613998/s
+
+    EXECUTION
+    iteration_duration.............: min=1.22ms med=3.66ms avg=4.39ms p(90)=8.13ms p(95)=9.13ms p(99)=10.39ms max=22.43ms
+    iterations.....................: 106    5.478945/s
+    vus............................: 0      min=0        max=0 
+    vus_max........................: 66     min=66       max=66
+
+    NETWORK
+    data_received..................: 430 kB 22 kB/s
+    data_sent......................: 123 kB 6.4 kB/s
+
+
+
