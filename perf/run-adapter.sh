@@ -20,10 +20,6 @@ name="${1:?name}"
 rate="${2:?job submissions per second}"
 duration="${3:?duration (k6 format, e.g. 60s)}"
 auth_rate="${4:-$(( rate * 2 ))}"
-port="${AIOPS_PERF_PORT:-57410}"
-worker_port="${AIOPS_PERF_WORKER_PORT:-57442}"
-adapter_port="${AIOPS_PERF_ADAPTER_PORT:-57441}"
-runner_port="${AIOPS_PERF_RUNNER_PORT:-57440}"
 date="$(date -u +%Y-%m-%d)"
 out="perf/results/${date}-adapter-${name}"
 work="$(mktemp -d)"
@@ -148,6 +144,37 @@ except Exception:
 PY
   }
 fi
+
+
+# A fixed high port sits inside the kernel's ephemeral source-port pool: an
+# outbound call in the same job — a token mint's Postgres connection — can hold
+# it, and the socket's TIME_WAIT outlives the mint (CI run 44730055284 died so:
+# `bind 127.0.0.1:57410` EADDRINUSE with nothing answering). Default: an
+# OS-chosen free port. An explicit override is honored after a bounded wait
+# for it to come free — a held port aborts loudly here, not at the server bind.
+port_free() { python3 -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1])))' "$1" 2>/dev/null; }
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+choose_port() {
+  if [ -n "${1:-}" ]; then
+    for _ in $(seq 1 300); do
+      port_free "$1" && { echo "$1"; return 0; }
+      sleep 0.3
+    done
+    echo "port $1 never came free" >&2
+    return 1
+  fi
+  free_port
+}
+
+port="$(choose_port "${AIOPS_PERF_PORT:-}")"
+worker_port="$(choose_port "${AIOPS_PERF_WORKER_PORT:-}")"
+adapter_port="$(choose_port "${AIOPS_PERF_ADAPTER_PORT:-}")"
+runner_port="$(choose_port "${AIOPS_PERF_RUNNER_PORT:-}")"
+# Free picks released their probe socket, so two picks can repeat — re-pick.
+while [ "$worker_port" = "$port" ]; do worker_port="$(free_port)"; done
+while [ "$adapter_port" = "$port" ] || [ "$adapter_port" = "$worker_port" ]; do adapter_port="$(free_port)"; done
+while [ "$runner_port" = "$port" ] || [ "$runner_port" = "$worker_port" ] || [ "$runner_port" = "$adapter_port" ]; do runner_port="$(free_port)"; done
+echo "collector=$port worker=$worker_port adapter=$adapter_port runner=$runner_port" >&2
 
 runner_url="http://127.0.0.1:$runner_port"
 adapter_url="http://127.0.0.1:$adapter_port"

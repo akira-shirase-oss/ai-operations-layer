@@ -21,7 +21,6 @@ rate="${2:?rate (control requests per second)}"
 duration="${3:?duration (k6 format, e.g. 60s)}"
 ingest_rate="${4:-100}"
 revoke_pool="${5:-200}"
-port="${AIOPS_PERF_PORT:-57410}"
 date="$(date -u +%Y-%m-%d)"
 out="perf/results/${date}-control-${name}"
 work="$(mktemp -d)"
@@ -139,6 +138,29 @@ except Exception:
 PY
   }
 fi
+
+# A fixed high port sits inside the kernel's ephemeral source-port pool: an
+# outbound call in the same job — a token mint's Postgres connection — can hold
+# it, and the socket's TIME_WAIT outlives the mint (CI run 44730055284 died so:
+# `bind 127.0.0.1:57410` EADDRINUSE with nothing answering). Default: an
+# OS-chosen free port. An explicit override is honored after a bounded wait
+# for it to come free — a held port aborts loudly here, not at the server bind.
+port_free() { python3 -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1])))' "$1" 2>/dev/null; }
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
+choose_port() {
+  if [ -n "${1:-}" ]; then
+    for _ in $(seq 1 300); do
+      port_free "$1" && { echo "$1"; return 0; }
+      sleep 0.3
+    done
+    echo "port $1 never came free" >&2
+    return 1
+  fi
+  free_port
+}
+
+port="$(choose_port "${AIOPS_PERF_PORT:-}")"
+echo "collector on 127.0.0.1:$port" >&2
 
 AIOPS_LISTEN="127.0.0.1:$port" \
 AIOPS_INGEST_EVENTS_PER_SEC=10000000 AIOPS_INGEST_BURST_EVENTS=10000000 \
