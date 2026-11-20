@@ -9,7 +9,7 @@ use crate::event::{
 };
 use crate::ids::{EventId, OperationId, StepId, TraceId};
 use crate::limits::Limits;
-use crate::policy::{KeyTreatment, Policy, redact};
+use crate::policy::{KeyTreatment, Policy, looks_like_secret, redact};
 use crate::time::Timestamp;
 use crate::wire::WireEvent;
 
@@ -600,8 +600,11 @@ fn time(text: &str, field: &'static str) -> Result<Timestamp, Refusal> {
 
 /// Identifiers (names, versions, codes, request IDs): `[A-Za-z0-9._:/@-]`, bounded.
 /// No spaces or markup, so they are safe to index and to render. The charset admits
-/// `://` and `@`, so a credential shape in one refuses the event by name (white-hat
-/// S2-1): storing `[redacted]` would corrupt the identifier the caller needs back.
+/// `://` and `@`, so a high-confidence credential shape in one refuses the event by
+/// name (white-hat S2-1): storing `[redacted]` would corrupt the identifier the
+/// caller needs back. Only high-confidence shapes refuse — the free-text
+/// heuristics would take `mistralai/Mistral-7B-Instruct-v0.3` for a token and
+/// `auth:login` for a key/value pair (review N3).
 fn opt_ident(
     text: Option<&str>,
     field: &'static str,
@@ -617,7 +620,7 @@ fn opt_ident(
     if !text.bytes().all(is_ident_byte) {
         return Err(Refusal::on(RefusalCode::InvalidValue, field));
     }
-    if redact(text).is_some() {
+    if looks_like_secret(text) {
         return Err(Refusal::on(RefusalCode::InvalidValue, field));
     }
     Ok(Some(text.to_owned()))

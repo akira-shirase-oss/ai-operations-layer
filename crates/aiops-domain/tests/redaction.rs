@@ -197,4 +197,18 @@ proptest! {
         let text = words.join(" ");
         prop_assert_eq!(redact(&text), None, "{:?}", text);
     }
+
+    /// N2: escapes, quotes and braces in any order after any key must never
+    /// panic — a trailing backslash once made the JSON-object scan return
+    /// len+1 and `redact` sliced past the end (CatchPanicLayer logging the
+    /// unredacted input on the way to a 500).
+    #[test]
+    fn never_panics_on_any_key_or_punctuation(
+        key in prop::sample::select(KEYS),
+        tail in prop::collection::vec(prop::char::range('\u{20}', '\u{7e}'), 0..80),
+        prefix in prop::sample::select(&["", "{", "{\"", "{\""][..]),
+    ) {
+        let tail: String = tail.into_iter().collect();
+        let _ = redact(&format!("{key}: {prefix}{tail}"));
+    }
 }

@@ -263,6 +263,16 @@ fn url_password(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     let userinfo = &rest[3..3 + seg];
     let at = userinfo.iter().rposition(|b| *b == b'@')?;
     let colon = userinfo[..at].iter().position(|b| *b == b':')?;
+    // The user part is kept verbatim, so it must LOOK like userinfo: a path,
+    // query or quote byte in it means this '@' belongs to something else (an
+    // email inside minified JSON — review N1) — decline so the keyed-secret
+    // pass scans the text instead.
+    if userinfo[..colon]
+        .iter()
+        .any(|b| matches!(b, b'/' | b'?' | b'#' | b'"' | b'\''))
+    {
+        return None;
+    }
     (colon + 1 < at).then_some((3 + colon + 1, i + 3 + at))
 }
 
@@ -300,7 +310,9 @@ fn json_object_len(value: &[u8]) -> usize {
         }
         k += 1;
     }
-    k
+    // A string ending in a backslash pushes k one past the end; never report a
+    // length the caller can't slice (review N2).
+    k.min(value.len())
 }
 
 /// After a secret key, the separator and value: `(bytes to keep, end of the value)`, both
@@ -354,17 +366,12 @@ fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
     (len > 0).then_some((j, j + len))
 }
 
-/// At `i`, returns `(bytes to keep before the redaction, end of the secret)`.
-fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+/// The credential shapes an identifier is refused on (review N3): PEM
+/// material, known token prefixes, bearer/basic headers and JWTs. The
+/// free-text heuristics below (`key=`-style names, long mixed runs) stay
+/// out — real model ids and namespaced codes are not secrets.
+fn high_confidence(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     let rest = &bytes[i..];
-    // URL userinfo follows the scheme's letters, so it needs no word boundary.
-    if let Some(found) = url_password(bytes, i) {
-        return Some(found);
-    }
-    // Every other shape starts a word.
-    if i > 0 && is_word(bytes[i - 1]) {
-        return None;
-    }
     if rest.starts_with(b"-----BEGIN") {
         return Some((0, bytes.len()));
     }
@@ -391,6 +398,35 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
         if run >= 20 && dots >= 2 {
             return Some((0, i + run));
         }
+    }
+    None
+}
+
+/// Whether `text` holds a high-confidence credential shape — the check
+/// [`crate::validate`] runs on identifier fields (model ids, release names,
+/// request ids). A model id is a long mixed run and `auth:login` a key-looking
+/// pair; neither is a credential, so only these shapes refuse (review N3).
+pub fn looks_like_secret(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (0..bytes.len()).any(|i| {
+        url_password(bytes, i).is_some()
+            || ((i == 0 || !is_word(bytes[i - 1])) && high_confidence(bytes, i).is_some())
+    })
+}
+
+/// At `i`, returns `(bytes to keep before the redaction, end of the secret)`.
+fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    let rest = &bytes[i..];
+    // URL userinfo follows the scheme's letters, so it needs no word boundary.
+    if let Some(found) = url_password(bytes, i) {
+        return Some(found);
+    }
+    // Every other shape starts a word.
+    if i > 0 && is_word(bytes[i - 1]) {
+        return None;
+    }
+    if let Some(found) = high_confidence(bytes, i) {
+        return Some(found);
     }
     // `key=value` / `key: value` where the key names a secret. The key must start here
     // (the caller checked the word boundary; a key byte before it would make it a suffix).
@@ -535,6 +571,36 @@ mod tests {
             redact("GET https://hooks.example.com/services/T0ABCDEF12/B0CDEF1234/xyZab").as_deref(),
             Some("GET https://hooks.example.[redacted]")
         );
+    }
+
+    #[test]
+    fn an_at_inside_json_is_not_userinfo_and_the_keyed_secret_still_dies() {
+        // N1: the last '@' belongs to the email, so the implied "user part"
+        // `a.io/token?client_secret=Zq81aa","user` is not userinfo (it holds
+        // '/', '?', '"'). The url_password branch must decline so the keyed
+        // pass sees client_secret — and the email stays, it is no credential.
+        let text = r#"{"url":"https://a.io/token?client_secret=Zq81aa","user":"ana@x.io"}"#;
+        let out = redact(text).unwrap_or_else(|| panic!("{text:?} must redact"));
+        assert!(!out.contains("Zq81aa"), "{text:?} → {out:?}");
+        assert!(
+            out.contains("ana@x.io"),
+            "the email is not a credential: {out:?}"
+        );
+        // A real userinfo password still dies, / ? # inside included (S1-2).
+        assert_eq!(
+            redact("dial redis://:Zk3/Ab+c=@cache:6379/0").as_deref(),
+            Some("dial redis://:[redacted]@cache:6379/0")
+        );
+    }
+
+    #[test]
+    fn a_value_ending_in_an_escape_never_slices_past_the_end() {
+        // N2: `{"…\` left json_object_len returning len+1 — redact then sliced
+        // `text[copied..]` past the end and panicked (CatchPanicLayer logging
+        // the unredacted input on the way out).
+        let _ = redact("token: {\"\\");
+        let _ = redact("secret={\"a\":\"b\\");
+        let _ = redact("password: \"\\");
     }
 
     #[test]

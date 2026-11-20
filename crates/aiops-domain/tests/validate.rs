@@ -481,6 +481,47 @@ fn an_identifier_carrying_a_secret_is_refused_by_name() {
     );
 }
 
+// White-hat N3: the identifier check runs only high-confidence credential
+// shapes (known prefixes, JWT, PEM, URL userinfo) — the free-text heuristics
+// (secret-looking keys, long mixed runs) refuse real model ids and
+// namespaced codes that are not secrets.
+#[test]
+fn an_identifier_that_only_looks_strong_still_passes() {
+    assert!(
+        check(WireEvent {
+            model: Some("mistralai/Mistral-7B-Instruct-v0.3".into()),
+            ..step_started()
+        })
+        .is_ok(),
+        "a Hugging Face model id is an identifier, not a token"
+    );
+    assert!(
+        check(WireEvent {
+            error_code: Some("auth:login".into()),
+            failure_class: Some("transport".into()),
+            ..step_finished("failed")
+        })
+        .is_ok(),
+        "a namespaced error code is an identifier, not a key/value pair"
+    );
+    assert!(
+        check(WireEvent {
+            name: Some("token:expired".into()),
+            error_code: Some("session:timeout".into()),
+            failure_class: Some("transport".into()),
+            ..step_finished("failed")
+        })
+        .is_ok()
+    );
+    assert!(
+        check(WireEvent {
+            deployment: Some("session-api:8080".into()),
+            ..started()
+        })
+        .is_ok()
+    );
+}
+
 #[test]
 fn cost_is_a_labeled_estimate_with_a_real_currency() {
     assert_eq!(
