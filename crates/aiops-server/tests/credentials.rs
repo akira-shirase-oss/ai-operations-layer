@@ -8,7 +8,9 @@
 
 mod common;
 
+use aiops_server::admin::{Admin, run as admin_run};
 use aiops_server::auth::{TOKEN_PREFIX, generate, hash};
+use aiops_store::Store;
 use axum::body::Body;
 use axum::http::Request;
 use common::{audit_rows, env, get as get_req, now, post_json, send};
@@ -234,4 +236,38 @@ async fn revoke_with_a_bad_id_is_a_clean_400(pool: PgPool) {
     )
     .await;
     assert_eq!(r.status, 404);
+}
+
+/// `admin` is collector-wide: a `--project` list cannot narrow it, so minting
+/// both is a lie the token never honors — a "pilot-only admin" was not pilot-
+/// only at all (white-hat S2-6). Mint refuses the pair; a bare `--scope admin`
+/// is the honest shape, while scoped scopes still require a project.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn an_admin_token_refuses_a_project_list(pool: PgPool) {
+    let store = Store::from_pool(pool);
+    store.create_project("pilot").await.unwrap();
+    let mint = |projects: &[&str], scopes: &[&str]| {
+        admin_run(
+            &store,
+            Admin::CreateToken {
+                actor: "a".into(),
+                projects: projects.iter().map(|s| (*s).to_owned()).collect(),
+                scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+                ttl_days: 30,
+            },
+            now(),
+        )
+    };
+    assert!(
+        mint(&["pilot"], &["admin"]).await.is_err(),
+        "admin + --project must refuse: the projects would never bind"
+    );
+    assert!(
+        mint(&[], &["admin"]).await.is_ok(),
+        "a bare --scope admin mints the honest collector-wide token"
+    );
+    assert!(
+        mint(&[], &["read"]).await.is_err(),
+        "a scoped token still needs at least one --project"
+    );
 }

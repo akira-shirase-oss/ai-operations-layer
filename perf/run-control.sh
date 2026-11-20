@@ -85,7 +85,7 @@ admins=$(( rate / 4 + 4 ))
 readers=$(( rate / 20 + 2 ))
 admin_list=""
 for i in $(seq 1 "$admins"); do
-  t="$("$bin" admin create-token --actor "ops-$i" --project perf --scope admin 2>/dev/null)"
+  t="$("$bin" admin create-token --actor "ops-$i" --scope admin 2>/dev/null)"
   admin_list="${admin_list:+$admin_list,}$t"
 done
 reader_list=""

@@ -104,7 +104,7 @@ export AIOPS_DATABASE_URL="$pg_base/$db"
 key="$("$bin" admin create-ingest-key --project perf --name k6)"
 token="$("$bin" admin create-token --actor perf --project perf 2>/dev/null)"
 # The collector-wide counters need the admin scope (67bc0de); the query run keeps a read token.
-admin_token="$("$bin" admin create-token --actor perf --project perf --scope admin 2>/dev/null)"
+admin_token="$("$bin" admin create-token --actor perf --scope admin 2>/dev/null)"
 
 # A fixed high port sits inside the kernel's ephemeral source-port pool: an
 # outbound call in the same job — a token mint's Postgres connection — can hold

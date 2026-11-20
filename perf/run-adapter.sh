@@ -92,7 +92,7 @@ export AIOPS_DATABASE_URL="$pg_base/$db"
 "$bin" admin create-project perf >/dev/null
 ingest_key="$("$bin" admin create-ingest-key --project perf --name k6-adapter)"
 read_token="$("$bin" admin create-token --actor perf-reader --project perf --scope read)"
-admin_token="$("$bin" admin create-token --actor perf-admin --project perf --scope admin)"
+admin_token="$("$bin" admin create-token --actor perf-admin --scope admin)"
 dr_api="$(openssl rand -hex 32)"
 dr_read="$(openssl rand -hex 32)"
 

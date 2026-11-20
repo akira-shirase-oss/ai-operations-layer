@@ -54,7 +54,7 @@ bin=target/release/aiops-server
 key="$("$bin" admin create-ingest-key --project pilot --name reference-host)"
 probe_key="$("$bin" admin create-ingest-key --project pilot --name e2e-probe)"
 token="$("$bin" admin create-token --actor e2e --project pilot 2>/dev/null)"
-admin_token="$("$bin" admin create-token --actor e2e-admin --project pilot --scope admin 2>/dev/null)"
+admin_token="$("$bin" admin create-token --actor e2e-admin --scope admin 2>/dev/null)"
 other_token="$("$bin" admin create-token --actor outsider --project other 2>/dev/null)"
 
 dr_key="$("$bin" admin create-ingest-key --project pilot --name durable-runner-adapter)"

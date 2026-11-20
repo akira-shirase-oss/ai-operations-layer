@@ -31,7 +31,9 @@ pub enum Admin {
     CreateToken {
         #[arg(long)]
         actor: String,
-        #[arg(long = "project", required = true)]
+        /// Required unless `--scope admin` — admin is collector-wide and a
+        /// project list can never narrow it (white-hat S2-6).
+        #[arg(long = "project")]
         projects: Vec<String>,
         #[arg(long = "scope", default_value = "read")]
         scopes: Vec<String>,
@@ -78,6 +80,15 @@ pub async fn run(store: &Store, command: Admin, now: Timestamp) -> anyhow::Resul
                     "unknown scope {s} (read, operate, admin)"
                 );
             }
+            let admin_scope = scopes.iter().any(|s| s == "admin");
+            anyhow::ensure!(
+                !admin_scope || projects.is_empty(),
+                "--scope admin is collector-wide: --project cannot narrow it"
+            );
+            anyhow::ensure!(
+                admin_scope || !projects.is_empty(),
+                "a read/operate token needs at least one --project"
+            );
             let token = generate(TOKEN_PREFIX)?;
             let expires = now.plus_micros(i64::from(ttl_days) * 24 * 3_600 * 1_000_000);
             let id = store
