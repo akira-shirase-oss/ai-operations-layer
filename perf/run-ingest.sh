@@ -260,6 +260,8 @@ ${machine_rows}
 |---|---|
 | Timeline p50 / p95 / p99 (ms) | $(metric "$qry" 'http_req_duration{name:timeline}' med) / $(metric "$qry" 'http_req_duration{name:timeline}' 'p(95)') / $(metric "$qry" 'http_req_duration{name:timeline}' 'p(99)') |
 | List-by-request p50 / p95 / p99 (ms) | $(metric "$qry" 'http_req_duration{name:list}' med) / $(metric "$qry" 'http_req_duration{name:list}' 'p(95)') / $(metric "$qry" 'http_req_duration{name:list}' 'p(99)') |
+| Filtered list (status+release) p50 / p95 / p99 (ms) | $(metric "$qry" 'http_req_duration{name:list_filtered}' med) / $(metric "$qry" 'http_req_duration{name:list_filtered}' 'p(95)') / $(metric "$qry" 'http_req_duration{name:list_filtered}' 'p(99)') |
+| Release comparison p50 / p95 / p99 (ms) | $(metric "$qry" 'http_req_duration{name:compare}' med) / $(metric "$qry" 'http_req_duration{name:compare}' 'p(95)') / $(metric "$qry" 'http_req_duration{name:compare}' 'p(99)') |
 | Checks passed (rate) | $(metric "$qry" checks value) |
 | HTTP failures (rate) | $(metric "$qry" http_req_failed value) |
 
