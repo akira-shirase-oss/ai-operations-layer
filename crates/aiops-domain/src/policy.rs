@@ -160,15 +160,28 @@ fn key_parts(key: &[u8]) -> Vec<Vec<u8>> {
     parts
 }
 
+/// A key part ending in a credential word names a secret: `PGPASSWORD`,
+/// `accessToken`, `ASP.NET_SessionId`, `connect.sid`, `laravel_session` (review S1-2).
+/// Suffix, not substring: `tokens`, `secretary` and `sessionless` stay readable.
+const SECRET_SUFFIXES: &[&[u8]] = &[
+    b"passwd",
+    b"password",
+    b"pwd",
+    b"secret",
+    b"session",
+    b"sessionid",
+    b"sessid",
+    b"sid",
+    b"token",
+];
+
 /// Whether a key name (as written in text) names a secret.
 fn is_secret_key(key: &[u8]) -> bool {
     let mut prev: Vec<u8> = Vec::new();
     for part in key_parts(key) {
         let part = part.as_slice();
-        // `jsessionid`, `sessionid`, `PHPSESSID`: a session identifier is a bearer credential.
         if SECRET_PARTS.iter().any(|s| s.as_bytes() == part)
-            || part.ends_with(b"sessionid")
-            || part.ends_with(b"sessid")
+            || SECRET_SUFFIXES.iter().any(|s| part.ends_with(s))
         {
             return true;
         }
@@ -235,6 +248,9 @@ pub fn redact(text: &str) -> Option<String> {
 }
 
 /// URL userinfo: `scheme://user:password@host` keeps the user and hides the password.
+/// The password may itself contain `/ ? #` (review S1-2), so the userinfo runs to
+/// whitespace, not the first path delimiter; the LAST `@` still separates it from the
+/// host.
 fn url_password(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     let rest = &bytes[i..];
     if !rest.starts_with(b"://") {
@@ -242,7 +258,7 @@ fn url_password(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     }
     let seg = rest[3..]
         .iter()
-        .take_while(|b| !b.is_ascii_whitespace() && !b"/?#".contains(b))
+        .take_while(|b| !b.is_ascii_whitespace())
         .count();
     let userinfo = &rest[3..3 + seg];
     let at = userinfo.iter().rposition(|b| *b == b'@')?;
@@ -255,10 +271,43 @@ fn is_quoting(b: u8) -> bool {
     matches!(b, b' ' | b'"' | b'\'' | b'\\')
 }
 
+/// A secret's value that starts a JSON object: to the matching `}` (braces inside
+/// quoted strings don't count); unclosed runs to the line's end — hiding too much is
+/// safer than leaving the tail (review S1-2).
+fn json_object_len(value: &[u8]) -> usize {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut k = 0;
+    while k < value.len() {
+        let b = value[k];
+        if in_string {
+            if b == b'\\' {
+                k += 1;
+            } else if b == b'"' {
+                in_string = false;
+            }
+        } else if b == b'"' {
+            in_string = true;
+        } else if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return k + 1;
+            }
+        } else if b == b'\r' || b == b'\n' {
+            break;
+        }
+        k += 1;
+    }
+    k
+}
+
 /// After a secret key, the separator and value: `(bytes to keep, end of the value)`, both
 /// relative to `after`. Separators: `=`, `:`, `=>` (Ruby), `%3D` (URL-encoded), each with
 /// optional spaces, quotes and escapes around it. A quoted value runs to its closing quote;
-/// an `Authorization` header's value is the rest of its line (review N5).
+/// an `Authorization` or `Cookie` header's value is the rest of its line — `;`-joined
+/// pairs are all credential (reviews N5, S1-2) — and a `{` starts a JSON object.
 fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
     let mut j = after.iter().take_while(|b| is_quoting(**b)).count();
     let sep = if after[j..].starts_with(b"=>") {
@@ -280,8 +329,10 @@ fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
     j += opening;
     let value = &after[j..];
     let last_part = key_parts(key).pop().unwrap_or_default();
-    let len = if last_part == b"authorization" {
+    let len = if last_part == b"authorization" || last_part == b"cookie" {
         value.iter().take_while(|b| !b"\r\n".contains(b)).count()
+    } else if value.first() == Some(&b'{') {
+        json_object_len(value)
     } else if let Some(q) = quote {
         // To the closing quote (or an escaped one), spaces included.
         value
@@ -357,9 +408,11 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
         }
     }
     // A long mixed-case alphanumeric run is a credential shape (API keys, signing keys);
-    // lowercase hex (commit and content hashes) and UUIDs are not.
+    // lowercase hex (commit and content hashes) and UUIDs are not. Base64's `/ + =`
+    // join the run — otherwise they split it into pieces under the limit (review
+    // S1-2), which is also how a multi-segment webhook path stays one run.
     if rest.first().is_some_and(u8::is_ascii_alphanumeric) {
-        let run = token_run(rest, b"");
+        let run = token_run(rest, b"+/=_-");
         let token = &rest[..run];
         if run >= 32
             && token.iter().any(u8::is_ascii_uppercase)
@@ -432,6 +485,56 @@ mod tests {
         ] {
             assert_eq!(redact(&input).as_deref(), Some(want), "input: {input}");
         }
+    }
+
+    #[test]
+    fn redacts_the_shapes_the_first_pass_missed() {
+        // A URL password may itself contain / ? #: the userinfo runs to the last
+        // @ before whitespace (white-hat review S1-2).
+        assert_eq!(
+            redact("dial redis://:Zk3/Ab+c=@cache:6379/0").as_deref(),
+            Some("dial redis://:[redacted]@cache:6379/0")
+        );
+        for (input, want) in [
+            ("PGPASSWORD=hunter2 ok", "PGPASSWORD=[redacted] ok"),
+            ("accesstoken=hunter2", "accesstoken=[redacted]"),
+            ("APITOKEN: hunter2", "APITOKEN: [redacted]"),
+            (
+                "ASP.NET_SessionId=abc123 x",
+                "ASP.NET_SessionId=[redacted] x",
+            ),
+            ("connect.sid=abc123 x", "connect.sid=[redacted] x"),
+            ("laravel_session=abc123 x", "laravel_session=[redacted] x"),
+            ("_app_session=abc123 x", "_app_session=[redacted] x"),
+            // A cookie line is all credential, to its line's end.
+            (
+                "Cookie: theme=dark; connect.sid=abc123",
+                "Cookie: [redacted]",
+            ),
+            // A secret key's JSON object value is the whole object.
+            (
+                "got {\"secret\": {\"value\":\"hunter2\"}}",
+                "got {\"secret\": [redacted]}",
+            ),
+        ] {
+            assert_eq!(redact(input).as_deref(), Some(want), "input: {input}");
+        }
+        // Base64 carries / + and = padding; a path joined on / is one run
+        // (webhook URLs; assembled so no scanner-shaped literal sits in source).
+        assert_eq!(
+            redact(&format!(
+                "sig {} end",
+                concat!(
+                    "aB3xY9", "+Qw/ER", "TyuiopAS", "DFGHJKLz", "xcvbnm12", "34567890", "=="
+                )
+            ))
+            .as_deref(),
+            Some("sig [redacted] end")
+        );
+        assert_eq!(
+            redact("GET https://hooks.example.com/services/T0ABCDEF12/B0CDEF1234/xyZab").as_deref(),
+            Some("GET https://hooks.example.[redacted]")
+        );
     }
 
     #[test]
