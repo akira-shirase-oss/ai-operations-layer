@@ -107,15 +107,31 @@ done
 # runs; on machines where curl is out of reach (a sandbox), python3's urllib —
 # the same stand-in pattern as perf-psql for SQL.
 if curl --version >/dev/null 2>&1; then
-  http_get() { curl -fsS -m 5 ${2:+-H "$2"} "$1"; }
-  probe_code() { local c; c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || true)"; echo "${c:-000}"; }
-else
+  # $2 carries an Authorization header — it rides a stdin -K config so `ps`
+  # never sees the token (white-hat S3).
   http_get() {
-    python3 - "$1" "$2" <<'PY'
-import sys, urllib.request
+    if [ $# -ge 2 ]; then curl -fsS -m 5 -K - "$1" <<<"header = \"$2\"";
+    else curl -fsS -m 5 "$1"; fi
+  }
+  probe_code() {
+    local c
+    if [ $# -ge 2 ]; then
+      c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' -K - "$1" 2>/dev/null <<<"header = \"$2\"" || true)"
+    else
+      c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true)"
+    fi
+    echo "${c:-000}"
+  }
+else
+  # The header rides AIOPS_HDR in the environment, never argv.
+  http_get() {
+    AIOPS_HDR="${2-}" python3 - "$1" <<'PY'
+import os, sys, urllib.request
 req = urllib.request.Request(sys.argv[1])
-if sys.argv[2]:
-    req.add_header("authorization", sys.argv[2])
+hdr = os.environ.get("AIOPS_HDR", "")
+if hdr:
+    name, _, value = hdr.partition(":")
+    req.add_header(name.strip(), value.strip())
 try:
     sys.stdout.write(urllib.request.urlopen(req, timeout=5).read().decode())
 except Exception as e:
@@ -124,11 +140,13 @@ except Exception as e:
 PY
   }
   probe_code() {
-    python3 - "$1" "$2" <<'PY'
-import sys, urllib.request, urllib.error
+    AIOPS_HDR="${2-}" python3 - "$1" <<'PY'
+import os, sys, urllib.request, urllib.error
 req = urllib.request.Request(sys.argv[1])
-if sys.argv[2]:
-    req.add_header("authorization", sys.argv[2])
+hdr = os.environ.get("AIOPS_HDR", "")
+if hdr:
+    name, _, value = hdr.partition(":")
+    req.add_header(name.strip(), value.strip())
 try:
     print(urllib.request.urlopen(req, timeout=5).status)
 except urllib.error.HTTPError as e:
@@ -210,12 +228,14 @@ load_before="$(uptime | sed 's/.*load averages*: //' || echo 'unavailable')"
 k6v="$(k6 version | head -1 | awk '{print $2}')"
 
 set +e
+# Tokens ride in the environment, never in -e argv (white-hat S3).
+BASE_URL="http://127.0.0.1:$port" \
+ADMINS="$admin_list" READERS="$reader_list" REVOKE_IDS="$revoke_ids" \
+INGEST_KEY="$key" RUN_ID="$run_id" PROJECT=perf \
+RATE="$rate" INGEST_RATE="$ingest_rate" DURATION="$duration" \
+OPERATIONS=100000 OPS_PER_BATCH=1 \
 k6 run --quiet --summary-export "$work/control.json" \
-  -e BASE_URL="http://127.0.0.1:$port" \
-  -e ADMINS="$admin_list" -e READERS="$reader_list" -e REVOKE_IDS="$revoke_ids" \
-  -e INGEST_KEY="$key" -e RUN_ID="$run_id" -e PROJECT=perf \
-  -e RATE="$rate" -e INGEST_RATE="$ingest_rate" -e DURATION="$duration" \
-  -e OPERATIONS=100000 -e OPS_PER_BATCH=1 \
+  --include-system-env-vars \
   perf/k6/control.js >"$work/control.txt" 2>&1
 control_status=$?
 set -e

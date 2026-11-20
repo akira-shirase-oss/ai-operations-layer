@@ -34,8 +34,11 @@ for _ in $(seq 1 100); do curl -fsS "http://127.0.0.1:$port/readyz" >/dev/null 2
 commit="$(git rev-parse --short HEAD)$(git diff --quiet || echo '-dirty')"
 machine="$(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.ncpu) cores, $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
 load_before="$(uptime | sed 's/.*load averages*: //')"
-k6 run --quiet --summary-export "$work/k6.json" -e BASE_URL="http://127.0.0.1:$port" -e INGEST_KEY="$key" \
-  -e RUN_ID="$run_id" -e RATE=100 -e DURATION=30s perf/k6/ingest.js >"$work/k6.txt" 2>&1 &
+# The ingest key rides in the environment, never in -e argv (white-hat S3).
+BASE_URL="http://127.0.0.1:$port" INGEST_KEY="$key" \
+RUN_ID="$run_id" RATE=100 DURATION=30s \
+k6 run --quiet --summary-export "$work/k6.json" \
+  --include-system-env-vars perf/k6/ingest.js >"$work/k6.txt" 2>&1 &
 k6_pid=$!
 sleep 8
 restart_at="$(date -u +%H:%M:%S)"

@@ -79,14 +79,27 @@ trap cleanup EXIT
 # pre-flight needs the verdict's code, not the body. python3 stand-in where
 # curl is out of reach — the same pattern as perf-psql.
 if curl --version >/dev/null 2>&1; then
-  probe_code() { local c; c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || true)"; echo "${c:-000}"; }
-else
+  # $2 carries an Authorization header — it rides a stdin -K config so `ps`
+  # never sees the token (white-hat S3).
   probe_code() {
-    python3 - "$1" "$2" <<'PY'
-import sys, urllib.request, urllib.error
+    local c
+    if [ $# -ge 2 ]; then
+      c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' -K - "$1" 2>/dev/null <<<"header = \"$2\"" || true)"
+    else
+      c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true)"
+    fi
+    echo "${c:-000}"
+  }
+else
+  # The header rides AIOPS_HDR in the environment, never argv.
+  probe_code() {
+    AIOPS_HDR="${2-}" python3 - "$1" <<'PY'
+import os, sys, urllib.request, urllib.error
 req = urllib.request.Request(sys.argv[1])
-if sys.argv[2]:
-    req.add_header("authorization", sys.argv[2])
+hdr = os.environ.get("AIOPS_HDR", "")
+if hdr:
+    name, _, value = hdr.partition(":")
+    req.add_header(name.strip(), value.strip())
 try:
     print(urllib.request.urlopen(req, timeout=5).status)
 except urllib.error.HTTPError as e:
@@ -176,9 +189,11 @@ load_before="$(uptime | sed 's/.*load averages*: //')"
 k6v="$(k6 version | head -1 | awk '{print $2}')"
 
 set +e
+# The ingest key rides in the environment, never in -e argv (white-hat S3).
+BASE_URL="http://127.0.0.1:$port" INGEST_KEY="$key" RUN_ID="$run_id" \
+RATE="$rate" DURATION="$duration" OPS_PER_BATCH="$ops_per_batch" \
 k6 run --quiet --summary-export "$work/ingest.json" \
-  -e BASE_URL="http://127.0.0.1:$port" -e INGEST_KEY="$key" -e RUN_ID="$run_id" \
-  -e RATE="$rate" -e DURATION="$duration" -e OPS_PER_BATCH="$ops_per_batch" \
+  --include-system-env-vars \
   perf/k6/ingest.js >"$work/ingest.txt" 2>&1
 ingest_status=$?
 set -e
@@ -192,9 +207,10 @@ ops_bytes="$(psql_db -c "SELECT pg_total_relation_size('operations')")"
 db_bytes="$(psql_db -c "SELECT pg_database_size('$db')")"
 
 set +e
+BASE_URL="http://127.0.0.1:$port" TOKEN="$token" RUN_ID="$run_id" PROJECT=perf \
+OPERATIONS="$stored_ops" RATE=50 DURATION=30s \
 k6 run --quiet --summary-export "$work/query.json" \
-  -e BASE_URL="http://127.0.0.1:$port" -e TOKEN="$token" -e RUN_ID="$run_id" -e PROJECT=perf \
-  -e OPERATIONS="$stored_ops" -e RATE=50 -e DURATION=30s \
+  --include-system-env-vars \
   perf/k6/query.js >"$work/query.txt" 2>&1
 query_status=$?
 set -e
@@ -202,7 +218,7 @@ load_after="$(uptime | sed 's/.*load averages*: //')"
 # Post-run probes degrade, never abort: a denied `ps` or `curl` (a sandbox) must
 # not kill the script through `set -o pipefail` the way it did on the first smoke.
 rss_kb="$(ps -o rss= -p "$server_pid" 2>/dev/null | tr -d ' ' || true)"
-collector_stats="$(curl -fsS -H "authorization: Bearer $admin_token" "http://127.0.0.1:$port/v1/collector/stats" 2>/dev/null || echo unavailable)"
+collector_stats="$(curl -fsS -K - "http://127.0.0.1:$port/v1/collector/stats" 2>/dev/null <<<"header = \"authorization: Bearer $admin_token\"" || echo unavailable)"
 
 mkdir -p perf/results
 cp "$work/ingest.json" "$out.ingest.json"

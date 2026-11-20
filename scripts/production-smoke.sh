@@ -54,7 +54,7 @@ grep -qi '^content-security-policy:' "$work/h" || fail "the console is served wi
 
 out="$(AIOPS_ENDPOINT="http://127.0.0.1:$port" AIOPS_INGEST_KEY="$key" target/release/examples/first_operation)"
 echo "$out" | grep -q "emitted 8 events: 8 accepted, 0 dropped" || fail "the example host: $out"
-list="$(curl -fsS "http://127.0.0.1:$port/v1/projects/prod/operations?request_id=example-1" -H "authorization: Bearer $token")"
+list="$(curl -fsS "http://127.0.0.1:$port/v1/projects/prod/operations?request_id=example-1" -K - <<<"header = \"authorization: Bearer $token\"")"
 echo "$list" | grep -q '"state":"uncertain"' || fail "read back: $list"
 
 kill -TERM "$pid"

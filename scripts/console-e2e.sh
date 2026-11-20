@@ -59,6 +59,11 @@ other_token="$("$bin" admin create-token --actor outsider --project other 2>/dev
 
 dr_key="$("$bin" admin create-ingest-key --project pilot --name durable-runner-adapter)"
 
+# Authorization headers ride -K config files under $work, never -H argv (S3).
+mk_hdr() { printf 'header = "authorization: Bearer %s"\n' "$2" >"$work/$1"; chmod 600 "$work/$1"; }
+mk_hdr hdr-probe "$probe_key"; mk_hdr hdr-token "$token"
+mk_hdr hdr-dra "$DURABLE_API_KEY"; mk_hdr hdr-drr "$DURABLE_READ_KEY"
+
 AIOPS_LISTEN="127.0.0.1:$port" AIOPS_CONSOLE_DIR="apps/console/build" AIOPS_LOG=warn \
   AIOPS_RETENTION_SWEEP_SECS=86400 \
   AIOPS_AUTHORITY_DURABLE_RUNNER="pilot=dr-e2e=http://127.0.0.1:$dr_port" \
@@ -82,7 +87,7 @@ xss_op="e2e0000000000000000000000000a551"
 e3_op="e2e00000000000000000000000000e30"
 e2_op="e2e00000000000000000000000000e20"
 gap_op="e2e0000000000000000000000000d0e5"
-curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" -H 'content-type: application/json' -d @- <<JSON
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -K "$work/hdr-probe" -H 'content-type: application/json' -d @- <<JSON
 {"schema_version": 1,
  "source": {"instance_id": "e2e000000000000000000000000000aa", "service": "e2e-probe", "sdk": "curl"},
  "events": [
@@ -109,7 +114,7 @@ JSON
 # Review N4: a step with a 128-byte name whose outcome is the longest one ("outcome unknown:
 # connection_lost_after_send"); its badge must stay whole in the events list.
 long_op="e2e00000000000000000000000001049"
-curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" -H 'content-type: application/json' -d @- <<JSON
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -K "$work/hdr-probe" -H 'content-type: application/json' -d @- <<JSON
 {"schema_version": 1,
  "source": {"instance_id": "e2e000000000000000000000000000dd", "service": "e2e-long", "sdk": "curl"},
  "events": [
@@ -125,7 +130,7 @@ curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorizat
  ]}
 JSON
 # A second service (its own instance) declares the same operation succeeded.
-curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" -H 'content-type: application/json' -d @- <<JSON
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -K "$work/hdr-probe" -H 'content-type: application/json' -d @- <<JSON
 {"schema_version": 1,
  "source": {"instance_id": "e2e000000000000000000000000000bb", "service": "e2e-downstream", "sdk": "curl"},
  "events": [
@@ -156,7 +161,7 @@ for n, (release, outcome) in enumerate([("cmp-a", "succeeded"), ("cmp-a", "succe
 print(json.dumps({"schema_version": 1, "source": {"instance_id": "e2e000000000000000000000000000ee",
                   "service": "e2e-releases", "sdk": "python"}, "events": events}))
 PY
-curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" \
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -K "$work/hdr-probe" \
   -H 'content-type: application/json' --data-binary @"$work/releases.json"
 # A 5,000-event operation (the timeline's cap) in ten batches of 500: a bulk import of 2,499
 # effect-free tool calls, each started and finished, between the operation's start and finish.
@@ -181,14 +186,14 @@ for i in range(b * 500 + 1, b * 500 + 501):
     events.append(e)
 print(json.dumps({"schema_version": 1, "source": {"instance_id": "e2e000000000000000000000000000cc", "service": "e2e-bulk", "sdk": "python"}, "events": events}))
 PY
-  curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -H "authorization: Bearer $probe_key" \
+  curl -fsS -o /dev/null -X POST "http://127.0.0.1:$port/v1/ingest" -K "$work/hdr-probe" \
     -H 'content-type: application/json' --data-binary @"$work/big-$b.json"
 done
 # Wait until the reference host's operations (sent by its SDK) are listed, rather than for a
 # fixed time: on a loaded machine the SDK's flush and the store can take longer than a second.
 for req in e2e-ok e2e-lost; do
   for _ in $(seq 1 150); do
-    curl -fsS "http://127.0.0.1:$port/v1/projects/pilot/operations?request_id=$req" -H "authorization: Bearer $token" \
+    curl -fsS "http://127.0.0.1:$port/v1/projects/pilot/operations?request_id=$req" -K "$work/hdr-token" \
       | grep -q '"finish_outcome"\|"state":"\(succeeded\|uncertain\|failed\)"' && break
     sleep 0.2
   done
@@ -227,7 +232,7 @@ dr_pid=$!
 for _ in $(seq 1 100); do curl -fsS "http://127.0.0.1:$dr_port/health" >/dev/null 2>&1 && break; sleep 0.1; done
 submit() { # op_key fault → run id
   local input; input="$(printf '{"topic":"e2e","fault":%s}' "$2" | base64 | tr -d '\n')"
-  curl -fsS -X POST "http://127.0.0.1:$dr_port/jobs" -H "authorization: Bearer $DURABLE_API_KEY" \
+  curl -fsS -X POST "http://127.0.0.1:$dr_port/jobs" -K "$work/hdr-dra" \
     -H 'content-type: application/json' \
     -d "{\"op_key\":\"$1\",\"spec\":{\"version\":1,\"steps\":[{\"name\":\"generate\",\"handler\":\"generate\"},{\"name\":\"validate\",\"handler\":\"validate\"},{\"name\":\"factcheck\",\"handler\":\"factcheck\"},{\"name\":\"publish\",\"handler\":\"publish\"}],\"input_b64\":\"$input\"}}" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])'
@@ -240,14 +245,14 @@ print(hashlib.sha256(b"aiops/job-runner/v1\0"+p(b"operation")+p(b"dr-e2e")+p(int
 settle() { # run id… : wait until the runner says each is terminal and its finish is stored
   for run in "$@"; do
     for _ in $(seq 1 300); do
-      state="$(curl -fsS "http://127.0.0.1:$dr_port/jobs/$run" -H "authorization: Bearer $DURABLE_READ_KEY" \
+      state="$(curl -fsS "http://127.0.0.1:$dr_port/jobs/$run" -K "$work/hdr-drr" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
       case "$state" in done|failed:*|cancelled) break ;; esac
       sleep 0.1
     done
     op="$(op_of "$run")"
     for _ in $(seq 1 100); do # the adapter's finish, declared from the runner's answer
-      curl -fsS "http://127.0.0.1:$port/v1/projects/pilot/operations/$op" -H "authorization: Bearer $token" \
+      curl -fsS "http://127.0.0.1:$port/v1/projects/pilot/operations/$op" -K "$work/hdr-token" \
         | grep -q '"type":"operation.finished"' && break
       sleep 0.1
     done
@@ -265,7 +270,7 @@ settle "$run_ok" "$run_lost" "$run_invalid"
 run_restart="$(submit article/e2e-dr-restart '"slow_generate"')"
 op_restart="$(op_of "$run_restart")"
 for _ in $(seq 1 30); do
-  curl -fsS -o /dev/null "http://127.0.0.1:$port/v1/projects/pilot/operations/$op_restart" -H "authorization: Bearer $token" && break
+  curl -fsS -o /dev/null "http://127.0.0.1:$port/v1/projects/pilot/operations/$op_restart" -K "$work/hdr-token" && break
   sleep 0.05
 done
 kill -9 "$adapter_pid"; wait "$adapter_pid" 2>/dev/null || true
@@ -277,11 +282,11 @@ settle "$run_restart"
 run_cancel="$(submit article/e2e-dr-cancel '"slow_generate"')"
 op_cancel="$(op_of "$run_cancel")"
 for _ in $(seq 1 60); do
-  curl -fsS -o /dev/null "http://127.0.0.1:$port/v1/projects/pilot/operations/$op_cancel" -H "authorization: Bearer $token" \
+  curl -fsS -o /dev/null "http://127.0.0.1:$port/v1/projects/pilot/operations/$op_cancel" -K "$work/hdr-token" \
     2>/dev/null && break
   sleep 0.05
 done
-curl -fsS -o /dev/null -X POST "http://127.0.0.1:$dr_port/jobs/$run_cancel/cancel" -H "authorization: Bearer $DURABLE_API_KEY"
+curl -fsS -o /dev/null -X POST "http://127.0.0.1:$dr_port/jobs/$run_cancel/cancel" -K "$work/hdr-dra"
 settle "$run_cancel"
 
 AIOPS_E2E_DR_OK=article/e2e-dr-ok AIOPS_E2E_DR_LOST=article/e2e-dr-lost AIOPS_E2E_DR_INVALID=article/e2e-dr-invalid \

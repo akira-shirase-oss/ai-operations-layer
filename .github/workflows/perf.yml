@@ -172,7 +172,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: akira-shirase-oss/durable-runner
-          ref: v1.0.0
+          # v1.0.0 — pinned to the commit, not the movable tag (white-hat S3).
+          ref: 15debd2a32fbe85b20f8aafcccc8e0cea07deb42
           path: durable-runner-src
           persist-credentials: false
       - name: Install the pinned toolchain (both workspaces pin 1.99.1)

@@ -98,16 +98,35 @@ dr_read="$(openssl rand -hex 32)"
 
 # One HTTP helper pair; curl where it runs, python3's urllib where it can't.
 if curl --version >/dev/null 2>&1; then
-  http_get() { curl -fsS -m 5 ${2:+-H "$2"} "$1"; }
-  http_post() { curl -fsS -m 10 -X POST -H 'content-type: application/json' ${3:+-H "$3"} -d "$2" "$1"; }
-  probe_code() { local c; c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' ${2:+-H "$2"} "$1" 2>/dev/null || true)"; echo "${c:-000}"; }
-else
+  # $2/$3 carry an Authorization header — it rides a stdin -K config so `ps`
+  # never sees the token (white-hat S3).
   http_get() {
-    python3 - "$1" "$2" <<'PY'
-import sys, urllib.request
+    if [ $# -ge 2 ]; then curl -fsS -m 5 -K - "$1" <<<"header = \"$2\"";
+    else curl -fsS -m 5 "$1"; fi
+  }
+  http_post() {
+    if [ $# -ge 3 ]; then curl -fsS -m 10 -X POST -H 'content-type: application/json' -K - -d "$2" "$1" <<<"header = \"$3\"";
+    else curl -fsS -m 10 -X POST -H 'content-type: application/json' -d "$2" "$1"; fi
+  }
+  probe_code() {
+    local c
+    if [ $# -ge 2 ]; then
+      c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' -K - "$1" 2>/dev/null <<<"header = \"$2\"" || true)"
+    else
+      c="$(curl -sS -m 5 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true)"
+    fi
+    echo "${c:-000}"
+  }
+else
+  # The header rides AIOPS_HDR in the environment, never argv.
+  http_get() {
+    AIOPS_HDR="${2-}" python3 - "$1" <<'PY'
+import os, sys, urllib.request
 req = urllib.request.Request(sys.argv[1])
-if sys.argv[2]:
-    req.add_header("authorization", sys.argv[2])
+hdr = os.environ.get("AIOPS_HDR", "")
+if hdr:
+    name, _, value = hdr.partition(":")
+    req.add_header(name.strip(), value.strip())
 try:
     sys.stdout.write(urllib.request.urlopen(req, timeout=5).read().decode())
 except Exception as e:
@@ -116,12 +135,14 @@ except Exception as e:
 PY
   }
   http_post() {
-    python3 - "$1" "$2" "$3" <<'PY'
-import sys, urllib.request
+    AIOPS_HDR="${3-}" python3 - "$1" "$2" <<'PY'
+import os, sys, urllib.request
 req = urllib.request.Request(sys.argv[1], data=sys.argv[2].encode(), method='POST')
 req.add_header('content-type', 'application/json')
-if sys.argv[3]:
-    req.add_header("authorization", sys.argv[3])
+hdr = os.environ.get("AIOPS_HDR", "")
+if hdr:
+    name, _, value = hdr.partition(":")
+    req.add_header(name.strip(), value.strip())
 try:
     sys.stdout.write(urllib.request.urlopen(req, timeout=10).read().decode())
 except Exception as e:
@@ -130,11 +151,13 @@ except Exception as e:
 PY
   }
   probe_code() {
-    python3 - "$1" "$2" <<'PY'
-import sys, urllib.request, urllib.error
+    AIOPS_HDR="${2-}" python3 - "$1" <<'PY'
+import os, sys, urllib.request, urllib.error
 req = urllib.request.Request(sys.argv[1])
-if sys.argv[2]:
-    req.add_header("authorization", sys.argv[2])
+hdr = os.environ.get("AIOPS_HDR", "")
+if hdr:
+    name, _, value = hdr.partition(":")
+    req.add_header(name.strip(), value.strip())
 try:
     print(urllib.request.urlopen(req, timeout=5).status)
 except urllib.error.HTTPError as e:
@@ -308,10 +331,12 @@ load_before="$(uptime | sed 's/.*load averages*: //' || echo 'unavailable')"
 k6v="$(k6 version | head -1 | awk '{print $2}')"
 
 set +e
+# Tokens ride in the environment, never in -e argv (white-hat S3).
+RUNNER_URL="$runner_url" DR_API="$dr_api" DR_READ="$dr_read" \
+BASE_URL="http://127.0.0.1:$port" TOKEN="$read_token" PROJECT=perf \
+RATE="$rate" AUTH_RATE="$auth_rate" DURATION="$duration" RUN_ID="$run_id" \
 k6 run --quiet --summary-export "$work/adapter.json.out" \
-  -e RUNNER_URL="$runner_url" -e DR_API="$dr_api" -e DR_READ="$dr_read" \
-  -e BASE_URL="http://127.0.0.1:$port" -e TOKEN="$read_token" -e PROJECT=perf \
-  -e RATE="$rate" -e AUTH_RATE="$auth_rate" -e DURATION="$duration" -e RUN_ID="$run_id" \
+  --include-system-env-vars \
   perf/k6/adapter.js >"$work/k6.txt" 2>&1
 k6_status=$?
 set -e
