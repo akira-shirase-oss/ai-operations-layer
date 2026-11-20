@@ -102,8 +102,10 @@ fn verify(
     }
 }
 
-/// Reads the runner's answer up to `max` bytes; `None` past it.
-async fn read_bounded(mut res: reqwest::Response, max: usize) -> Option<Vec<u8>> {
+/// Reads an authority answer up to `max` bytes; `None` past it or on a chunk error.
+/// `pub(crate)` for the control adapters: every authority read is size-bounded and
+/// sits inside its deadline (white-hat S2-3).
+pub(crate) async fn read_bounded(mut res: reqwest::Response, max: usize) -> Option<Vec<u8>> {
     let mut body = Vec::new();
     while let Some(chunk) = res.chunk().await.ok()? {
         if body.len() + chunk.len() > max {

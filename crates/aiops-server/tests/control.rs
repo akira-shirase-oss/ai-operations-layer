@@ -82,6 +82,34 @@ async fn stub_publication(
     State(h): State<Arc<StubHost>>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
+    match key.as_str() {
+        // Headers land at once; the body arrives a KiB per 200 ms — a host that
+        // answers but never finishes (white-hat S2-3).
+        "article:slow" => {
+            let (tx, rx) =
+                tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
+            tokio::spawn(async move {
+                for _ in 0..80 {
+                    if tx
+                        .send(Ok(axum::body::Bytes::from(vec![b'x'; 1024])))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            });
+            return Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
+                .into_response();
+        }
+        // A single body past the read cap (white-hat S2-3).
+        "article:big" => {
+            return Json(json!({"business_key": key, "blob": "x".repeat(100 * 1024)}))
+                .into_response();
+        }
+        _ => {}
+    }
     let n = h.attempts(&key);
     if n > 0 {
         Json(json!({"business_key": key, "times_published": 1, "times_attempted": n}))
@@ -359,6 +387,63 @@ async fn a_business_key_cannot_escape_the_publications_path(pool: PgPool) {
     )
     .await;
     assert_eq!(r.status, 200, "{:?}", r.body);
+}
+
+/// White-hat S2-3: an authority answer's body is size-bounded inside the read
+/// deadline — a host that answers but trickles its body cannot hold a
+/// control-gate slot open, and an oversized answer is not stored.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn an_authority_read_is_bounded_in_time_and_size(pool: PgPool) {
+    let (url, _host) = stub_host().await;
+    let e = env_with_adapter(pool, &url).await;
+    let path = op_path(&e, "reconcile").await;
+
+    // 80 KiB at a KiB per 200 ms takes ~16 s to finish: the reconcile must end at
+    // the 2 s read deadline instead of awaiting the body.
+    let started = std::time::Instant::now();
+    let r = tokio::time::timeout(
+        Duration::from_secs(10),
+        send(
+            &e.app,
+            post_json(
+                &path,
+                &e.no_read,
+                &body("article:slow", &json!({"published": false})),
+            ),
+        ),
+    )
+    .await
+    .expect("a trickling body is cut at the deadline, not awaited");
+    assert_eq!(r.status, 200, "{:?}", r.body);
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "the read was cut at its deadline: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        r.body["authority_read"]["answer"],
+        Value::Null,
+        "no unfinished body is stored: {:?}",
+        r.body
+    );
+
+    // A body past the 64 KiB cap is not stored either.
+    let r = send(
+        &e.app,
+        post_json(
+            &path,
+            &e.no_read,
+            &body("article:big", &json!({"published": true})),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{:?}", r.body);
+    assert_eq!(
+        r.body["authority_read"]["answer"],
+        Value::Null,
+        "an oversized answer is not stored: {:?}",
+        r.body
+    );
 }
 
 /// `GET …/controls` pages newest-first through a `(created_at, control_id)` keyset:

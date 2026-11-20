@@ -31,6 +31,7 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::app::{AppState, Metrics, SharedState};
+use crate::authority::read_bounded;
 use crate::error::ApiError;
 use crate::query::{Actor, SCOPE_READ, authenticate_with};
 
@@ -57,6 +58,10 @@ const DRIVE_BATCH: i64 = 64;
 /// `expected_state` on the wire at most (D-032).
 const EXPECTED_STATE_MAX: usize = 4 * 1024;
 const BUSINESS_KEY_MAX: usize = 256;
+/// An authority answer's body at most — the host's status is the answer; the body is
+/// its detail. The deadline wraps send AND read together, so a host that answers but
+/// trickles its body cannot hold a control-gate slot open (white-hat S2-3).
+const AUTHORITY_BODY_MAX: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Adapters: the hosts that own execution for a project (D-007).
@@ -212,16 +217,24 @@ impl ReferenceHost {
         let url = format!("{}/publications/{key}", self.base);
         let result = async {
             let _permit = app.control_gate.acquire().await.ok()?;
-            let res = tokio::time::timeout(READ_DEADLINE, app.authority_client.get(&url).send())
-                .await
-                .ok()?
-                .ok()?;
-            let status = res.status().as_u16();
-            let body = res.json::<Value>().await.unwrap_or(Value::Null);
-            Some((status, body))
+            tokio::time::timeout(READ_DEADLINE, async {
+                let res = app.authority_client.get(&url).send().await.ok()?;
+                let status = res.status().as_u16();
+                let body = read_bounded(res, AUTHORITY_BODY_MAX).await;
+                Some((status, body))
+            })
+            .await
+            .ok()?
         }
         .await;
-        let (status, body) = result.unwrap_or((0, Value::Null));
+        let (status, body) = match result {
+            Some((s, Some(bytes))) => (
+                s,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            ),
+            Some((s, None)) => (s, Value::Null),
+            None => (0, Value::Null),
+        };
         let present = match status {
             200 => Some(true),
             404 => Some(false),
@@ -255,18 +268,26 @@ impl ReferenceHost {
                 .acquire()
                 .await
                 .map_err(|_| SubmitError::Transient("the control gate closed"))?;
-            let res = tokio::time::timeout(
-                SUBMIT_DEADLINE,
-                app.authority_client
+            let (status, body) = tokio::time::timeout(SUBMIT_DEADLINE, async {
+                let res = app
+                    .authority_client
                     .post(&url)
                     .json(&json!({"business_key": key}))
-                    .send(),
-            )
+                    .send()
+                    .await
+                    .ok()?;
+                let status = res.status();
+                let body = read_bounded(res, AUTHORITY_BODY_MAX).await;
+                Some((status, body))
+            })
             .await
             .map_err(|_| SubmitError::Transient("the submit deadline passed"))?
-            .map_err(|_| SubmitError::Transient("the submit could not reach the host"))?;
-            let status = res.status();
-            let body = res.json::<Value>().await.unwrap_or(Value::Null);
+            .ok_or(SubmitError::Transient(
+                "the submit could not reach the host",
+            ))?;
+            let body = body
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .unwrap_or(Value::Null);
             Ok::<_, SubmitError>((status, body))
         }
         .await;
@@ -316,16 +337,24 @@ impl DurableRunner {
         let url = format!("{}/publications/{key}", self.effect_base);
         let result = async {
             let _permit = app.control_gate.acquire().await.ok()?;
-            let res = tokio::time::timeout(READ_DEADLINE, app.authority_client.get(&url).send())
-                .await
-                .ok()?
-                .ok()?;
-            let status = res.status().as_u16();
-            let body = res.json::<Value>().await.unwrap_or(Value::Null);
-            Some((status, body))
+            tokio::time::timeout(READ_DEADLINE, async {
+                let res = app.authority_client.get(&url).send().await.ok()?;
+                let status = res.status().as_u16();
+                let body = read_bounded(res, AUTHORITY_BODY_MAX).await;
+                Some((status, body))
+            })
+            .await
+            .ok()?
         }
         .await;
-        let (status, body) = result.unwrap_or((0, Value::Null));
+        let (status, body) = match result {
+            Some((s, Some(bytes))) => (
+                s,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            ),
+            Some((s, None)) => (s, Value::Null),
+            None => (0, Value::Null),
+        };
         let present = match status {
             200 => Some(true),
             404 => Some(false),
@@ -373,19 +402,27 @@ impl DurableRunner {
                 .acquire()
                 .await
                 .map_err(|_| SubmitError::Transient("the control gate closed"))?;
-            let res = tokio::time::timeout(
-                SUBMIT_DEADLINE,
-                app.authority_client
+            let (status, body) = tokio::time::timeout(SUBMIT_DEADLINE, async {
+                let res = app
+                    .authority_client
                     .post(&url)
                     .bearer_auth(&self.submit_key)
                     .json(&job)
-                    .send(),
-            )
+                    .send()
+                    .await
+                    .ok()?;
+                let status = res.status();
+                let body = read_bounded(res, AUTHORITY_BODY_MAX).await;
+                Some((status, body))
+            })
             .await
             .map_err(|_| SubmitError::Transient("the submit deadline passed"))?
-            .map_err(|_| SubmitError::Transient("the submit could not reach the runner"))?;
-            let status = res.status();
-            let body = res.json::<Value>().await.unwrap_or(Value::Null);
+            .ok_or(SubmitError::Transient(
+                "the submit could not reach the runner",
+            ))?;
+            let body = body
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .unwrap_or(Value::Null);
             Ok::<_, SubmitError>((status, body))
         }
         .await;
