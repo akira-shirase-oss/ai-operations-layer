@@ -46,6 +46,9 @@ struct StubHost {
     /// `POST /jobs` submissions: the new `op_key` → the business key decoded out of
     /// the job input — the Durable Runner resubmit's record (D-031).
     jobs: Mutex<Vec<(String, String)>>,
+    /// Every request path the stub saw — a business key that escaped
+    /// `/publications/` shows up here.
+    seen_paths: Mutex<Vec<String>>,
 }
 
 impl StubHost {
@@ -140,17 +143,27 @@ async fn stub_job_submit(
         .into_response()
 }
 
+async fn stub_fallback(State(h): State<Arc<StubHost>>, req: Request<Body>) -> impl IntoResponse {
+    h.seen_paths
+        .lock()
+        .unwrap()
+        .push(req.uri().path().to_owned());
+    axum::http::StatusCode::NOT_FOUND
+}
+
 /// The stub reference host on an ephemeral port, on the test's own runtime.
 async fn stub_host() -> (String, Arc<StubHost>) {
     let host = Arc::new(StubHost {
         publications: Mutex::new(HashMap::new()),
         submits: AtomicU64::new(0),
         jobs: Mutex::new(Vec::new()),
+        seen_paths: Mutex::new(Vec::new()),
     });
     let app = Router::new()
         .route("/publications/{*key}", get(stub_publication))
         .route("/articles/retry", post(stub_retry))
         .route("/jobs", post(stub_job_submit))
+        .fallback(stub_fallback)
         .with_state(host.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -296,6 +309,56 @@ async fn malformed_control_requests_are_400(pool: PgPool) {
         .await;
         assert_eq!(r.status, 400, "{path}: {:?}", r.body);
     }
+}
+
+/// White-hat S2-2: the key is `format!`-ed into `GET {host}/publications/{key}` —
+/// a `..`, `?`, `#` or `/` in it escapes the publications path (reqwest normalizes
+/// `..` before sending), and a normalized-away tail reads a DIFFERENT literal key's
+/// answer, defeating reconcile-before-rerun. The id must be one URL segment.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_business_key_cannot_escape_the_publications_path(pool: PgPool) {
+    let (url, host) = stub_host().await;
+    let e = env_with_adapter(pool, &url).await;
+    let path = op_path(&e, "reconcile").await;
+
+    for key in [
+        "article:req-7/../../admin",
+        "article:req-7/x/..",
+        "article:..",
+        "article:.",
+        "article:req-7/../req-8",
+        "article:req-7?debug=true",
+        "article:req-7#frag",
+        "article:req-7@evil",
+        "article:req 7",
+    ] {
+        let r = send(
+            &e.app,
+            post_json(&path, &e.no_read, &body(key, &json!({"published": false}))),
+        )
+        .await;
+        assert_eq!(r.status, 400, "{key}: {:?}", r.body);
+    }
+    assert!(
+        host.seen_paths.lock().unwrap().is_empty(),
+        "no forged key may reach the authority: {:?}",
+        host.seen_paths.lock().unwrap()
+    );
+    assert!(
+        host.publications.lock().unwrap().is_empty() && host.submits.load(Ordering::SeqCst) == 0,
+        "no forged key may read or write an effect"
+    );
+    // The honest keys still reach the authority.
+    let r = send(
+        &e.app,
+        post_json(
+            &path,
+            &e.no_read,
+            &body("article:req-7.x_y-2", &json!({"published": false})),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{:?}", r.body);
 }
 
 /// `GET …/controls` pages newest-first through a `(created_at, control_id)` keyset:

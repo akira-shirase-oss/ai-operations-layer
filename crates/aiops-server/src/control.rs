@@ -177,14 +177,28 @@ impl ControlAdapter {
     }
 }
 
+/// The id half of a business key: ONE URL segment — `[A-Za-z0-9._-]` and never the
+/// `.`/`..` segment itself — because `check_request` is the only thing between the
+/// caller's text and `format!("{}/publications/{key}")`. A `/`, `?`, `#` or `..`
+/// would leave the publications path or read a different literal key's answer
+/// (white-hat S2-2).
+fn business_key_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s != "."
+        && s != ".."
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 impl ReferenceHost {
     fn check_request(key: &str, expected: &Value) -> Result<(), &'static str> {
         if key.len() > BUSINESS_KEY_MAX
-            || !key
-                .strip_prefix("article:")
-                .is_some_and(|s| !s.is_empty() && s.len() <= 64)
+            || !key.strip_prefix("article:").is_some_and(business_key_id)
         {
-            return Err("business_key must be \"article:<id>\" (256 bytes at most)");
+            return Err(
+                "business_key must be \"article:<id>\" — <id> a single [A-Za-z0-9._-] segment (256 bytes at most)",
+            );
         }
         match expected.as_object().map(|m| (m.len(), m.get("published"))) {
             Some((1, Some(Value::Bool(_)))) => Ok(()),
@@ -283,11 +297,11 @@ impl DurableRunner {
     /// effect assertion is the same publication shape as the reference host.
     fn check_request(key: &str, expected: &Value) -> Result<(), &'static str> {
         if key.len() > BUSINESS_KEY_MAX
-            || !key
-                .strip_prefix("article/")
-                .is_some_and(|s| !s.is_empty() && s.len() <= 64)
+            || !key.strip_prefix("article/").is_some_and(business_key_id)
         {
-            return Err("business_key must be \"article/<id>\" (256 bytes at most)");
+            return Err(
+                "business_key must be \"article/<id>\" — <id> a single [A-Za-z0-9._-] segment (256 bytes at most)",
+            );
         }
         match expected.as_object().map(|m| (m.len(), m.get("published"))) {
             Some((1, Some(Value::Bool(_)))) => Ok(()),
