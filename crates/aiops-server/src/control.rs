@@ -48,6 +48,12 @@ pub const DRIVE_MAX: usize = 16;
 const READ_DEADLINE: Duration = Duration::from_secs(2);
 /// A submit to a host takes at most this (D-033).
 const SUBMIT_DEADLINE: Duration = Duration::from_secs(5);
+/// A submitted body's own bound, separate from the submit's: the status line
+/// already carries the verdict, so a body still in flight must not turn a 2xx
+/// Transient and re-drive a fresh `op_key` — that is a second job at the
+/// runner (white-hat N5). The body is still drained (connection reuse, and a
+/// host may return a reference in it).
+const BODY_DRAIN: Duration = Duration::from_secs(2);
 /// Submit tries one record may make, re-drives included; then `submit_failed`.
 const MAX_SUBMIT_TRIES: i32 = 3;
 /// Post-submit observation: bounded polling, then `observed_unknown` — honest.
@@ -268,23 +274,30 @@ impl ReferenceHost {
                 .acquire()
                 .await
                 .map_err(|_| SubmitError::Transient("the control gate closed"))?;
-            let (status, body) = tokio::time::timeout(SUBMIT_DEADLINE, async {
-                let res = app
-                    .authority_client
+            let res = match tokio::time::timeout(
+                SUBMIT_DEADLINE,
+                app.authority_client
                     .post(&url)
                     .json(&json!({"business_key": key}))
-                    .send()
-                    .await
-                    .ok()?;
-                let status = res.status();
-                let body = read_bounded(res, AUTHORITY_BODY_MAX).await;
-                Some((status, body))
-            })
+                    .send(),
+            )
             .await
-            .map_err(|_| SubmitError::Transient("the submit deadline passed"))?
-            .ok_or(SubmitError::Transient(
-                "the submit could not reach the host",
-            ))?;
+            {
+                Ok(Ok(res)) => res,
+                Ok(Err(_)) => {
+                    return Err(SubmitError::Transient(
+                        "the submit could not reach the host",
+                    ));
+                }
+                Err(_) => {
+                    return Err(SubmitError::Transient("the submit deadline passed"));
+                }
+            };
+            let status = res.status();
+            let body = tokio::time::timeout(BODY_DRAIN, read_bounded(res, AUTHORITY_BODY_MAX))
+                .await
+                .ok()
+                .flatten();
             let body = body
                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
                 .unwrap_or(Value::Null);
@@ -402,24 +415,31 @@ impl DurableRunner {
                 .acquire()
                 .await
                 .map_err(|_| SubmitError::Transient("the control gate closed"))?;
-            let (status, body) = tokio::time::timeout(SUBMIT_DEADLINE, async {
-                let res = app
-                    .authority_client
+            let res = match tokio::time::timeout(
+                SUBMIT_DEADLINE,
+                app.authority_client
                     .post(&url)
                     .bearer_auth(&self.submit_key)
                     .json(&job)
-                    .send()
-                    .await
-                    .ok()?;
-                let status = res.status();
-                let body = read_bounded(res, AUTHORITY_BODY_MAX).await;
-                Some((status, body))
-            })
+                    .send(),
+            )
             .await
-            .map_err(|_| SubmitError::Transient("the submit deadline passed"))?
-            .ok_or(SubmitError::Transient(
-                "the submit could not reach the runner",
-            ))?;
+            {
+                Ok(Ok(res)) => res,
+                Ok(Err(_)) => {
+                    return Err(SubmitError::Transient(
+                        "the submit could not reach the runner",
+                    ));
+                }
+                Err(_) => {
+                    return Err(SubmitError::Transient("the submit deadline passed"));
+                }
+            };
+            let status = res.status();
+            let body = tokio::time::timeout(BODY_DRAIN, read_bounded(res, AUTHORITY_BODY_MAX))
+                .await
+                .ok()
+                .flatten();
             let body = body
                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
                 .unwrap_or(Value::Null);

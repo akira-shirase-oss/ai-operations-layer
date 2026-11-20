@@ -155,6 +155,7 @@ async fn stub_job_submit(
     let key = input["business_key"].as_str().unwrap_or("").to_owned();
     h.submits.fetch_add(1, Ordering::SeqCst);
     h.jobs.lock().unwrap().push((op_key, key.clone()));
+    let slow = key == "article/slowjob";
     if !key.is_empty() {
         h.publications
             .lock()
@@ -164,6 +165,29 @@ async fn stub_job_submit(
             .or_insert(1);
     }
     let n = h.submits.load(Ordering::SeqCst);
+    // The runner accepted and recorded the job — its 201 headers land at once
+    // but the body trickles and never finishes (white-hat N5: a slow 2xx is a
+    // submit, not a transient).
+    if slow {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
+        tokio::spawn(async move {
+            loop {
+                if tx
+                    .send(Ok(axum::body::Bytes::from(vec![b'x'; 1024])))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+        return (
+            axum::http::StatusCode::CREATED,
+            Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+        )
+            .into_response();
+    }
     (
         axum::http::StatusCode::CREATED,
         Json(json!({"run_id": format!("run-{n}")})),
@@ -970,6 +994,36 @@ async fn a_dr_retry_submits_a_new_job_with_the_key_in_its_input(pool: PgPool) {
     assert_eq!(rec.status, "confirmed");
     assert_eq!(rec.submitted_ref.as_deref(), Some(op_key.as_str()));
     assert_eq!(host.effects(), 1);
+}
+
+/// White-hat N5: a 2xx whose body never finishes is still a submitted job —
+/// the runner took it. If the submit waited the body out under one deadline,
+/// it would classify Transient and the next drive would land a SECOND job
+/// under a fresh `op_key`.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_dr_retry_with_a_slow_2xx_body_is_still_one_job(pool: PgPool) {
+    let (url, host) = stub_host().await;
+    let e = env_with_runner(pool, &url, &url).await;
+    let path = op_path(&e, "retry").await;
+    let r = send(
+        &e.app,
+        post_json(
+            &path,
+            &e.no_read,
+            &body("article/slowjob", &json!({"published": false})),
+        ),
+    )
+    .await;
+    assert_eq!(r.body["status"], "authorized", "{:?}", r.body);
+
+    drive_resumable(&e.state).await;
+    drive_resumable(&e.state).await;
+    let jobs = host.job_submits();
+    assert_eq!(
+        jobs.len(),
+        1,
+        "a slow 2xx is a submit, not a transient — no second op_key: {jobs:?}"
+    );
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
