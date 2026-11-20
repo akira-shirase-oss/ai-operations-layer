@@ -27,6 +27,9 @@ const accepted = new Counter('events_accepted');
 const lost = new Counter('events_lost');
 const limited = new Counter('batches_rate_limited');
 const shed = new Counter('batches_shed');
+// Batches re-sent once after getting no response byte at all (a connection that died
+// mid-send). Retries are evidence, not hidden repair — the count stays visible.
+const retried = new Counter('batches_retried');
 // A 5xx other than 503 tells a sender not to retry: it must never happen.
 const serverErrors = new Counter('batches_server_error');
 const acknowledged = new Counter('events_acknowledged');
@@ -70,10 +73,19 @@ export default function () {
 		},
 		events,
 	});
-	const res = http.post(`${BASE_URL}/v1/ingest`, body, {
+	const params = {
 		headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
 		tags: { name: 'ingest' },
-	});
+	};
+	let res = http.post(`${BASE_URL}/v1/ingest`, body, params);
+	if (res.status === 0) {
+		// No response byte: the batch may never have arrived (a connection that hit its
+		// age limit mid-send, a refused socket). Event IDs make a re-send a merge, never
+		// a second copy — retry it once and count the retry.
+		note('ingest', res, [200]);
+		retried.add(1);
+		res = http.post(`${BASE_URL}/v1/ingest`, body, params);
+	}
 	sent.add(events.length);
 	note('ingest', res, [200]);
 	let stored = 0;

@@ -281,6 +281,7 @@ ${machine_rows}
 |---|---|
 | Events sent | $(metric "$ctl" events_sent count) |
 | **Events lost** | $(metric "$ctl" events_lost count) |
+| Batches retried after no reply | $(metric "$ctl" batches_retried count) |
 | Ingest p50 / p95 / p99 (ms) | $(metric "$ctl" 'http_req_duration{scenario:ingest}' med) / $(metric "$ctl" 'http_req_duration{scenario:ingest}' 'p(95)') / $(metric "$ctl" 'http_req_duration{scenario:ingest}' 'p(99)') |
 
 ## What the database holds afterwards (counted, not inferred)

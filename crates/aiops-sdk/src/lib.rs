@@ -153,6 +153,10 @@ pub struct Stats {
     pub gap_reports_sent: u64,
     pub batches_sent: u64,
     pub batches_failed: u64,
+    /// Send attempts that were retries of an earlier failed try — one batch can add
+    /// several. Retries are evidence, not hidden repair: a collector that needs them
+    /// is already telling you something.
+    pub send_retries: u64,
     /// Times the circuit breaker opened (sends paused for a cool-down, then probed).
     pub breaker_opened: u64,
     pub truncated_events: u64,
@@ -185,6 +189,7 @@ struct Counters {
     gap_reports_sent: AtomicU64,
     batches_sent: AtomicU64,
     batches_failed: AtomicU64,
+    send_retries: AtomicU64,
     breaker_opened: AtomicU64,
     truncated_events: AtomicU64,
     attributes_dropped_locally: AtomicU64,
@@ -212,6 +217,7 @@ impl Counters {
             gap_reports_sent: g(&self.gap_reports_sent),
             batches_sent: g(&self.batches_sent),
             batches_failed: g(&self.batches_failed),
+            send_retries: g(&self.send_retries),
             breaker_opened: g(&self.breaker_opened),
             truncated_events: g(&self.truncated_events),
             attributes_dropped_locally: g(&self.attributes_dropped_locally),

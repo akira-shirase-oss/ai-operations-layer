@@ -233,6 +233,90 @@ async fn a_connection_serves_a_bounded_number_of_requests() {
     assert_eq!(answered, 3, "{}", String::from_utf8_lossy(&buf));
 }
 
+// A connection announces its last window on the response itself: a request sent in the
+// final `drain_grace` of the connection's life is answered with `Connection: close`,
+// then the connection ends — the client is told on the answer it just read, not left
+// to learn it from an EOF on the next send (the keep-alive race, review: 1M control run).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_in_the_connections_last_window_is_answered_with_close() {
+    let (addr, _token) = server(ServeLimits {
+        connection_lifetime: Duration::from_secs(1),
+        drain_grace: Duration::from_millis(800),
+        ..ServeLimits::default()
+    })
+    .await;
+    let mut s = TcpStream::connect(&addr).await.unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 512];
+    let n = s.read(&mut buf).await.unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+    // Inside the last window: this connection's life is 200–1000 ms old.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    s.write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let answer = String::from_utf8_lossy(&buf);
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(
+        answer.to_ascii_lowercase().contains("connection: close"),
+        "the last window's response must announce the close: {answer}"
+    );
+}
+
+// The request in flight when the lifetime ends finishes — and its response announces
+// the close too. The deadline wraps a connection around an answer, never around silence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_in_flight_at_the_deadline_finishes_with_connection_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let app = Router::new().route(
+        "/slow",
+        get(|| async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            "done"
+        }),
+    );
+    let token = CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move {
+        run(
+            listener,
+            app,
+            ServeLimits {
+                connection_lifetime: Duration::from_secs(1),
+                drain_grace: Duration::from_millis(400),
+                ..ServeLimits::default()
+            },
+            t,
+        )
+        .await
+    });
+    let mut s = TcpStream::connect(&addr).await.unwrap();
+    // Sent inside the last window (600–1000 ms), in flight across the 1 s deadline.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    s.write_all(b"GET /slow HTTP/1.1\r\nhost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let answer = String::from_utf8_lossy(&buf);
+    assert!(answer.contains("done"), "{answer}");
+    assert!(
+        answer.to_ascii_lowercase().contains("connection: close"),
+        "the in-flight request's response must announce the close: {answer}"
+    );
+}
+
 // Review N3: a busy connection is closed after its lifetime (after the request in flight),
 // so no client keeps one slot forever by never going idle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

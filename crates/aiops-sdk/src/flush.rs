@@ -472,6 +472,9 @@ impl Flusher {
             if attempt >= self.max_attempts {
                 return Sent::Failed;
             }
+            // A retry is counted, never silent: repeated resends are evidence of a
+            // connection or collector that is already struggling.
+            add(&self.inner.counters.send_retries, 1);
             let backoff_cap = BACKOFF_BASE_MS
                 .saturating_mul(1 << (attempt - 1).min(10))
                 .min(BACKOFF_CAP_MS);

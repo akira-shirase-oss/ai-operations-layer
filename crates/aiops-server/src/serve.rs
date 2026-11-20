@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::http::{HeaderValue, header};
@@ -36,7 +36,10 @@ pub struct ServeLimits {
     /// Requests served on one connection at most; the last is answered with
     /// `Connection: close`, so pipelining cannot stream through one slot forever.
     pub max_requests_per_connection: u32,
-    /// A connection is closed after this long even while busy (after the request in flight).
+    /// A connection is closed after this long even while busy. Its last `drain_grace`
+    /// announces the end on the wire: every response in that window carries
+    /// `Connection: close`, so the client learns from the answer it just read instead
+    /// of losing a request it sent into an abrupt close (the keep-alive race).
     pub connection_lifetime: Duration,
 }
 
@@ -129,8 +132,19 @@ async fn serve_one(
 ) {
     let served = Arc::new(AtomicU32::new(0));
     let max_requests = limits.max_requests_per_connection.max(1);
+    // The last window is announced, not abrupt: a request arriving in the connection's
+    // final `drain_grace` is answered with `Connection: close`, so the client is told on
+    // the response it just read and stops sending — instead of having a request's bytes
+    // vanish unparsed when the lifetime timer fires mid-send (the 5-minute EOF the 1M
+    // control run hit at every 300 s tick). hyper only marks the close itself once the
+    // shutdown is already draining; that is too late for a request about to be sent.
+    let close_after = Instant::now()
+        + limits
+            .connection_lifetime
+            .saturating_sub(limits.drain_grace);
     let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
         let n = served.fetch_add(1, Ordering::Relaxed) + 1;
+        let last = n >= max_requests || Instant::now() >= close_after;
         // Router is always ready, so `call` without `poll_ready` is correct.
         let response = app.clone().call(req.map(axum::body::Body::new));
         async move {
@@ -138,7 +152,7 @@ async fn serve_one(
                 Ok(r) => r,
                 Err(never) => match never {},
             };
-            if n >= max_requests {
+            if last {
                 // The last request this connection serves: hyper closes after answering, and
                 // drops anything pipelined behind it.
                 response
