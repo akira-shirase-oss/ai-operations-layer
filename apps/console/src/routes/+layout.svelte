@@ -31,7 +31,9 @@
 		setToken(t);
 		const r = await api<ProjectsView>('/v1/projects');
 		checking = false;
-		if (r.state === 'ok') {
+		if (r.state === 'ok' || r.state === 'forbidden') {
+			// 403 is a verdict too: the token is real, just narrower than this ask —
+			// the destination pages render their own denial (audit log, a project).
 			draft = '';
 			signedIn = true;
 			location.reload();

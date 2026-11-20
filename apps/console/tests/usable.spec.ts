@@ -258,3 +258,19 @@ test('sign-in names a bad token, a dead collector, and the projects screen retri
 	await page.getByRole('button', { name: 'Try again' }).click();
 	await expect(page.getByRole('link', { name: 'pilot' })).toBeVisible();
 });
+
+test('a valid token narrower than the page ask still signs in — the page shows the denial', async ({ page }) => {
+	// 403 is a verdict (the token is real, its scope is narrow) — only 401 and an
+	// unreachable collector refuse sign-in. The destination renders the denial.
+	await page.route('**/v1/projects', (r) =>
+		r.fulfill({
+			status: 403,
+			contentType: 'application/json',
+			body: '{"error":"This token cannot read this project."}'
+		})
+	);
+	await page.goto('/console/');
+	await page.getByPlaceholder('aiops_tk_…').fill(TOKEN);
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+});
