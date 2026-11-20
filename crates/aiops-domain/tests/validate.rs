@@ -373,15 +373,17 @@ fn attributes_are_default_deny_counted_and_redacted() {
 
 #[test]
 fn error_messages_are_redacted_and_bounded() {
+    // Assembled so no complete token shape sits in the source for scanners.
+    let sk = concat!("sk-", "abcdefgh", "ijklmnop");
     let v = check(WireEvent {
         failure_class: Some("rejected".into()),
-        error_message: Some("provider said: invalid api_key=sk-abcdefghijklmnop".into()),
+        error_message: Some(format!("provider said: invalid api_key={sk}")),
         ..step_finished("failed")
     })
     .unwrap();
     assert_eq!(v.marks.redactions, 1);
     let wire = serde_json::to_string(&v.event.to_wire()).unwrap();
-    assert!(!wire.contains("sk-abcdefghijklmnop"));
+    assert!(!wire.contains(sk));
     assert_eq!(
         refused(WireEvent {
             failure_class: Some("rejected".into()),

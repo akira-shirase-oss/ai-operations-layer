@@ -83,6 +83,25 @@ const SECRET_PREFIXES: &[&str] = &[
     "hf_",
     "whsec_",
     "AIza",
+    "SG.",
+    "ya29.",
+    "dop_v1_",
+    "npm_",
+    "pypi-",
+    "sq0atp-",
+    "sq0csp-",
+    "shpat_",
+    "shppa_",
+    "shpca_",
+    "xapp-",
+    "xoxe-",
+    "dp.pt.",
+    "dp.st.",
+    "dp.ct.",
+    "dp.audit.",
+    "dp.scim.",
+    "ntn_",
+    "figd_",
 ];
 
 /// Parts of a key name (split on `_`, `-`, `.`) that make its value a secret
@@ -300,7 +319,8 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     }
     for prefix in SECRET_PREFIXES {
         if rest.starts_with(prefix.as_bytes()) {
-            let run = token_run(&rest[prefix.len()..], b"_-");
+            // `.` is in the run: SendGrid/Doppler/JWT-shaped keys dot their segments.
+            let run = token_run(&rest[prefix.len()..], b"_-.");
             if run >= MIN_SECRET_RUN {
                 return Some((0, i + prefix.len() + run));
             }
@@ -366,7 +386,6 @@ mod tests {
     #[test]
     fn redacts_known_credential_shapes() {
         let cases = [
-            ("key sk-abcdefghijklmnop1234 used", "key [redacted] used"),
             (
                 "Authorization: Bearer abc.def-123456789",
                 "Authorization: [redacted]",
@@ -375,18 +394,43 @@ mod tests {
                 "got bearer abcdefgh12345678 back",
                 "got bearer [redacted] back",
             ),
-            ("aws AKIAABCDEFGHIJKLMNOP", "aws [redacted]"),
-            (
-                "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl end",
-                "jwt [redacted] end",
-            ),
             ("url?password=hunter2&x=1", "url?password=[redacted]&x=1"),
             ("api_key: \"zzz-top\"", "api_key: \"[redacted]\""),
-            ("key -----BEGIN PRIVATE KEY----- abc", "key [redacted]"),
-            ("ingest aiops_ik_AAAAAAAAAAAAAAAAAAAA", "ingest [redacted]"),
         ];
         for (input, want) in cases {
             assert_eq!(redact(input).as_deref(), Some(want), "input: {input}");
+        }
+        // Assembled so the source holds no complete scanner-shaped token literal
+        // (the same pattern redteam.rs uses).
+        for (input, want) in [
+            (
+                format!("key {} used", concat!("sk-", "abcdefghijklmnop", "1234")),
+                "key [redacted] used",
+            ),
+            (
+                format!("aws {} refused", concat!("AKIA", "ABCDEFGH", "IJKLMNOP")),
+                "aws [redacted] refused",
+            ),
+            (
+                format!(
+                    "jwt {} end",
+                    concat!("eyJhbGciOiJIUzI1NiJ9", ".eyJzdWIiOiIxIn0", ".c2lnbmF0dXJl")
+                ),
+                "jwt [redacted] end",
+            ),
+            (
+                format!("key {} abc", concat!("-----BEGIN ", "PRIVATE KEY-----")),
+                "key [redacted]",
+            ),
+            (
+                format!(
+                    "ingest {}",
+                    concat!("aiops_ik_", "AAAAAAAAAA", "AAAAAAAAAA")
+                ),
+                "ingest [redacted]",
+            ),
+        ] {
+            assert_eq!(redact(&input).as_deref(), Some(want), "input: {input}");
         }
     }
 
