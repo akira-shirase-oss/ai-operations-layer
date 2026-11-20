@@ -6,8 +6,10 @@
 //! The link from an operation to a run is telemetry's claim (`job.runner`, `job.id` on the
 //! operation's start), so it is checked before the runner is asked: the operation ID must
 //! be the one derived from that runner and run. A forged link can only make the console say
-//! "unverified", never show another run's state. The call is on the query path, under its
-//! own concurrency cap and a 2 s deadline, and uses no database connection.
+//! "unverified", never show another run's state. The binding itself serves one project —
+//! a link forged in any other cannot reach the runner through this collector's read key —
+//! and every other project answers `not_configured`. The call is on the query path, under
+//! its own concurrency cap and a 2 s deadline, and uses no database connection.
 
 use std::time::Duration;
 
@@ -124,6 +126,9 @@ pub async fn authority(
     let Some(source) = app.config.authority.clone() else {
         return Ok(Json(Authority::NotConfigured));
     };
+    if project.slug != source.slug {
+        return Ok(Json(Authority::NotConfigured));
+    }
     let links = app.store.operation_links(project.id, op).await?;
     let run = match verify(&source, op, &links) {
         Ok(run) => run,
@@ -189,6 +194,7 @@ mod tests {
 
     fn source() -> AuthoritySource {
         AuthoritySource {
+            slug: "pilot".into(),
             label: "dr-local".into(),
             url: "http://127.0.0.1:1".into(),
             read_key: "k".repeat(32),

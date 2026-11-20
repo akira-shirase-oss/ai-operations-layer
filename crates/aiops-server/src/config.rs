@@ -9,6 +9,10 @@ use std::time::Duration;
 /// Runner, read with its read-only key.
 #[derive(Clone)]
 pub struct AuthoritySource {
+    /// The project slug the binding serves; every other project answers
+    /// `not_configured`, so no tenant can proxy the runner's read key at
+    /// another project's runs.
+    pub slug: String,
     /// The runner label the adapter reports under (`job.runner`).
     pub label: String,
     pub url: String,
@@ -18,6 +22,7 @@ pub struct AuthoritySource {
 impl std::fmt::Debug for AuthoritySource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthoritySource")
+            .field("slug", &self.slug)
             .field("label", &self.label)
             .field("url", &self.url)
             .field("read_key", &"<redacted>")
@@ -83,7 +88,7 @@ pub struct Config {
     /// A request's headers must arrive within this; idle keep-alive connections close
     /// after it too.
     pub header_read_timeout: Duration,
-    /// `AIOPS_AUTHORITY_DURABLE_RUNNER=<label>=<url>` and
+    /// `AIOPS_AUTHORITY_DURABLE_RUNNER=<project-slug>=<label>=<url>` and
     /// `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`: the runner the console may ask.
     pub authority: Option<AuthoritySource>,
     /// `AIOPS_CONTROL_REFERENCE_HOST=<slug>=<url>`: the project's control adapter (D-007).
@@ -211,9 +216,11 @@ impl Config {
         }
         if let Ok(v) = std::env::var("AIOPS_AUTHORITY_DURABLE_RUNNER") {
             let key = std::env::var("AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY").unwrap_or_default();
-            match v.split_once('=') {
-                Some((label, url))
-                    if !label.is_empty()
+            let mut parts = v.splitn(3, '=');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(slug), Some(label), Some(url))
+                    if !slug.is_empty()
+                        && !label.is_empty()
                         && (url.starts_with("http://") || url.starts_with("https://")) =>
                 {
                     if key.len() < 32 {
@@ -222,13 +229,14 @@ impl Config {
                         );
                     }
                     cfg.authority = Some(AuthoritySource {
+                        slug: slug.to_owned(),
                         label: label.to_owned(),
                         url: url.trim_end_matches('/').to_owned(),
                         read_key: key,
                     });
                 }
                 _ => errors.push(
-                    "AIOPS_AUTHORITY_DURABLE_RUNNER must be <label>=http(s)://host:port".to_owned(),
+                    "AIOPS_AUTHORITY_DURABLE_RUNNER must be <project-slug>=<label>=http(s)://host:port".to_owned(),
                 ),
             }
         }

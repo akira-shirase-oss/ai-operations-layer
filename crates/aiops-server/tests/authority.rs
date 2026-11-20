@@ -96,6 +96,7 @@ async fn the_runner_answers_only_for_a_link_that_verifies(pool: PgPool) {
     let (url, fake) = fake_runner().await;
     let e = env_with(pool, |s| {
         s.config.authority = Some(AuthoritySource {
+            slug: "pilot".into(),
             label: "dr-test".into(),
             url: url.clone(),
             read_key: READ_KEY.into(),
@@ -174,6 +175,7 @@ async fn a_runner_that_is_down_or_refuses_the_key_is_named_as_such(pool: PgPool)
     let (url, _) = fake_runner().await;
     let e = env_with(pool, |s| {
         s.config.authority = Some(AuthoritySource {
+            slug: "pilot".into(),
             label: "dr-test".into(),
             url: url.clone(),
             read_key: "wrong-key-0123456789abcdef0123456789abcd".into(),
@@ -192,6 +194,7 @@ async fn a_runner_that_is_down_or_refuses_the_key_is_named_as_such(pool: PgPool)
     let e2 = {
         let mut cfg = e.state.config.clone();
         cfg.authority = Some(AuthoritySource {
+            slug: "pilot".into(),
             label: "dr-test".into(),
             url: "http://127.0.0.1:9".into(), // nothing listens on discard
             read_key: READ_KEY.into(),
@@ -211,4 +214,41 @@ async fn without_a_configured_runner_nothing_is_asked(pool: PgPool) {
     let e = common::env(pool).await;
     let (status, a) = authority(&e.app, &e.reader, &"ab".repeat(16)).await;
     assert_eq!((status, a["state"].as_str()), (200, Some("not_configured")));
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_binding_serves_only_its_own_project(pool: PgPool) {
+    let (url, _) = fake_runner().await;
+    let e = env_with(pool, |s| {
+        s.config.authority = Some(AuthoritySource {
+            slug: "pilot".into(),
+            label: "dr-test".into(),
+            url: url.clone(),
+            read_key: READ_KEY.into(),
+        });
+    })
+    .await;
+    // The exploit: another tenant's own ingest key forges a link in ITS project to a run
+    // the runner knows; the derived operation ID verifies, so before the binding was
+    // project-scoped the collector proxied the answer across.
+    let claimed = operation_for_run("dr-test", 7).to_string();
+    send(
+        &e.app,
+        post_ingest(&e.other_ingest_key, linked_start(&claimed, "dr-test", 7, 1)),
+    )
+    .await;
+    let r = send(
+        &e.app,
+        get_req(
+            &format!("/v1/projects/other/operations/{claimed}/authority"),
+            &e.other_reader,
+        ),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{:?}", r.body);
+    assert_eq!(
+        r.body["state"], "not_configured",
+        "another project never reaches the runner through this collector's key: {:?}",
+        r.body
+    );
 }

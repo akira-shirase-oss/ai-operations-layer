@@ -81,9 +81,10 @@ Mint one ingest key per host (`aiops_admin create-ingest-key --project pilot
      runner). Install `deploy/aiops-dr-adapter.service` and start it.
   3. Register each route with the runner through the adapter:
      `--handler <route>=http://<adapter listen>/h/<route>`. Restart the runner.
-  4. On the collector, set `AIOPS_AUTHORITY_DURABLE_RUNNER=<label>=<runner URL>` and
-     `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`, so the console shows the runner's own
-     answer beside each run. Restart the collector.
+  4. On the collector, set `AIOPS_AUTHORITY_DURABLE_RUNNER=<project-slug>=<label>=<runner
+     URL>` and `AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY`, so the console shows the
+     runner's own answer beside each run. The binding serves only that project;
+     every other project answers `not_configured`. Restart the collector.
 
   **Limits that must match the runner** (review R3; the first two are checked at
   start when stated in `adapter.json`):

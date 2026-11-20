@@ -61,7 +61,7 @@ dr_key="$("$bin" admin create-ingest-key --project pilot --name durable-runner-a
 
 AIOPS_LISTEN="127.0.0.1:$port" AIOPS_CONSOLE_DIR="apps/console/build" AIOPS_LOG=warn \
   AIOPS_RETENTION_SWEEP_SECS=86400 \
-  AIOPS_AUTHORITY_DURABLE_RUNNER="dr-e2e=http://127.0.0.1:$dr_port" \
+  AIOPS_AUTHORITY_DURABLE_RUNNER="pilot=dr-e2e=http://127.0.0.1:$dr_port" \
   AIOPS_AUTHORITY_DURABLE_RUNNER_READ_KEY="$DURABLE_READ_KEY" \
   "$bin" serve >"$work/server.log" 2>&1 &
 server_pid=$!
