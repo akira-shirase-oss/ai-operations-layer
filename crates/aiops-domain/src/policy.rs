@@ -269,11 +269,27 @@ fn secret_spans(view: &[u8]) -> Vec<(usize, usize)> {
     while i < view.len() {
         if let Some((keep, end)) = match_secret(view, i) {
             spans.push((i + keep, end));
-            i = end;
+            // A userinfo match ends at `@` with `://` inside its kept
+            // prefix — the user part rode the "keep the user" rule unscanned.
+            // Rescan from just after the `://`: a credential in the user
+            // slot (`ghp_…:x-oauth-basic@` is how real tokens travel) must
+            // die. Every other shape skips past its end; the merge absorbs
+            // the overlap with the password span (review N1 residual).
+            let user = (view.get(end) == Some(&b'@'))
+                .then(|| view[i..i + keep].windows(3).position(|w| w == b"://"))
+                .flatten();
+            i = match user {
+                Some(p) => i + p + 3,
+                None => end,
+            };
             continue;
         }
         i += 1;
     }
+    // The user-part rescan can push a span that starts BEFORE one already
+    // pushed — the merge below walks forward only, so an unordered span is
+    // absorbed and silently lost. Sort so every span is emitted.
+    spans.sort_unstable();
     spans
 }
 
@@ -412,12 +428,10 @@ fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
     j += opening;
     let value = &after[j..];
     let last_part = key_parts(key).pop().unwrap_or_default();
-    let len = if last_part == b"authorization" || last_part == b"cookie" {
-        value.iter().take_while(|b| !b"\r\n".contains(b)).count()
-    } else if value.first() == Some(&b'{') || value.first() == Some(&b'[') {
-        json_container_len(value)
-    } else if let Some(q) = quote {
-        // To the closing quote (or an escaped one), spaces included.
+    // The normal extent: a quoted value runs to its closing quote; an unquoted
+    // one stops only at whitespace, a quote or `&` — `,` and `;` are part of a
+    // credential, not separators (review N7c).
+    let normal = if let Some(q) = quote {
         value
             .iter()
             .take_while(|b| **b != q && **b != b'\\' && !b"\r\n".contains(b))
@@ -431,8 +445,17 @@ fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
         scheme
             + value[scheme..]
                 .iter()
-                .take_while(|b| !b.is_ascii_whitespace() && !b"&;,\"'\\".contains(b))
+                .take_while(|b| !b.is_ascii_whitespace() && !matches!(*b, b'"' | b'\'' | b'&'))
                 .count()
+    };
+    let len = if last_part == b"authorization" || last_part == b"cookie" {
+        value.iter().take_while(|b| !b"\r\n".contains(b)).count()
+    } else if value.first() == Some(&b'{') || value.first() == Some(&b'[') {
+        // A container can close early while the credential runs on —
+        // `"[ab]hunter2"`: the value reaches the farther of the two (NF2).
+        json_container_len(value).max(normal)
+    } else {
+        normal
     };
     (len > 0).then_some((j, j + len))
 }
@@ -532,38 +555,62 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             if !token.contains(&b'/') {
                 return Some((0, i + run));
             }
-            // A `/`-joined run is a path by default — model ids, file paths,
-            // URL routes are long mixed runs too (review N4). It is only a
-            // credential when at least two segments each look like a key
-            // (≥6 chars with an uppercase and a digit: T0ABCDEF12,
-            // B0CDEF1234). The redaction starts at the first of them so the
-            // readable prefix — a domain, a directory, a namespace — survives.
-            let mut qualified = 0;
-            let mut at = None;
+            // A `/`-joined run stays readable only with path evidence —
+            // a name-byte segment (`-`/`_`/`.`), or the run sitting inside
+            // host or path text: behind a supported `/` (`h.io/…`, one with
+            // bytes before it) or a `.` (`example.com/…`). A bare `/` after
+            // whitespace is the credential's own leading slash, not a path
+            // (review NF1). Never by counting key-like segments: random
+            // base64 splits on `/` into segments that qualify by accident.
+            // With evidence, the name-shaped prefix keeps and the tail —
+            // the first segment onward that no human would name a path
+            // part — dies. Without it the whole run dies: a credential in
+            // a URL path does not keep its first chunk.
+            let segments: Vec<&[u8]> = token.split(|b| *b == b'/').collect();
+            let name_byte = |b: &u8| matches!(b, b'-' | b'_' | b'.');
+            let supported_slash = i >= 2
+                && bytes[i - 1] == b'/'
+                && (is_word(bytes[i - 2]) || matches!(bytes[i - 2], b'.' | b':' | b'/'));
+            let evidence = segments.iter().any(|s| s.iter().any(name_byte))
+                || supported_slash
+                || (i > 0 && bytes[i - 1] == b'.');
+            if !evidence {
+                return Some((0, i + run));
+            }
+            // Named like a path part: short, punctuated, lowercase+digits,
+            // or a word (a leading capital is fine; interleaved caps and
+            // digit runs are how a generated token spells, not a person).
+            let pathy = |s: &[u8]| {
+                s.len() < 6
+                    || s.iter().any(name_byte)
+                    || s.iter()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                    || (s.len() <= 16
+                        && s.iter().filter(|b| b.is_ascii_uppercase()).count() <= 2
+                        && s.iter().filter(|b| b.is_ascii_digit()).count() <= 2)
+            };
             let mut off = 0;
-            for seg in token.split(|b| *b == b'/') {
-                if seg.len() >= 6
-                    && seg.iter().any(u8::is_ascii_uppercase)
-                    && seg.iter().any(u8::is_ascii_digit)
-                {
-                    qualified += 1;
-                    at.get_or_insert(off);
+            for seg in &segments {
+                if !pathy(seg) {
+                    return Some((off, i + run));
                 }
                 off += seg.len() + 1;
             }
-            if qualified >= 2 {
-                return Some((at.unwrap_or(0), i + run));
-            }
+            // Every segment is name-shaped: a path, a model id, a route —
+            // not a credential.
         }
         // A bare lowercase-hex run is a hash or a hex credential — at
         // commit length and beyond the review calls the miss a leak (N7).
         // A run that continues as a word is a longer identifier, not a hex
-        // string; a commit SHA is the accepted cost of the coverage.
+        // string; a commit SHA is the accepted cost of the coverage. A
+        // digest that SAYS it is one — `sha256:<64hex>` — is a content
+        // identifier, not a credential (NF3).
         let hex_run = rest
             .iter()
             .take_while(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(*b))
             .count();
-        if hex_run >= 40 && !rest.get(hex_run).is_some_and(|b| is_word(*b)) {
+        let said_sha256 = i >= 7 && bytes[i - 7..i].eq_ignore_ascii_case(b"sha256:");
+        if hex_run >= 40 && !said_sha256 && !rest.get(hex_run).is_some_and(|b| is_word(*b)) {
             return Some((0, i + hex_run));
         }
     }
@@ -732,13 +779,14 @@ mod tests {
             "model mistralai/Mistral-7B-Instruct-v0.3 refused the prompt",
             "model mistralai/Mixtral-8x22B-Instruct-v0p1 refused the prompt",
             "read /var/log/aiops-collector/RunId42-Error/trace-2026.log tail",
-            "GET /api/v2/Operations/RunId42/status 200",
+            "GET /api/v2/ops-run/RunId42/status 200",
             "release/2024-11-20/publish ok",
         ] {
             assert_eq!(redact(text), None, "{text:?} is operational text");
         }
-        // A webhook path still dies — two key-looking segments is the shape —
-        // and the domain + path prefix survive to explain where it went.
+        // A webhook path still dies — the `.`-evidenced run keeps its
+        // name-shaped prefix (`com/services`) and kills the segments no
+        // human would name.
         assert_eq!(
             redact("GET https://hooks.example.com/services/T0ABCDEF12/B0CDEF1234/xyZab").as_deref(),
             Some("GET https://hooks.example.com/services/[redacted]")
@@ -770,10 +818,11 @@ mod tests {
             redact(r#"{"auth": ["hunter2", "hunter3"]}"#).as_deref(),
             Some(r#"{"auth": [redacted]}"#)
         );
-        // N7c: unquoted values end at , ; & — only the value dies.
+        // N7c (reviewed): `,` and `;` are credential bytes, not separators —
+        // an unquoted value ends at whitespace, a quote or `&` only.
         assert_eq!(
             redact("password=hunter2,theme=dark;sid=abc123&x=1").as_deref(),
-            Some("password=[redacted],theme=dark;sid=[redacted]&x=1")
+            Some("password=[redacted]&x=1")
         );
         // N7d: a bare lowercase-hex run is a credential shape at 40+ chars —
         // a commit-length SHA is the accepted cost (hashes name nothing a
