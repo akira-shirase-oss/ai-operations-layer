@@ -131,11 +131,13 @@ async fn an_in_process_revoke_dies_before_the_next_request(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
-async fn a_peer_revoke_dies_inside_the_credential_ttl(pool: PgPool) {
-    // The admin CLI revokes in the database — another process. The running
-    // collector only learns of it when the cached lookup ages out (D-034's
-    // documented peer bound), so the attack surface is the TTL, nothing more.
-    let s = stack(&pool, &[("AIOPS_CREDENTIAL_TTL_SECS", "1")]).await;
+async fn a_peer_revoke_is_refused_on_the_next_request(pool: PgPool) {
+    // The admin CLI revokes in the database — another process, so the running
+    // collector's cache cannot see the row. The aiops_notify_revocation
+    // trigger NOTIFYs the digest and the server's listener evicts it: the
+    // refusal lands on the next request, nowhere near the 30 s cache TTL
+    // the peer bound used to be (D-034, amended).
+    let s = stack(&pool, &[]).await;
     create_project(&s.url, "pilot");
     let key = create_ingest_key(&s.url, "pilot", "dead");
     assert_eq!(
@@ -157,9 +159,9 @@ async fn a_peer_revoke_dies_inside_the_credential_ttl(pool: PgPool) {
     );
     assert!(ok, "revoke-ingest-key: {err}");
 
-    // Within the fresh window the cached answer may still serve — that IS the
-    // documented bound. Once it ages out, the revoked credential is refused.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // NOTIFY → evict is a hop, not a deadline — a short poll proves the
+    // refusal arrived via the listener, not via the 30 s TTL.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let (status, _, _) = post_ingest(&s.base, Some(&key), batch(&journey(2, 0))).await;
         if status == 401 {
@@ -167,9 +169,9 @@ async fn a_peer_revoke_dies_inside_the_credential_ttl(pool: PgPool) {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the peer revoke outlived its bound — still answering {status} after 10 s"
+            "the CLI revoke never reached the running collector — still {status} after 5 s"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 

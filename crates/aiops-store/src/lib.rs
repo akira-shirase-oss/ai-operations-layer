@@ -17,8 +17,8 @@ use aiops_domain::{
     Validator,
 };
 use sqlx::Row;
-pub use sqlx::postgres::PgConnectOptions;
 use sqlx::postgres::PgPoolOptions;
+pub use sqlx::postgres::{PgConnectOptions, PgListener};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -636,6 +636,25 @@ async fn pool(
         .acquire_timeout(cfg.acquire_timeout)
         .connect_with(options)
         .await?)
+}
+
+/// The channel the `aiops_notify_revocation` trigger (migration 0008) emits on;
+/// the payload is the revoked credential digest as lowercase hex.
+pub const REVOCATION_CHANNEL: &str = "aiops_credential_revoked";
+
+/// A dedicated LISTEN connection for credential-revocation notices, off every
+/// pool: a saturated serving pool can never delay an eviction. Notifications
+/// die with the connection — a caller re-establishing one must clear its
+/// credential caches outright rather than trust anything cached in the gap.
+pub async fn revocation_listener(database_url: &str) -> Result<PgListener, StoreError> {
+    let mut listener = PgListener::connect(database_url)
+        .await
+        .map_err(StoreError::Unavailable)?;
+    listener
+        .listen(REVOCATION_CHANNEL)
+        .await
+        .map_err(StoreError::Unavailable)?;
+    Ok(listener)
 }
 
 impl Store {

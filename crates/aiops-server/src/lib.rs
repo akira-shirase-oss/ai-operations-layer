@@ -19,6 +19,7 @@ pub mod credentials;
 pub mod error;
 pub mod ingest;
 pub mod locks;
+pub mod notify;
 pub mod query;
 pub mod retention;
 pub mod serve;

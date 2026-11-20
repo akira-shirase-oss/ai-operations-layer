@@ -443,6 +443,10 @@ named decision when the relevant milestone starts.
   from the same surface: an `admin`-scoped call, a confirm dialog, an
   audited row, because revocation is an incident action that has to be
   fast. `set-opt-in` stays visible in the console; toggling it stays CLI.
-  Revocation evicts the resolver cache in the serving process; a
-  multi-instance deployment still relies on each peer's cache TTL.
+  Revocation evicts the resolver cache cross-process (amended
+  2026-11-20): the `aiops_notify_revocation` trigger NOTIFYs the revoked
+  digest on `aiops_credential_revoked`, every serving peer LISTENs and
+  evicts exactly that entry — a CLI revoke dies on the next request, not
+  on a peer's cache TTL — and a re-established LISTEN clears both
+  credential caches outright, the only safe resume after missed notices.
   The UI audit records these exclusions with this rationale.

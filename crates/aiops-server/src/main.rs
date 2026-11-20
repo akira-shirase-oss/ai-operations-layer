@@ -139,6 +139,8 @@ Ok(t) => {
     // The control executor (D-033): boot re-drive first, then wake + tick passes on the
     // tracked tasks.
     aiops_server::control::spawn_executor(state.clone(), &tracker, cancel.clone());
+    // Cross-process revocation (D-034): LISTEN for the trigger's digest and evict it.
+    tracker.spawn(aiops_server::notify::watch(state.clone(), cancel.clone()));
     tracker.close();
 
     let listener = tokio::net::TcpListener::bind(listen)

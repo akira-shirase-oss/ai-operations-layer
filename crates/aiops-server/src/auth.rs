@@ -134,6 +134,21 @@ impl<V: Clone> CredentialCache<V> {
         }
     }
 
+    /// Drop every cached answer — the revocation listener's reconnect
+    /// recovery: notifications missed while the channel was down are
+    /// indistinguishable from none, so the only safe resume is empty
+    /// (D-034).
+    pub fn clear(&self) {
+        if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
+            pos.map.clear();
+            pos.order.clear();
+        }
+        if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
+            neg.map.clear();
+            neg.order.clear();
+        }
+    }
+
     pub fn get(&self, key: &[u8; 32]) -> Cached<V> {
         if let Some(pos) = self.lock_stats.lock(&self.positive)
             && let Some((v, at)) = pos.map.get(key)
