@@ -28,11 +28,10 @@ export type Result<T> =
 	| { state: 'forbidden'; message: string }
 	| { state: 'missing' }
 	| { state: 'rateLimited'; retryAfter: number }
-	| { state: 'aborted' }
 	| { state: 'unreachable'; message: string };
 
-export async function api<T>(path: string, fetcher: typeof fetch = fetch): Promise<Result<T>> {
-	return apiCall<T>(path, { method: 'GET' }, fetcher);
+export async function api<T>(path: string, fetcher: typeof fetch = fetch, as?: string): Promise<Result<T>> {
+	return apiCall<T>(path, { method: 'GET' }, fetcher, as);
 }
 
 /** A JSON POST — control actions and admin revocations; same failure states. */
@@ -52,18 +51,26 @@ export async function apiPost<T>(
 	);
 }
 
-async function apiCall<T>(path: string, init: RequestInit, fetcher: typeof fetch): Promise<Result<T>> {
-	const t = token();
+async function apiCall<T>(
+	path: string,
+	init: RequestInit,
+	fetcher: typeof fetch,
+	as?: string
+): Promise<Result<T>> {
+	// `as` lets a caller authenticate without storing the token first — the
+	// sign-in check runs on the candidate so sessionStorage only ever holds a
+	// token the collector has already answered for.
+	const t = as ?? token();
 	if (!t) return { state: 'needsAuth' };
 	let response: Response;
 	try {
 		const headers = { ...(init.headers ?? {}), authorization: `Bearer ${t}` };
 		response = await fetcher(path, { ...init, headers });
 	} catch (e) {
-		// A navigation or an AbortController cancels the fetch — that is the caller
-		// going away, not the collector's answer, and it must never count as a
-		// verdict (a sign-in check aborted mid-navigation is not a refused token).
-		if (e instanceof Error && e.name === 'AbortError') return { state: 'aborted' };
+		// Whatever the rejection — a dead collector, a navigation cancelling the
+		// fetch — it is a non-answer, never a verdict. How it is named differs by
+		// browser and is not worth branching on; callers must treat any failure
+		// here as "the collector did not answer", not "the collector refused".
 		return { state: 'unreachable', message: e instanceof Error ? e.message : 'network error' };
 	}
 	if (response.ok) return { state: 'ok', data: (await response.json()) as T };

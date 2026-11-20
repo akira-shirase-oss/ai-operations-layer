@@ -29,8 +29,6 @@
 {:else}
 	<Notice kind="fail" title="The collector could not be reached.">
 		Check that it is running, then <Button variant="outline" size="sm" onclick={retry}>Try again</Button>
-		{#if 'message' in result}
-			<details class="mt-1 text-xs"><summary>Details</summary><code>{result.message}</code></details>
-		{/if}
+		<details class="mt-1 text-xs"><summary>Details</summary><code>{result.message}</code></details>
 	</Notice>
 {/if}

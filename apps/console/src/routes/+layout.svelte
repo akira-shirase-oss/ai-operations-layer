@@ -25,26 +25,23 @@
 			inputRef?.focus();
 			return;
 		}
-		// The token's truth is the collector's answer, not its shape: check it for real,
-		// and roll the session back if it refuses or never answers.
+		// The token's truth is the collector's answer, not its shape — and only a
+		// verdict earns sessionStorage. Nothing is written until ok/forbidden
+		// arrives, so there is nothing to roll back: a check that never resolves
+		// (navigation abort, dead collector) simply leaves no session.
 		checking = true;
-		setToken(t);
-		const r = await api<ProjectsView>('/v1/projects');
+		const r = await api<ProjectsView>('/v1/projects', fetch, t);
 		checking = false;
-		// Aborted is not a verdict: the page navigating away cancels the fetch, and
-		// rolling the token back in this dying document signs the user out of the
-		// page they are already loading. Keep the token; the next page decides.
-		if (r.state === 'aborted') return;
 		if (r.state === 'ok' || r.state === 'forbidden') {
 			// 403 is a verdict too: the token is real, just narrower than this ask —
 			// the destination pages render their own denial (audit log, a project).
 			// No reload: a queued navigation can land after the user's next click and
 			// wipe it out — mounting the children loads their data with the token.
+			setToken(t);
 			draft = '';
 			signedIn = true;
 			return;
 		}
-		setToken(null);
 		signError =
 			r.state === 'needsAuth'
 				? 'The collector did not accept that token — it is expired, revoked or wrong.'
