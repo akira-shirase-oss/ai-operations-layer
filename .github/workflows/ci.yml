@@ -60,6 +60,38 @@ jobs:
       - run: scripts/check-architecture.sh
       - run: scripts/check-perf-scenarios.sh
 
+  # The mutation proof (workspace rule, 2026-11-20): for each named mutant in
+  # tests/attacks/mutants.py, apply it, require its attack test to go red,
+  # restore. A suite that passes with its protection deleted proves nothing.
+  attack-mutations:
+    name: attack mutations (each attack red without its protection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component clippy,rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: scripts/prove-attacks.sh
+
   console:
     name: console (svelte-check, build)
     runs-on: ubuntu-latest
