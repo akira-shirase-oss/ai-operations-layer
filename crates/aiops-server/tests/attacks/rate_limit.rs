@@ -48,6 +48,14 @@ async fn bursts_spend_their_own_budget_on_every_surface(pool: PgPool) {
         }
     }
     assert!(limited, "the query bucket must refuse past its burst");
+
+    // The ledger re-read: exactly one batch (8 events) landed — the second
+    // batch's 429 stored nothing.
+    assert_eq!(
+        crate::common::table_count(&pool, "events").await,
+        8,
+        "the refused batch must not have written events"
+    );
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
@@ -69,6 +77,11 @@ async fn a_malformed_flood_still_spends_the_ingest_budget_over_http(pool: PgPool
         statuses.push(post_ingest(&s.base, Some(&key), "{not json").await.0);
     }
     assert_eq!(statuses, [400, 400, 400, 429], "{statuses:?}");
+    assert_eq!(
+        crate::common::table_count(&pool, "events").await,
+        0,
+        "malformed bodies stored nothing"
+    );
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]

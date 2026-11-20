@@ -43,6 +43,13 @@ async fn forwarded_headers_do_not_move_the_per_token_bucket(pool: PgPool) {
         limited >= 3,
         "rotating spoofed IPs must not reset the per-key bucket: {limited}/6 limited"
     );
+    // The ledger re-read: burst 3 < one batch's 8 events, so every refused
+    // batch must have stored exactly nothing.
+    assert_eq!(
+        crate::common::table_count(&pool, "events").await,
+        0,
+        "refused batches must not have written events"
+    );
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
@@ -83,6 +90,12 @@ async fn conflicting_authorization_lines_have_one_verdict(pool: PgPool) {
         r.status().as_u16(),
         401,
         "a later good credential never rescues an earlier bad one"
+    );
+    // And none of those 401s reached authorize — the ledger stays empty.
+    assert_eq!(
+        crate::common::audit_rows(&pool, 20).await,
+        Vec::new(),
+        "an unauthenticated request never audits"
     );
 }
 
@@ -127,4 +140,11 @@ async fn a_hostile_request_id_never_reaches_the_wire(pool: PgPool) {
             "any echoed id is charset-clean: {echoed:?}"
         );
     }
+    // Ledger re-read: every request above was a 200 — nothing the hostile
+    // headers tried produced an audited denial either.
+    assert_eq!(
+        crate::common::audit_rows(&pool, 50).await,
+        Vec::new(),
+        "hostile headers produced no audited denial"
+    );
 }

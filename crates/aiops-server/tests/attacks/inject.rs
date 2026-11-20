@@ -91,4 +91,8 @@ async fn error_bodies_never_echo_attacker_bytes(pool: PgPool) {
             "error body {i} echoed attacker bytes: {body}"
         );
     }
+    // The ledger re-read: nothing stored, nothing audited (every call above
+    // was a client error that never reached authorize).
+    assert_eq!(crate::common::table_count(&pool, "events").await, 0);
+    assert_eq!(crate::common::audit_rows(&pool, 20).await, Vec::new());
 }

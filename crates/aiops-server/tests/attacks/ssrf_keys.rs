@@ -96,8 +96,9 @@ async fn a_forged_business_key_never_reaches_the_authority(pool: PgPool) {
         assert_eq!(body["error"]["code"], "bad_request", "{key}: {body}");
     }
     let calls = seen.lock().unwrap().clone();
-    assert!(
-        calls.is_empty(),
+    assert_eq!(
+        calls,
+        Vec::<String>::new(),
         "no forged key may produce an outbound call: {calls:?}"
     );
 

@@ -225,3 +225,25 @@ pub(crate) async fn audit_rows(
     .await
     .unwrap()
 }
+
+/// `SELECT count(*)` on a table — the stored-state re-read an attack owes
+/// after asserting a refusal status: a refused body must also have STORED
+/// nothing.
+pub(crate) async fn table_count(pool: &PgPool, table: &'static str) -> i64 {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Whether a credential row carries `revoked_at` — the ledger side of a
+/// revoke call.
+pub(crate) async fn is_revoked(pool: &PgPool, table: &'static str, id: &str) -> bool {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT revoked_at IS NOT NULL FROM {table} WHERE id = $1::uuid"
+    )))
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}

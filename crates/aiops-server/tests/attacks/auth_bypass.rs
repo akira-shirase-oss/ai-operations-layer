@@ -67,7 +67,7 @@ async fn every_absent_or_malformed_credential_is_refused_everywhere(pool: PgPool
     // Every refusal above was unauthenticated: no actor, no audit row — the
     // log only ever carries decisions that reached authorize.
     let rows = audit_rows(&pool, 20).await;
-    assert!(rows.is_empty(), "a 401 never audits: {rows:?}");
+    assert_eq!(rows, Vec::new(), "a 401 never audits: {rows:?}");
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
@@ -104,7 +104,10 @@ async fn an_in_process_revoke_dies_before_the_next_request(pool: PgPool) {
         .as_str()
         .unwrap()
         .to_owned();
-    for (kind, id) in [("ingest-keys", key_id), ("tokens", token_id)] {
+    for (kind, id) in [
+        ("ingest-keys", key_id.clone()),
+        ("tokens", token_id.clone()),
+    ] {
         let (status, body) = crate::common::post_json(
             &s.base,
             &format!("/v1/admin/credentials/{kind}/{id}/revoke"),
@@ -128,6 +131,10 @@ async fn an_in_process_revoke_dies_before_the_next_request(pool: PgPool) {
         401,
         "a revoked token"
     );
+    // The ledger re-read: both rows carry revoked_at — the 401s reflect a
+    // real state change, not a stale answer.
+    assert!(crate::common::is_revoked(&pool, "ingest_keys", &key_id).await);
+    assert!(crate::common::is_revoked(&pool, "api_tokens", &token_id).await);
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
@@ -158,6 +165,13 @@ async fn a_peer_revoke_is_refused_on_the_next_request(pool: PgPool) {
         ],
     );
     assert!(ok, "revoke-ingest-key: {err}");
+    // The ledger re-read first: the CLI's UPDATE landed in this database.
+    let revoked: bool =
+        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM ingest_keys WHERE name = 'dead'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(revoked, "the CLI revoke landed in the ledger");
 
     // NOTIFY → evict is a hop, not a deadline — a short poll proves the
     // refusal arrived via the listener, not via the 30 s TTL.
@@ -214,4 +228,11 @@ async fn the_cli_will_not_mint_a_contradictory_admin_or_scopeless_token(pool: Pg
     assert_ne!(id, "");
     let (tok, _) = create_token(&s.url, "ana", &["read"], &["pilot"]);
     assert!(tok.starts_with("aiops_tk_"));
+    // The ledger re-read: exactly the two honest mints — the refused shapes
+    // wrote no token rows at all.
+    assert_eq!(
+        crate::common::table_count(&pool, "api_tokens").await,
+        2,
+        "the refused mints stored nothing"
+    );
 }

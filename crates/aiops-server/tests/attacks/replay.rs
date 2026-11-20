@@ -67,4 +67,10 @@ async fn a_replayed_control_call_returns_the_same_record(pool: PgPool) {
         r1["control_id"], r2["control_id"],
         "one record, not two: {r1} / {r2}"
     );
+    // The ledger re-read: one row, not two writes.
+    assert_eq!(
+        crate::common::table_count(&pool, "control_records").await,
+        1,
+        "the replay must not have written a second record"
+    );
 }

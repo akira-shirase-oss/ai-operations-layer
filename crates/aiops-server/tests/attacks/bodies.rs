@@ -81,6 +81,14 @@ async fn bodies_over_every_cap_are_shed_not_parsed(pool: PgPool) {
         "a compressed body is not silently expanded: {}",
         r.status()
     );
+
+    // The ledger re-read: every body above was refused — nothing it carried
+    // may have reached the events table.
+    assert_eq!(
+        crate::common::table_count(&pool, "events").await,
+        0,
+        "a refused body must have stored nothing"
+    );
 }
 
 /// A valid gzip envelope (stored blocks) around the payload — the point is a
@@ -131,7 +139,7 @@ async fn a_body_sent_one_byte_a_heartbeat_is_bounded(pool: PgPool) {
     let addr = s.base.strip_prefix("http://").unwrap().to_owned();
     let trickler = tokio::spawn(async move {
         let Ok(mut conn) = tokio::net::TcpStream::connect(&addr).await else {
-            return;
+            return None;
         };
         let body = batch(&journey(1, 0));
         let _ = conn
@@ -149,13 +157,28 @@ async fn a_body_sent_one_byte_a_heartbeat_is_bounded(pool: PgPool) {
             let _ = conn.write_all(&[b]).await;
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
+        // After going silent the server must answer (a refusal) or close —
+        // the request deadline is the only thing between a stalled body and
+        // a connection held forever. `None` means the attack worked.
         let mut buf = [0u8; 512];
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), conn.read(&mut buf)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(15), conn.read(&mut buf))
+            .await
+            .ok()
+            .map(|r| r.unwrap_or(0))
     });
 
     // While the trickler holds its connection, the server still answers.
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let (status, _) = get(&s.base, "/v1/projects/pilot/operations", Some(&reader)).await;
     assert_eq!(status, 200, "a trickler must not stall the collector");
-    trickler.await.unwrap();
+    let answered = trickler.await.unwrap();
+    assert!(
+        answered.is_some(),
+        "the collector held the trickling connection past its request deadline"
+    );
+    assert_eq!(
+        crate::common::table_count(&pool, "events").await,
+        0,
+        "the partial body stored nothing"
+    );
 }
