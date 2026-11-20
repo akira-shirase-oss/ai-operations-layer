@@ -6,19 +6,45 @@
 	import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@aiops/ui/ui/card';
 	import { Input } from '@aiops/ui/ui/input';
 	import SunMoon from '@lucide/svelte/icons/sun-moon';
-	import { setToken, token } from '#lib/api.js';
+	import { api, setToken, token } from '#lib/api.js';
+	import type { ProjectsView } from '#lib/types.js';
 
 	let { children } = $props();
 	let signedIn = $state(token() !== null);
 	let draft = $state('');
+	let signError = $state('');
+	let checking = $state(false);
+	let inputRef: HTMLInputElement | null = $state(null);
 
-	function signIn(event: SubmitEvent) {
+	async function signIn(event: SubmitEvent) {
 		event.preventDefault();
-		if (!draft.startsWith('aiops_tk_')) return;
-		setToken(draft);
-		draft = '';
-		signedIn = true;
-		location.reload();
+		signError = '';
+		const t = draft.trim();
+		if (!t.startsWith('aiops_tk_')) {
+			signError = 'That does not look like an API token — tokens start aiops_tk_.';
+			inputRef?.focus();
+			return;
+		}
+		// The token's truth is the collector's answer, not its shape: check it for real,
+		// and roll the session back if it refuses or never answers.
+		checking = true;
+		setToken(t);
+		const r = await api<ProjectsView>('/v1/projects');
+		checking = false;
+		if (r.state === 'ok') {
+			draft = '';
+			signedIn = true;
+			location.reload();
+			return;
+		}
+		setToken(null);
+		signError =
+			r.state === 'needsAuth'
+				? 'The collector did not accept that token — it is expired, revoked or wrong.'
+				: r.state === 'unreachable'
+					? `The collector could not be reached — the token was not checked. (${r.message})`
+					: `The token could not be verified (${r.state}).`;
+		inputRef?.focus();
 	}
 
 	function signOut() {
@@ -66,9 +92,21 @@
 					</CardDescription>
 				</CardHeader>
 				<CardContent>
-					<form class="flex gap-2" onsubmit={signIn}>
-						<Input type="password" autocomplete="off" bind:value={draft} placeholder="aiops_tk_…" />
-						<Button type="submit">Sign in</Button>
+					<form class="flex flex-col gap-2" onsubmit={signIn}>
+						<div class="flex gap-2">
+							<Input
+								type="password"
+								autocomplete="off"
+								bind:value={draft}
+								bind:ref={inputRef}
+								placeholder="aiops_tk_…"
+								aria-label="API token"
+								aria-invalid={signError !== ''}
+								aria-describedby={signError ? 'signin-error' : undefined}
+							/>
+							<Button type="submit" disabled={checking}>{checking ? 'Checking…' : 'Sign in'}</Button>
+						</div>
+						{#if signError}<p id="signin-error" role="alert" class="text-sm text-state-fail-ink">{signError}</p>{/if}
 					</form>
 				</CardContent>
 			</Card>

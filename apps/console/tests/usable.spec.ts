@@ -223,3 +223,38 @@ for (const scheme of ['light', 'dark'] as const) {
 		}
 	});
 }
+
+test('sign-in names a bad token, a dead collector, and the projects screen retries', async ({ page }) => {
+	await page.goto('/console/');
+	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+	await noSeriousViolations(page, 'sign-in screen');
+
+	// A wrong-shape token is rejected in words; the form stays put.
+	await page.getByPlaceholder('aiops_tk_…').fill('not-a-token');
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	await expect(page.getByRole('alert')).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+
+	// A right-shape unknown token is named, not silently dropped into a dead page.
+	await page.getByPlaceholder('aiops_tk_…').fill(`aiops_tk_${'0'.repeat(32)}`);
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	await expect(page.getByRole('alert')).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+
+	// A dead collector is named honestly — the token was never checked.
+	await page.route('**/v1/projects', (r) => r.abort());
+	await page.getByPlaceholder('aiops_tk_…').fill(TOKEN);
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	await expect(page.getByRole('alert')).toBeVisible();
+	await page.unroute('**/v1/projects');
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();
+
+	// The projects screen offers a retry, not a dead end.
+	await page.route('**/v1/projects', (r) => r.abort());
+	await page.reload();
+	await expect(page.getByText('The collector could not be reached.')).toBeVisible();
+	await page.unroute('**/v1/projects');
+	await page.getByRole('button', { name: 'Try again' }).click();
+	await expect(page.getByRole('link', { name: 'pilot' })).toBeVisible();
+});
