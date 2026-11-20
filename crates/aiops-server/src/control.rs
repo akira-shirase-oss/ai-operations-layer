@@ -192,8 +192,8 @@ impl ControlAdapter {
 /// `.`/`..` segment itself — because `check_request` is the only thing between the
 /// caller's text and `format!("{}/publications/{key}")`. A `/`, `?`, `#` or `..`
 /// would leave the publications path or read a different literal key's answer
-/// (white-hat S2-2).
-fn business_key_id(s: &str) -> bool {
+/// (white-hat S2-2). `pub` for the fuzz target.
+pub fn business_key_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s != "."

@@ -103,6 +103,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "proptest",
  "reqwest",
  "serde",
  "serde_json",
@@ -124,6 +125,7 @@ name = "aiops-store"
 version = "0.1.0"
 dependencies = [
  "aiops-domain",
+ "proptest",
  "serde_json",
  "sqlx",
  "thiserror",
