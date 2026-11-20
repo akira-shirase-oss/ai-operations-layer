@@ -427,6 +427,60 @@ fn attribute_shape_is_bounded() {
     );
 }
 
+// White-hat S2-1: an identifier field carrying a credential shape is refused by name —
+// a stored [redacted] would corrupt the identifier, and the event itself is the leak.
+#[test]
+fn an_identifier_carrying_a_secret_is_refused_by_name() {
+    assert_eq!(
+        refused(WireEvent {
+            deployment: Some(format!(
+                "https://x:{}@github.com/o/r",
+                concat!("ghs_", "AAAAAAAA", "BBBBBBBB")
+            )),
+            ..started()
+        }),
+        (RefusalCode::InvalidValue, Some("deployment")),
+        "a URL credential in deployment is refused, not stored"
+    );
+    assert_eq!(
+        refused(WireEvent {
+            release: Some(format!("r1-{}", concat!("sk-", "abcdefgh", "ijklmnop"))),
+            ..started()
+        }),
+        (RefusalCode::InvalidValue, Some("release"))
+    );
+    assert_eq!(
+        refused(WireEvent {
+            model: Some(format!(
+                "m/{}",
+                concat!("xoxb-", "0123456789", "0123456789")
+            )),
+            ..step_started()
+        }),
+        (RefusalCode::InvalidValue, Some("model"))
+    );
+    assert_eq!(
+        refused(WireEvent {
+            request_id: Some(format!(
+                "req-{}",
+                concat!("ghp_", "AAAAAAAAAAAA", "BBBBBBBBBBBB")
+            )),
+            ..started()
+        }),
+        (RefusalCode::InvalidValue, Some("request_id"))
+    );
+    // Ordinary identifiers still pass.
+    assert!(
+        check(WireEvent {
+            release: Some("release/2024-11-20/publish".into()),
+            deployment: Some("us-east-1".into()),
+            request_id: Some("req-4bf92f35".into()),
+            ..started()
+        })
+        .is_ok()
+    );
+}
+
 #[test]
 fn cost_is_a_labeled_estimate_with_a_real_currency() {
     assert_eq!(
