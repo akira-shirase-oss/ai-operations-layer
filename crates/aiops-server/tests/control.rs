@@ -1183,3 +1183,42 @@ async fn a_flooded_lookup_gate_cannot_starve_controls(pool: PgPool) {
     );
     drop(held);
 }
+
+/// Review N6 (re-review): the lane is for digests the cache already holds as
+/// `Stale` — a well-shaped stranger is a `Miss` and must ride the shared gate
+/// like any other unknown key. Two of those on a control route can never hold
+/// the two reserved permits an operator needs mid-incident.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_well_shaped_stranger_never_touches_the_reserved_lane(pool: PgPool) {
+    let e = env_with(pool, |s| {
+        s.tokens = CredentialCache::new(Duration::ZERO, Duration::ZERO, 10_000);
+    })
+    .await;
+    let path = format!("/v1/projects/pilot/operations/{}/reconcile", op_hex(1));
+    let req = body("article:x", &json!({"published": false}));
+    // Warm the operator's token — its record goes Stale the instant it lands.
+    let r = send(&e.app, post_json(&path, &e.no_read, &req)).await;
+    assert_eq!(r.status, 403, "{:?}", r.body);
+
+    // The shared gate spent — as a stranger's flood leaves it. The lane is
+    // still free, but no stranger may reach it.
+    let held: Vec<_> = (0..4)
+        .map(|_| e.state.lookup_gate.try_acquire().unwrap())
+        .collect();
+
+    // A credential-shaped token the store has never seen: a Miss, not a
+    // lane candidate — it sheds on the shared gate (a pre-fix build would
+    // have ridden the free lane to a 401).
+    let stranger = format!("{TOKEN_PREFIX}{}", "x".repeat(43));
+    let r = send(&e.app, post_json(&path, &stranger, &req)).await;
+    assert_eq!(
+        r.status, 503,
+        "a Miss must shed on the shared gate, not hold a reserved permit: {:?}",
+        r.body
+    );
+
+    // The operator's Stale record still takes the lane — an honest 403.
+    let r = send(&e.app, post_json(&path, &e.no_read, &req)).await;
+    assert_eq!(r.status, 403, "{:?}", r.body);
+    drop(held);
+}

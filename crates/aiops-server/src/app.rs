@@ -279,20 +279,25 @@ impl AppState {
     {
         let stale = match cache.get(&digest) {
             Cached::Fresh(found) => return Ok(found),
-            Cached::Stale(v) if allow_stale => Some(v),
-            Cached::Stale(_) | Cached::Miss => None,
+            Cached::Stale(v) => Some(v),
+            Cached::Miss => None,
         };
-        // `!allow_stale` marks the control/admin callers — the paths that must
-        // resolve fresh or fail. They take the reserved lane, unreachable by a
-        // random-token flood on the shared gate (white-hat N6).
-        let gate = if allow_stale {
-            &self.lookup_gate
-        } else {
+        // The reserved lane is for a credential the cache already knows —
+        // a digest it holds as `Stale` — on a path that cannot serve that
+        // record (`allow_stale == false`). A stranger with a well-shaped
+        // token is a `Miss` and rides the shared gate, so a random-token
+        // flood can never hold the lane an operator needs (review N6).
+        let gate = if !allow_stale && stale.is_some() {
             &self.privileged_lookup_gate
+        } else {
+            &self.lookup_gate
         };
         let Ok(_permit) = gate.try_acquire() else {
             Metrics::add(&self.metrics.auth_shed, 1);
-            return stale.map(Some).ok_or(ApiError::Overloaded);
+            return match stale {
+                Some(v) if allow_stale => Ok(Some(v)),
+                _ => Err(ApiError::Overloaded),
+            };
         };
         match tokio::time::timeout(Duration::from_secs(2), lookup()).await {
             Ok(Ok(found)) => {
