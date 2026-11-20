@@ -210,11 +210,11 @@ impl AppState {
             lookup_gate: Arc::new(Semaphore::new(config.auth_lookups_in_flight)),
             privileged_lookup_gate: Arc::new(Semaphore::new(PRIVILEGED_LOOKUPS)),
             ingest_keys: CredentialCache::new(
-                Duration::from_secs(30),
+                config.credential_ttl,
                 Duration::from_secs(5),
                 10_000,
             ),
-            tokens: CredentialCache::new(Duration::from_secs(30), Duration::from_secs(5), 10_000),
+            tokens: CredentialCache::new(config.credential_ttl, Duration::from_secs(5), 10_000),
             ingest_buckets: Buckets::new(config.ingest_events_per_sec, config.ingest_burst_events),
             query_buckets: Buckets::new(config.query_requests_per_sec, config.query_burst),
             names: RwLock::new(HashMap::new()),
@@ -246,7 +246,7 @@ impl AppState {
                 }
                 m
             },
-            control_buckets: Buckets::new(control::CONTROL_RATE, control::CONTROL_BURST),
+            control_buckets: Buckets::new(config.control_requests_per_sec, config.control_burst),
             control_gate: Semaphore::new(control::DRIVE_MAX),
             control_wake: Notify::new(),
             limits: Limits::default(),

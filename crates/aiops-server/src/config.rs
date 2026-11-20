@@ -101,6 +101,14 @@ pub struct Config {
     /// (D-031) — a retry submits a NEW job under a NEW `op_key` with the business key
     /// in its input; reconcile reads the effect's authority, not the runner's state.
     pub control_durable_runner: Option<ControlRunner>,
+    /// `AIOPS_CREDENTIAL_TTL_SECS`: how long a credential lookup stays fresh —
+    /// and the bound on a peer-process revocation taking effect (D-034).
+    pub credential_ttl: Duration,
+    /// `AIOPS_CONTROL_REQUESTS_PER_SEC` / `AIOPS_CONTROL_BURST`: the control
+    /// surface's own bucket (defaults `control::CONTROL_RATE/_BURST`).
+    pub control_requests_per_sec: u32,
+    /// See [`Config::control_requests_per_sec`].
+    pub control_burst: u32,
     /// Accepted connections at most.
     pub max_connections: usize,
     /// A response write making no progress for this long ends its connection (review N3).
@@ -135,6 +143,9 @@ impl Config {
             retention_sweep_every: Some(Duration::from_secs(300)),
             shutdown_grace: Duration::from_secs(10),
             header_read_timeout: Duration::from_secs(10),
+            credential_ttl: Duration::from_secs(30),
+            control_requests_per_sec: 5,
+            control_burst: 10,
             max_connections: 2_048,
             write_stall_timeout: Duration::from_secs(10),
             max_requests_per_connection: 1_000,
@@ -177,6 +188,9 @@ impl Config {
         let mut stall_secs = cfg.write_stall_timeout.as_secs();
         let mut per_conn = u64::from(cfg.max_requests_per_connection);
         let mut lifetime_secs = cfg.connection_lifetime.as_secs();
+        let mut credential_secs = cfg.credential_ttl.as_secs();
+        let mut control_rate = u64::from(cfg.control_requests_per_sec);
+        let mut control_burst = u64::from(cfg.control_burst);
         num("AIOPS_INGEST_MAX_IN_FLIGHT", &mut in_flight);
         num("AIOPS_INGEST_BODY_BUDGET_MIB", &mut body_budget_mib);
         num("AIOPS_INGEST_EVENTS_PER_SEC", &mut rate);
@@ -190,6 +204,9 @@ impl Config {
         num("AIOPS_WRITE_STALL_TIMEOUT_SECS", &mut stall_secs);
         num("AIOPS_MAX_REQUESTS_PER_CONNECTION", &mut per_conn);
         num("AIOPS_CONNECTION_LIFETIME_SECS", &mut lifetime_secs);
+        num("AIOPS_CREDENTIAL_TTL_SECS", &mut credential_secs);
+        num("AIOPS_CONTROL_REQUESTS_PER_SEC", &mut control_rate);
+        num("AIOPS_CONTROL_BURST", &mut control_burst);
         let to_u32 = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
         cfg.ingest_max_in_flight = usize::try_from(in_flight).unwrap_or(usize::MAX);
         cfg.ingest_body_budget_kib =
@@ -205,6 +222,9 @@ impl Config {
         cfg.write_stall_timeout = Duration::from_secs(stall_secs);
         cfg.max_requests_per_connection = to_u32(per_conn);
         cfg.connection_lifetime = Duration::from_secs(lifetime_secs);
+        cfg.credential_ttl = Duration::from_secs(credential_secs);
+        cfg.control_requests_per_sec = to_u32(control_rate);
+        cfg.control_burst = to_u32(control_burst);
         if let Ok(v) = std::env::var("AIOPS_LISTEN") {
             match v.parse() {
                 Ok(addr) => cfg.listen = addr,
