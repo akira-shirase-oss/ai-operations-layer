@@ -12,6 +12,7 @@ mod common;
 use std::time::Duration;
 
 use aiops_domain::wire::WireEvent;
+use aiops_server::auth::Buckets;
 use axum::body::Body;
 use axum::http::Request;
 use common::{
@@ -40,6 +41,27 @@ async fn ingest_needs_a_valid_ingest_key(pool: PgPool) {
     }
     let r = send(&e.app, post_ingest(&e.ingest_key, body)).await;
     assert_eq!(r.status, 200, "{}", r.body);
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_malformed_flood_still_spends_the_ingest_budget(pool: PgPool) {
+    // The rate charge used to sit AFTER the full body parse: bodies that never
+    // parsed spent nothing — an unbounded, free way to burn a MiB of work per
+    // call (white-hat S3). Admission now costs a token before the body is read.
+    let e = env_with(pool, |s| {
+        s.ingest_buckets = Buckets::new(1, 3);
+    })
+    .await;
+    let mut statuses = Vec::new();
+    for _ in 0..4 {
+        let r = send(&e.app, post_ingest(&e.ingest_key, "{not json")).await;
+        statuses.push(r.status);
+    }
+    assert_eq!(
+        statuses,
+        [400, 400, 400, 429],
+        "a burst of three, then the budget says no: {statuses:?}"
+    );
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]

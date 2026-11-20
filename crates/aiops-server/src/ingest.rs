@@ -34,6 +34,13 @@ pub async fn ingest(
         Metrics::add(&app.metrics.shed, 1);
         return Err(ApiError::Overloaded);
     };
+    // Admission costs one token BEFORE the body is read: a flood of large or
+    // unparseable bodies spends budget immediately rather than parsing a MiB
+    // for free (white-hat S3). The remaining events are charged after parsing.
+    if let Err(retry_after_secs) = app.ingest_buckets.take(key.id, 1, app.now().unix_micros()) {
+        Metrics::add(&app.metrics.rate_limited, 1);
+        return Err(ApiError::RateLimited { retry_after_secs });
+    }
     let (body, _bytes_permit) = read_body(&app, &headers, body).await?;
     let received_at = app.now();
 
@@ -46,10 +53,11 @@ pub async fn ingest(
     }
     let source = validate_source(&raw.source, &app.limits)
         .map_err(|r| ApiError::InvalidSource(r.field.unwrap_or("source")))?;
+    // The admission token already covered the first event's share; charge the rest.
     let count = u32::try_from(raw.events.len()).unwrap_or(u32::MAX);
     if let Err(retry_after_secs) =
         app.ingest_buckets
-            .take(key.id, count.max(1), received_at.unix_micros())
+            .take(key.id, count.saturating_sub(1), received_at.unix_micros())
     {
         Metrics::add(&app.metrics.rate_limited, 1);
         return Err(ApiError::RateLimited { retry_after_secs });
