@@ -51,6 +51,10 @@ jobs:
       # Fuzz smoke: every outside-input parser's never-panics target, bounded
       # at 512 cases each (seed corpora run deterministically inside the tests).
       - run: PROPTEST_CASES=512 cargo test --workspace --locked --test fuzz
+      # The labelled redaction corpus — the review's Ruling: 100% recall on
+      # MUST_REDACT, zero-budget MUST_KEEP, the random-base64 ≥8-byte property
+      # and the Unicode never-panics property, all at 512 cases.
+      - run: PROPTEST_CASES=512 cargo test -p aiops-domain --locked --test redaction_corpus
       # Includes the tests/attacks pentest suite against the postgres service.
       - run: cargo test --workspace --locked
       - run: scripts/check-architecture.sh
