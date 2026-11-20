@@ -30,12 +30,22 @@ async function signOut(page: Page) {
 
 test('a read token is refused and the refusal itself lands in the log', async ({ page }) => {
 	const problems = watch(page);
+	// The refusal is one request, not a storm: a 403 feeding back into the fetch
+	// loop once crashed this page with effect_update_depth_exceeded.
+	let fetches = 0;
+	await page.route('**/v1/admin/audit**', (r) => {
+		fetches++;
+		return r.continue();
+	});
 	await signIn(page, TOKEN);
 	await page.getByRole('link', { name: 'Audit' }).click();
 	await expect(page.getByRole('heading', { name: 'Audit' })).toBeVisible();
 	// The refusal is explained, not a blank page — and the call wrote the denial row.
 	await expect(page.getByText(/needs the/)).toContainText('admin');
+	await page.waitForTimeout(500);
+	expect(fetches, 'the audit page refetches in a loop').toBe(1);
 	expect(problems).toEqual([]);
+	await page.unroute('**/v1/admin/audit**');
 
 	await signOut(page);
 	await signIn(page, ADMIN);

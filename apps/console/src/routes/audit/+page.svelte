@@ -20,8 +20,11 @@
 	let to = $state('');
 	let appliedParams = $state(new URLSearchParams());
 
-	function query(cursor: [string, string] | null): string {
-		const p = new URLSearchParams(appliedParams);
+	// The params travel as an argument, never through $state: the effect reads only
+	// the five filter fields — reading appliedParams back here once made the effect
+	// feed its own write (effect_update_depth_exceeded + a 403 request storm).
+	function query(params: URLSearchParams, cursor: [string, string] | null): string {
+		const p = new URLSearchParams(params);
 		p.set('limit', '100');
 		if (cursor) {
 			p.set('before_time', cursor[0]);
@@ -42,7 +45,7 @@
 		rows = [];
 		next = null;
 		moreError = null;
-		api<AuditPage>(query(null)).then((r) => {
+		api<AuditPage>(query(p, null)).then((r) => {
 			result = r;
 			if (r.state === 'ok') {
 				rows = r.data.audit;
@@ -54,7 +57,7 @@
 
 	function older() {
 		if (!next) return;
-		api<AuditPage>(query(next)).then((r) => {
+		api<AuditPage>(query(appliedParams, next)).then((r) => {
 			if (r.state === 'ok') {
 				rows = [...rows, ...r.data.audit];
 				next = r.data.next;
