@@ -34,9 +34,10 @@
 		if (r.state === 'ok' || r.state === 'forbidden') {
 			// 403 is a verdict too: the token is real, just narrower than this ask —
 			// the destination pages render their own denial (audit log, a project).
+			// No reload: a queued navigation can land after the user's next click and
+			// wipe it out — mounting the children loads their data with the token.
 			draft = '';
 			signedIn = true;
-			location.reload();
 			return;
 		}
 		setToken(null);
