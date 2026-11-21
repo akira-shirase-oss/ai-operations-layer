@@ -232,6 +232,10 @@ async fn a_stuck_query_path_never_delays_ingest_or_audit_at_the_api(pool: PgPool
         )
         .unwrap(),
     );
+    // In-process env: no listener, no gap — modelled healthy.
+    state
+        .revocation_healthy
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let app = aiops_server::router(state);
     // Warm the credential and project caches, as a running collector's are.
     let warm = |n: u32| {

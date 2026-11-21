@@ -4,6 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
@@ -107,6 +108,10 @@ pub struct CredentialCache<V> {
     stale_for: Duration,
     positive: Mutex<Fifo<V>>,
     negative: Mutex<Fifo<()>>,
+    /// Bumped by every `remove`/`clear`: a lookup whose store read started
+    /// before an eviction may not write its (pre-eviction) answer back
+    /// (review S3's re-insert race).
+    generation: AtomicU64,
     /// Both maps' wait and hold times (D-026).
     pub lock_stats: LockStats,
 }
@@ -119,13 +124,25 @@ impl<V: Clone> CredentialCache<V> {
             stale_for: Duration::from_secs(300),
             positive: Mutex::new(Fifo::new(capacity)),
             negative: Mutex::new(Fifo::new(capacity)),
+            generation: AtomicU64::new(0),
             lock_stats: LockStats::default(),
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// The configured fresh window — `resolve` shortens it while the
+    /// revocation listener's health is uncertain (review V1).
+    pub fn ttl(&self) -> Duration {
+        self.ttl
     }
 
     /// Drop any cached answer for a digest — the revocation path: a revoked
     /// credential must stop working now, not when its TTL runs out (D-034).
     pub fn remove(&self, key: &[u8; 32]) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
         if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
             pos.remove(key);
         }
@@ -139,6 +156,7 @@ impl<V: Clone> CredentialCache<V> {
     /// indistinguishable from none, so the only safe resume is empty
     /// (D-034).
     pub fn clear(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
         if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
             pos.map.clear();
             pos.order.clear();
@@ -149,12 +167,15 @@ impl<V: Clone> CredentialCache<V> {
         }
     }
 
-    pub fn get(&self, key: &[u8; 32]) -> Cached<V> {
+    /// `fresh_ttl` is the caller's fresh window — the revocation listener's
+    /// health shrinks it (an unhealthy channel means entries may already
+    /// hold a revoked answer; review V1).
+    pub fn get(&self, key: &[u8; 32], fresh_ttl: Duration) -> Cached<V> {
         if let Some(pos) = self.lock_stats.lock(&self.positive)
             && let Some((v, at)) = pos.map.get(key)
         {
             let age = at.elapsed();
-            if age < self.ttl {
+            if age < fresh_ttl {
                 return Cached::Fresh(Some(v.clone()));
             }
             if age < self.ttl + self.stale_for {
@@ -163,11 +184,21 @@ impl<V: Clone> CredentialCache<V> {
         }
         if let Some(neg) = self.lock_stats.lock(&self.negative)
             && let Some(((), at)) = neg.map.get(key)
-            && at.elapsed() < self.negative_ttl
+            && at.elapsed() < self.negative_ttl.min(fresh_ttl)
         {
             return Cached::Fresh(None);
         }
         Cached::Miss
+    }
+
+    /// Write the answer a lookup returned — but only if nothing evicted or
+    /// cleared since `seen_gen` was read: a snapshot taken before a
+    /// revocation must not put the row back (review S3).
+    pub fn put_if_same(&self, key: [u8; 32], value: Option<V>, seen_gen: u64) {
+        if self.generation() != seen_gen {
+            return;
+        }
+        self.put(key, value);
     }
 
     pub fn put(&self, key: [u8; 32], value: Option<V>) {
@@ -255,23 +286,29 @@ mod tests {
             cache.put([n; 32], None); // a flood of unknown keys
         }
         assert_eq!(
-            cache.get(&[1; 32]),
+            cache.get(&[1; 32], Duration::from_secs(30)),
             Cached::Fresh(Some(1)),
             "a valid key survives the flood"
         );
-        assert_eq!(cache.get(&[199; 32]), Cached::Fresh(None));
         assert_eq!(
-            cache.get(&[10; 32]),
+            cache.get(&[199; 32], Duration::from_secs(30)),
+            Cached::Fresh(None)
+        );
+        assert_eq!(
+            cache.get(&[10; 32], Duration::from_secs(30)),
             Cached::Miss,
             "the oldest unknown key was evicted"
         );
         cache.put([2; 32], Some(2));
         cache.put([3; 32], Some(3));
         assert_eq!(
-            cache.get(&[1; 32]),
+            cache.get(&[1; 32], Duration::from_secs(30)),
             Cached::Miss,
             "oldest valid entry evicted first"
         );
-        assert_eq!(cache.get(&[3; 32]), Cached::Fresh(Some(3)));
+        assert_eq!(
+            cache.get(&[3; 32], Duration::from_secs(30)),
+            Cached::Fresh(Some(3))
+        );
     }
 }

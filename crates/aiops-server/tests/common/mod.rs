@@ -384,6 +384,12 @@ pub(crate) async fn env_with_store(store: Store, tune: impl FnOnce(&mut AppState
     let other_reader = token("eve", &["read"], "other").await;
     let admin = token("ops", &["admin"], "pilot").await;
     let mut state = AppState::new(store.clone(), Config::local(""), system_clock(), None).unwrap();
+    // The in-process env has no listener — and no gap to guard: its revokes
+    // evict synchronously. `healthy` models exactly that (review V1), so it
+    // is set, not the default.
+    state
+        .revocation_healthy
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     tune(&mut state);
     let state = Arc::new(state);
     Env {

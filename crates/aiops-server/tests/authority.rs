@@ -203,6 +203,10 @@ async fn a_runner_that_is_down_or_refuses_the_key_is_named_as_such(pool: PgPool)
             aiops_server::AppState::new(e.store.clone(), cfg, aiops_server::system_clock(), None)
                 .unwrap(),
         );
+        // In-process env: no listener, no gap — modelled healthy.
+        state
+            .revocation_healthy
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         aiops_server::router(state)
     };
     let (_, a) = authority(&e2, &e.reader, &real).await;

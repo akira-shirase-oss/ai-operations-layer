@@ -238,17 +238,21 @@ async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<IngestKey, 
     };
     let digest = hash(secret);
     let found = app
-        .resolve(&app.ingest_keys, digest, true, || {
-            app.store.find_ingest_key(&digest)
+        .resolve(&app.ingest_keys, digest, true, || async {
+            // A revoked row caches as a negative answer — never a positive
+            // entry the reserved lane could pick (review S3).
+            Ok(app
+                .store
+                .find_ingest_key(&digest)
+                .await?
+                .filter(|k| !k.revoked))
         })
         .await?;
-    match found {
-        Some(key) if !key.revoked => Ok(key),
-        _ => {
-            Metrics::add(&app.metrics.unauthenticated, 1);
-            Err(ApiError::Unauthenticated)
-        }
+    if let Some(key) = found {
+        return Ok(key);
     }
+    Metrics::add(&app.metrics.unauthenticated, 1);
+    Err(ApiError::Unauthenticated)
 }
 
 /// Visits every name an event carries, by kind, mutably (an over-budget one is rewritten).

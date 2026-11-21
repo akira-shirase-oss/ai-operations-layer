@@ -32,24 +32,22 @@ MUTANTS = {
         [
             e(
                 S / "ingest.rs",
-                """    match found {
-        Some(key) if !key.revoked => Ok(key),
-        _ => {
-            Metrics::add(&app.metrics.unauthenticated, 1);
-            Err(ApiError::Unauthenticated)
-        }
-    }""",
-                """    match found {
-        Some(key) if !key.revoked => Ok(key),
-        _ => Ok(IngestKey {
-            id: Uuid::nil(),
-            name: "forged".into(),
-            project_id: Uuid::nil(),
-            project_slug: "forged".into(),
-            opt_in_keys: vec![],
-            revoked: false,
-        }),
-    }""",
+                """    if let Some(key) = found {
+        return Ok(key);
+    }
+    Metrics::add(&app.metrics.unauthenticated, 1);
+    Err(ApiError::Unauthenticated)""",
+                """    if let Some(key) = found {
+        return Ok(key);
+    }
+    Ok(IngestKey {
+        id: Uuid::nil(),
+        name: "forged".into(),
+        project_id: Uuid::nil(),
+        project_slug: "forged".into(),
+        opt_in_keys: vec![],
+        revoked: false,
+    })""",
             )
         ],
         ["every_absent_or_malformed_credential_is_refused_everywhere"],
@@ -89,6 +87,39 @@ MUTANTS = {
             )
         ],
         ["a_peer_revoke_is_refused_on_the_next_request"],
+    ),
+    # The channel's recovery is four legs — gap detection, the resync's
+    # catch-up eviction, live NOTIFY on the re-LISTENed conn, and `resolve`
+    # distrusting the cache while unproven — and each can independently
+    # produce the 401 this test asserts, so a mutant that cuts only one
+    # stays green (measured: three did). Weaken exactly the tested
+    # protection — "a dead backend must not strand a revocation" — by
+    # cutting every eviction path at once: the catch-up digests are
+    # fetched but dropped, handle() is deaf to the re-LISTENed conn's
+    # notices, and resolve trusts the entry for its full TTL as if the
+    # channel were healthy. Detection still runs (the gap counter proves
+    # the test reached its scenario); eviction is what's gone.
+    "listener-gap-not-resynced": (
+        [
+            e(
+                S / "notify.rs",
+                """            for digest in &digests {
+                state.tokens.remove(digest);
+            }""",
+                """            let _ = &digests;""",
+            ),
+            e(
+                S / "notify.rs",
+                "fn handle(state: &AppState, payload: &str) {",
+                "fn handle(state: &AppState, payload: &str) {\n    let _ = (state, payload);\n    return;",
+            ),
+            e(
+                S / "app.rs",
+                "        let healthy = self.revocation_healthy.load(Ordering::Relaxed);",
+                "        let healthy = true;",
+            ),
+        ],
+        ["a_revocation_survives_the_listener_dying"],
     ),
     # The CLI refuses contradictory credential shapes before minting.
     "cli-mints-contradictions": (

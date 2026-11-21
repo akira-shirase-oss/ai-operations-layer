@@ -1,6 +1,7 @@
 //! `aiops-server serve | migrate | admin …`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use aiops_server::retention::{self, SweepPlan};
 use aiops_server::serve::{self, ServeLimits};
@@ -164,7 +165,14 @@ Ok(t) => {
         });
     }
     serve::run(listener, app, limits, cancel.clone()).await?;
-    tracker.wait().await;
+    // Tracked tasks must not hold shutdown open forever (review S3): after
+    // the deadline the process exits and the supervisor reaps the rest.
+    if tokio::time::timeout(Duration::from_secs(15), tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!("shutdown deadline: exiting with tracked tasks still running");
+    }
     Ok(())
 }
 

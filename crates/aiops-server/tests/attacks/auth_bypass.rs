@@ -190,6 +190,89 @@ async fn a_peer_revoke_is_refused_on_the_next_request(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_revocation_survives_the_listener_dying(pool: PgPool) {
+    // Review V1: the LISTEN connection is a separate backend — killing it
+    // must not strand revocations. `try_recv` surfaces the dead conn as
+    // `Ok(None)`, the watcher's resync evicts by digest, and the next
+    // request dies in 2 s — never the 30 s cache TTL.
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let (token, token_id) = create_token(&s.url, "reader", &["read"], &["pilot"]);
+    assert_eq!(
+        get(&s.base, "/v1/projects/pilot/operations", Some(&token))
+            .await
+            .0,
+        200
+    );
+    // Kill ONLY the listener's backend — the serving pools keep working.
+    // `stack` waited on /readyz, which already gates on the listener.
+    // `pg_terminate_backend` must never appear in a WHERE: Postgres does
+    // not short-circuit `AND`, so the call can evaluate on every row in
+    // pg_stat_activity — including this query's own backend (it did, and
+    // took the suite with it). Resolve the pid first, terminate by value.
+    let mut pid: Option<i32> = None;
+    for _ in 0..20 {
+        pid = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity
+             WHERE application_name = 'aiops-revocation-listener'
+               AND datname = current_database()",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        if pid.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let pid = pid.expect("the listener backend never appeared in pg_stat_activity");
+    let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+        .bind(pid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(killed, "exactly the listener backend was terminated");
+    // Prove the kill was observed before revoking: the channel's gap
+    // counter is on /v1/collector/stats — the admin scope reads it. A gap
+    // the server never detected is a different (and worse) failure than a
+    // lost eviction.
+    let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
+    let gap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
+        if stats["revocation"]["gaps"].as_u64().unwrap_or(0) >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < gap_deadline,
+            "the dead listener never registered as a gap: {stats:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    // Revoke while the channel is recovering: whether the trigger's NOTIFY
+    // hits the dead conn or the just-re-LISTENed one, the collector must
+    // not serve the credential past the deadline.
+    let (ok, _, err) = cli_status(&s.url, &["admin", "revoke-token", &token_id]);
+    assert!(ok, "revoke-token: {err}");
+    assert!(
+        crate::common::is_revoked(&pool, "api_tokens", &token_id).await,
+        "the CLI revoke landed in the ledger"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let (status, _) = get(&s.base, "/v1/projects/pilot/operations", Some(&token)).await;
+        if status == 401 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a revoke in the listener gap never landed — still {status} after 2 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn the_cli_will_not_mint_a_contradictory_admin_or_scopeless_token(pool: PgPool) {
     let s = stack(&pool, &[]).await;
     create_project(&s.url, "pilot");

@@ -642,18 +642,44 @@ async fn pool(
 /// the payload is the revoked credential digest as lowercase hex.
 pub const REVOCATION_CHANNEL: &str = "aiops_credential_revoked";
 
+/// The `application_name` the revocation listener connects under — how a
+/// test (or an operator) finds exactly its backend in `pg_stat_activity`.
+pub const REVOCATION_LISTENER_NAME: &str = "aiops-revocation-listener";
+
 /// A dedicated LISTEN connection for credential-revocation notices, off every
 /// pool: a saturated serving pool can never delay an eviction. Notifications
 /// die with the connection — a caller re-establishing one must clear its
 /// credential caches outright rather than trust anything cached in the gap.
+/// Connect and LISTEN are bounded (review V1): a dead or half-open endpoint
+/// must not hang the watcher.
 pub async fn revocation_listener(database_url: &str) -> Result<PgListener, StoreError> {
-    let mut listener = PgListener::connect(database_url)
+    let options = database_url
+        .parse::<PgConnectOptions>()
+        .map_err(StoreError::Unavailable)?
+        .application_name(REVOCATION_LISTENER_NAME);
+    let pool = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .max_lifetime(None)
+            .idle_timeout(None)
+            .connect_with(options),
+    )
+    .await
+    .map_err(|_| StoreError::Unavailable(sqlx::Error::PoolTimedOut))?
+    .map_err(StoreError::Unavailable)?;
+    let mut listener = PgListener::connect_with(&pool)
         .await
         .map_err(StoreError::Unavailable)?;
-    listener
-        .listen(REVOCATION_CHANNEL)
-        .await
-        .map_err(StoreError::Unavailable)?;
+    // The pool is the listener's own — nothing else ever closes it.
+    listener.ignore_pool_close_event(true);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        listener.listen(REVOCATION_CHANNEL),
+    )
+    .await
+    .map_err(|_| StoreError::Unavailable(sqlx::Error::PoolTimedOut))?
+    .map_err(StoreError::Unavailable)?;
     Ok(listener)
 }
 
@@ -867,6 +893,30 @@ impl Store {
             expires_at: from_odt(r.get(4)),
             revoked: r.get(5),
         }))
+    }
+
+    /// A self-NOTIFY on the revocation channel through the serving pool: the
+    /// listener proves the whole path — pool, channel, listener connection —
+    /// is live by observing it (review V1). The payload is `heartbeat`.
+    pub async fn revocation_heartbeat(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT pg_notify($1, 'heartbeat')")
+            .bind(REVOCATION_CHANNEL)
+            .execute(&self.query)
+            .await?;
+        Ok(())
+    }
+
+    /// Every revoked token digest — the revocation listener's catch-up read
+    /// after a missed-notification gap (review V1): evict exactly these and
+    /// keep everything else, instead of clear-all.
+    pub async fn revoked_token_digests(&self) -> Result<Vec<[u8; 32]>, StoreError> {
+        let rows = sqlx::query("SELECT token_hash FROM api_tokens WHERE revoked_at IS NOT NULL")
+            .fetch_all(&self.auth)
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| <[u8; 32]>::try_from(r.get::<Vec<u8>, _>(0).as_slice()).ok())
+            .collect())
     }
 
     pub async fn project_by_slug(&self, slug: &str) -> Result<Option<Project>, StoreError> {

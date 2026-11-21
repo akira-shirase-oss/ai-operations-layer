@@ -195,6 +195,11 @@ fn ingest_request(key: &str, body: String) -> axum::http::Request<axum::body::Bo
 async fn measure(store: &Store, key: &str, tasks: u32, batches: u32, offset: u32) -> Value {
     let state =
         Arc::new(AppState::new(store.clone(), Config::local(""), system_clock(), None).unwrap());
+    // In-process env: no listener, no gap — in-process revokes evict
+    // synchronously, so the channel is modelled healthy.
+    state
+        .revocation_healthy
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let app = router(state.clone());
     // Warm the credential cache and the name registry, outside the measurement.
     let warm = send(&app, ingest_request(key, reference_batch(offset, 0, 50))).await;

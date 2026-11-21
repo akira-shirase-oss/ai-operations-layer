@@ -44,14 +44,22 @@ pub async fn authenticate_with(
         return Err(ApiError::Unauthenticated);
     };
     let digest = hash(secret);
+    let now = app.now();
     let found = app
-        .resolve(&app.tokens, digest, allow_stale, || {
-            app.store.find_token(&digest)
+        .resolve(&app.tokens, digest, allow_stale, || async {
+            // A revoked or expired row caches as a negative answer — never
+            // a positive entry the reserved lane could pick (review S3).
+            Ok(app
+                .store
+                .find_token(&digest)
+                .await?
+                .filter(|t| !t.revoked && t.expires_at > now))
         })
         .await?;
-    let now = app.now();
     match found {
-        Some(token) if !token.revoked && token.expires_at > now => {
+        // Expiry is time-dependent — a stale-cached token may have crossed
+        // it since the lookup wrote the entry, so it is re-checked here.
+        Some(token) if token.expires_at > now => {
             if let Err(retry_after_secs) = buckets.take(token.id, 1, now.unix_micros()) {
                 Metrics::add(&app.metrics.rate_limited, 1);
                 return Err(ApiError::RateLimited { retry_after_secs });

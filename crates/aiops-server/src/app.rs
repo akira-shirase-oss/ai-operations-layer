@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -64,6 +64,17 @@ pub struct Metrics {
     pub auth_shed: AtomicU64,
 }
 
+/// The revocation channel's health, surfaced by `/readyz` and stats (V1).
+#[derive(Serialize)]
+pub struct RevocationView {
+    /// LISTEN up and a heartbeat seen inside the window.
+    pub healthy: bool,
+    /// Notices acted on (evictions + clears + heartbeats).
+    pub notices: u64,
+    /// Connection gaps recovered from (each cost a catch-up read).
+    pub gaps: u64,
+}
+
 #[derive(Serialize)]
 pub struct MetricsView {
     pub batches: u64,
@@ -81,6 +92,7 @@ pub struct MetricsView {
     pub auth_shed: u64,
     /// Wait and hold times of the in-process locks (D-026).
     pub locks: LocksView,
+    pub revocation: RevocationView,
 }
 
 /// The in-process locks: the ingest path's (the name registries — the map of projects,
@@ -103,7 +115,7 @@ impl Metrics {
         counter.fetch_add(n, Ordering::Relaxed);
     }
 
-    pub fn view(&self, locks: LocksView) -> MetricsView {
+    pub fn view(&self, locks: LocksView, revocation: RevocationView) -> MetricsView {
         let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
         MetricsView {
             batches: g(&self.batches),
@@ -120,6 +132,7 @@ impl Metrics {
             store_unavailable: g(&self.store_unavailable),
             auth_shed: g(&self.auth_shed),
             locks,
+            revocation,
         }
     }
 }
@@ -173,6 +186,15 @@ pub struct AppState {
     /// Wakes the control executor when a retry commits `authorized`; its 1 s tick is the
     /// backstop for a wake lost while a pass was running.
     pub control_wake: Notify,
+    /// Whether the revocation channel is live: set by [`crate::notify`] on a
+    /// confirmed LISTEN + heartbeat, cleared on every gap. While false,
+    /// `resolve` trusts cache entries for seconds and serves nothing stale
+    /// (review V1).
+    pub revocation_healthy: AtomicBool,
+    /// Notices the listener acted on and gaps it recovered — the
+    /// `/v1/collector/stats` and `/readyz` signal for the channel (V1).
+    pub revocation_notices: AtomicU64,
+    pub revocation_gaps: AtomicU64,
 }
 
 /// Runner reads in flight at most; past it the console is told "busy".
@@ -249,6 +271,9 @@ impl AppState {
             control_buckets: Buckets::new(config.control_requests_per_sec, config.control_burst),
             control_gate: Semaphore::new(control::DRIVE_MAX),
             control_wake: Notify::new(),
+            revocation_healthy: AtomicBool::new(false),
+            revocation_notices: AtomicU64::new(0),
+            revocation_gaps: AtomicU64::new(0),
             limits: Limits::default(),
             store,
             config,
@@ -277,7 +302,20 @@ impl AppState {
         V: Clone,
         Fut: Future<Output = Result<Option<V>, aiops_store::StoreError>>,
     {
-        let stale = match cache.get(&digest) {
+        // While the revocation channel's health is uncertain, entries are
+        // trusted for seconds, not the full TTL — the window can only
+        // shrink, never stretch past the configured TTL — and nothing
+        // stale is ever served: a silent listener gap is exactly when a
+        // cached answer may already be revoked (review V1). A stale entry
+        // still counts for the reserved lane: it is a known credential,
+        // worth a fresh read even while the channel is unproven (N6).
+        let healthy = self.revocation_healthy.load(Ordering::Relaxed);
+        let fresh_for = if healthy {
+            cache.ttl()
+        } else {
+            cache.ttl().min(Duration::from_secs(2))
+        };
+        let stale = match cache.get(&digest, fresh_for) {
             Cached::Fresh(found) => return Ok(found),
             Cached::Stale(v) => Some(v),
             Cached::Miss => None,
@@ -295,13 +333,16 @@ impl AppState {
         let Ok(_permit) = gate.try_acquire() else {
             Metrics::add(&self.metrics.auth_shed, 1);
             return match stale {
-                Some(v) if allow_stale => Ok(Some(v)),
+                Some(v) if allow_stale && healthy => Ok(Some(v)),
                 _ => Err(ApiError::Overloaded),
             };
         };
+        let seen_gen = cache.generation();
         match tokio::time::timeout(Duration::from_secs(2), lookup()).await {
             Ok(Ok(found)) => {
-                cache.put(digest, found.clone());
+                // A snapshot read before an eviction landed must not put it
+                // back (review S3's re-insert race).
+                cache.put_if_same(digest, found.clone(), seen_gen);
                 Ok(found)
             }
             Ok(Err(e)) => Err(e.into()),
@@ -315,16 +356,23 @@ impl AppState {
 
     /// Every counter, with the locks' wait and hold times.
     pub fn metrics_view(&self) -> MetricsView {
-        self.metrics.view(LocksView {
-            names_map: self.names_map_lock.view(),
-            names_shared: self.names_shared_lock.view(),
-            names_exclusive: self.names_exclusive_lock.view(),
-            ingest_key_cache: self.ingest_keys.lock_stats.view(),
-            ingest_rate_limit: self.ingest_buckets.lock_stats.view(),
-            token_cache: self.tokens.lock_stats.view(),
-            query_rate_limit: self.query_buckets.lock_stats.view(),
-            project_cache: self.projects_lock.view(),
-        })
+        self.metrics.view(
+            LocksView {
+                names_map: self.names_map_lock.view(),
+                names_shared: self.names_shared_lock.view(),
+                names_exclusive: self.names_exclusive_lock.view(),
+                ingest_key_cache: self.ingest_keys.lock_stats.view(),
+                ingest_rate_limit: self.ingest_buckets.lock_stats.view(),
+                token_cache: self.tokens.lock_stats.view(),
+                query_rate_limit: self.query_buckets.lock_stats.view(),
+                project_cache: self.projects_lock.view(),
+            },
+            RevocationView {
+                healthy: self.revocation_healthy.load(Ordering::Relaxed),
+                notices: self.revocation_notices.load(Ordering::Relaxed),
+                gaps: self.revocation_gaps.load(Ordering::Relaxed),
+            },
+        )
     }
 
     pub fn remember_project(&self, project: &Project) {
@@ -342,18 +390,23 @@ async fn healthz() -> &'static str {
 }
 
 #[derive(Serialize)]
-struct Ready {
+struct Readyz {
     ready: bool,
     store: &'static str,
+    revocation_listener: &'static str,
 }
 
 async fn readyz(
     axum::extract::State(app): axum::extract::State<SharedState>,
-) -> (StatusCode, Json<Ready>) {
-    let ok = matches!(
+) -> (StatusCode, Json<Readyz>) {
+    let store_ok = matches!(
         tokio::time::timeout(Duration::from_secs(1), app.store.ping()).await,
         Ok(Ok(()))
     );
+    // A collector that cannot hear revocations is not ready: a revoke must
+    // die on the next request, and only a live channel promises that (V1).
+    let listener_ok = app.revocation_healthy.load(Ordering::Relaxed);
+    let ok = store_ok && listener_ok;
     let status = if ok {
         StatusCode::OK
     } else {
@@ -361,9 +414,10 @@ async fn readyz(
     };
     (
         status,
-        Json(Ready {
+        Json(Readyz {
             ready: ok,
-            store: if ok { "reachable" } else { "unreachable" },
+            store: if store_ok { "reachable" } else { "unreachable" },
+            revocation_listener: if listener_ok { "listening" } else { "degraded" },
         }),
     )
 }
