@@ -65,8 +65,9 @@ const DRIVE_BATCH: i64 = 64;
 const EXPECTED_STATE_MAX: usize = 4 * 1024;
 const BUSINESS_KEY_MAX: usize = 256;
 /// An authority answer's body at most — the host's status is the answer; the body is
-/// its detail. The deadline wraps send AND read together, so a host that answers but
-/// trickles its body cannot hold a control-gate slot open (white-hat S2-3).
+/// its detail. SEND is bounded by [`SUBMIT_DEADLINE`] and the body read separately
+/// by [`BODY_DRAIN`], so a host that answers then trickles holds a control-gate
+/// slot for at most their sum (white-hat S2-3).
 const AUTHORITY_BODY_MAX: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -178,12 +179,37 @@ impl ControlAdapter {
         }
     }
 
+    /// The submission reference the adapter wants persisted BEFORE its first
+    /// POST: for the Durable Runner the `op_key` is minted here so a re-drive
+    /// resubmits under the SAME key and the runner's own idempotence dedups
+    /// (white-hat N5). `None` where the host assigns its reference in the
+    /// answer (the reference host).
+    fn provisional_ref(&self, key: &str) -> Option<String> {
+        match self {
+            Self::ReferenceHost(_) => None,
+            Self::DurableRunner(_) => Some(format!(
+                "{key}-r{}",
+                &Uuid::new_v4().simple().to_string()[..8]
+            )),
+        }
+    }
+
     /// Resubmits the work under `key` — idempotent at the host's own authority (D-030),
-    /// bounded by [`SUBMIT_DEADLINE`].
-    async fn submit(&self, app: &AppState, key: &str) -> Result<SubmitRef, SubmitError> {
+    /// bounded by [`SUBMIT_DEADLINE`]. `persisted_ref` is the record's
+    /// `submitted_ref`, written before the first POST — the Durable Runner
+    /// submits under it so a re-drive cannot mint a second job (N5).
+    async fn submit(
+        &self,
+        app: &AppState,
+        key: &str,
+        persisted_ref: Option<&str>,
+    ) -> Result<SubmitRef, SubmitError> {
         match self {
             Self::ReferenceHost(h) => h.submit(app, key).await,
-            Self::DurableRunner(d) => d.submit(app, key).await,
+            Self::DurableRunner(d) => match persisted_ref {
+                Some(op_key) => d.submit(app, key, op_key).await,
+                None => Err(SubmitError::Transient("the op_key was not persisted")),
+            },
         }
     }
 }
@@ -391,11 +417,18 @@ impl DurableRunner {
             .is_some_and(|claimed| read.present == Some(claimed))
     }
 
-    /// `POST {runner}/jobs` with a NEW `op_key` and the business key in the input
-    /// (D-031). The new `op_key` is the submitted reference — the record's
-    /// `business_key` ↔ `submitted_ref` pair is the key mapping the decision keeps.
-    async fn submit(&self, app: &AppState, key: &str) -> Result<SubmitRef, SubmitError> {
-        let new_op_key = format!("{key}-r{}", &Uuid::new_v4().simple().to_string()[..8]);
+    /// `POST {runner}/jobs` with the record's persisted `op_key` and the
+    /// business key in the input (D-031). The `op_key` is the submitted
+    /// reference — the record's `business_key` ↔ `submitted_ref` pair is the
+    /// key mapping the decision keeps — and it is durable BEFORE this POST
+    /// (white-hat N5): a Transient or a crash re-drives the same key and the
+    /// runner's own idempotence refuses a second job.
+    async fn submit(
+        &self,
+        app: &AppState,
+        key: &str,
+        op_key: &str,
+    ) -> Result<SubmitRef, SubmitError> {
         let steps: Vec<Value> = DR_STEPS
             .iter()
             .map(|h| json!({"name": h, "handler": h}))
@@ -405,7 +438,7 @@ impl DurableRunner {
             serde_json::to_vec(&json!({"business_key": key})).unwrap_or_default(),
         );
         let job = json!({
-            "op_key": new_op_key,
+            "op_key": op_key,
             "spec": {"version": 1, "steps": steps, "input_b64": input_b64},
         });
         let url = format!("{}/jobs", self.runner_base);
@@ -447,7 +480,7 @@ impl DurableRunner {
         }
         .await;
         match result {
-            Ok((status, _)) if status.is_success() => Ok(SubmitRef(new_op_key)),
+            Ok((status, _)) if status.is_success() => Ok(SubmitRef(op_key.to_owned())),
             Ok((status, _)) if status.is_client_error() => {
                 Err(SubmitError::Rejected(status.as_u16()))
             }
@@ -1003,6 +1036,48 @@ async fn decide(
     Ok(())
 }
 
+/// `resolve_op_key`'s answer: the reference to submit under, or the reason
+/// there is nothing to submit with.
+enum OpKey {
+    /// The host assigns its reference in the answer — nothing to persist.
+    HostAssigned,
+    /// The record's `submitted_ref`, minted and persisted if it had none.
+    Persisted(String),
+    /// The record moved under us — leave it; the next pass re-reads it.
+    Abort,
+}
+
+/// The submission key, durable BEFORE the first POST (white-hat N5). The
+/// record's `submitted_ref` wins when it has one (a re-drive); otherwise the
+/// adapter's `provisional_ref` is minted and written to the record first —
+/// so a Transient or a crash re-runs this pass with the SAME `op_key` and
+/// the runner's own idempotence keeps it one job, never a second mint.
+async fn resolve_op_key(
+    app: &AppState,
+    record: &ControlRecord,
+    adapter: &ControlAdapter,
+    expect: &str,
+) -> OpKey {
+    if let Some(r) = &record.submitted_ref {
+        return OpKey::Persisted(r.clone());
+    }
+    let Some(minted) = adapter.provisional_ref(&record.business_key) else {
+        return OpKey::HostAssigned;
+    };
+    let patch = ControlPatch {
+        submitted_ref: Some(&minted),
+        ..ControlPatch::default()
+    };
+    match app
+        .store
+        .control_update(record.id, Some(expect), &patch)
+        .await
+    {
+        Ok(true) => OpKey::Persisted(minted),
+        _ => OpKey::Abort,
+    }
+}
+
 /// The `authorized|submitted → submitted → confirmed|observed_unknown` drive: submit
 /// under the business key (idempotent at the host, so a re-driven submit cannot double
 /// the effect), then read the effect back within the observation bound.
@@ -1025,7 +1100,19 @@ async fn drive_submit(app: &AppState, work: &ResumableControl, adapter: &Control
             .await;
         return;
     }
-    match adapter.submit(app, &record.business_key).await {
+    // The submission key is durable BEFORE the first POST (white-hat N5): a
+    // Transient after the write, or a crash mid-drive, re-runs this pass with
+    // the record's `submitted_ref` — the runner sees the same `op_key` and its
+    // own idempotence keeps it one job, never a second mint.
+    let op_key = match resolve_op_key(app, record, adapter, expect).await {
+        OpKey::Abort => return,
+        OpKey::HostAssigned => None,
+        OpKey::Persisted(k) => Some(k),
+    };
+    match adapter
+        .submit(app, &record.business_key, op_key.as_deref())
+        .await
+    {
         Ok(SubmitRef(reference)) => {
             let snapshot = json!({
                 "source": "submit",
