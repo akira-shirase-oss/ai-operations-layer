@@ -223,35 +223,79 @@ const SECRET_PARTS: &[&str] = &[
     "token",
 ];
 
-/// A `code` part names a credential only after one of these qualifiers —
-/// `auth_code`, `verification.code`, `recovery-code`, `otp_code`,
-/// `mfa.code`, `sms_code`, `reset_code`. Bare, or after an ordinary word,
-/// `code` is an identifier: `http.status_code`, `error_code`, `zip_code`,
-/// `status_code:404` (review round 6, A3 — the default attribute surface
-/// must survive `treat()`).
-const CODE_QUALIFIERS: &[&str] = &[
-    "auth",
-    "mfa",
-    "otp",
-    "recovery",
-    "reset",
-    "sms",
-    "verification",
+/// Whole names that LOOK credential-shaped but are not (review round 6,
+/// B1; round 7, N1/N6) — the closed safe list, matched on the name's
+/// parts (`status_code`, `status-code`, `status.code` and `statusCode`
+/// are the same name). This replaces the credential-word qualifier
+/// lists: seven rounds of "which words make `code`/`key`/`pass` a
+/// credential" each opened a new hole (`backup_code`, `security_code`,
+/// `device_code`, `login_code`, `access_code`, `oauth_code`,
+/// `one_time_code`, `2fa_code` slipped the seven-name qualifier list —
+/// N1), so the keep is now the CLOSED side. A `code`, `key` or `pass`
+/// name not listed here is a credential. Entries are justified in
+/// `docs/REDACTION-POLICY.md`.
+const NON_CREDENTIAL_NAMES: &[&[&str]] = &[
+    // `code` names that are operational identifiers, never credentials —
+    // `status_code:404`, `zip_code:90210`, an exit code. Any other
+    // `*code` is a credential (`backup_code`, `verification.code`, …).
+    &["status", "code"],
+    &["http", "status", "code"],
+    &["error", "code"],
+    &["exit", "code"],
+    &["reason", "code"],
+    &["result", "code"],
+    &["zip", "code"],
+    &["area", "code"],
+    &["postal", "code"],
+    &["country", "code"],
+    &["currency", "code"],
+    &["iso", "code"],
+    // Data-model and transport `*key` names (B1/N6): the project's own
+    // declared identifiers plus the real-world OTel names the review
+    // named — a Kafka record key and an S3 object key are content
+    // references, not secrets.
+    &["business", "key"],
+    &["cache", "key"],
+    &["foreign", "key"],
+    &["idempotency", "key"],
+    &["partition", "key"],
+    &["primary", "key"],
+    &["public", "key"],
+    &["sort", "key"],
+    &["aws", "s3", "key"],
+    &["messaging", "kafka", "message", "key"],
+    // `*pass` words that are not credentials (N6): `bypass` and
+    // `compass` end in `pass` and name no secret.
+    &["bypass"],
+    &["compass"],
 ];
 
-/// Key names that end in `key` without naming a credential — data-model
-/// and transport keys, not secrets (review round 6, B1). The WHOLE name
-/// decides: `stripe_key`/`hmac_key` still die; only these exact names
-/// keep.
-const KEY_NAME_SAFE_LIST: &[&str] = &[
-    "business_key",
-    "cache_key",
-    "foreign_key",
-    "idempotency_key",
-    "partition_key",
-    "primary_key",
-    "public_key",
-    "sort_key",
+/// The `name` of a `name<sep>value` segment in free text keeps its value
+/// ONLY under a name on the benign list (review round 7, N1) — every
+/// other name loses its value, whatever the value's shape. Multi-word
+/// names come from the `NON_CREDENTIAL` namespace (a declared non-credential
+/// name is benign in text too — except bare `code`, whose free-text value
+/// is too ambiguous to keep); these are the single-word additions, the
+/// operational vocabulary an error message legitimately carries. Each is
+/// justified in `docs/REDACTION-POLICY.md`.
+const BENIGN_WORDS: &[&str] = &[
+    "attempt", "count", "duration", "error", "host", "id", "job", "key", "message", "method",
+    "name", "path", "port", "reason", "retry", "route", "sha256", "state", "status", "timeout",
+    "url", "user",
+];
+
+/// Multi-word benign names that are not credential-shaped at all — the
+/// `NON_CREDENTIAL` list covers the credential-looking ones.
+const BENIGN_TEXT_NAMES: &[&[&str]] = &[&["duration", "ms"]];
+
+/// URL schemes — a scheme's `:` never opens a `name:value` pair
+/// (`https://h.io` is a URL, not a value; review round 7, N1). Only the
+/// schemes operators' messages actually carry are listed, and a scheme
+/// exempts ONLY before `://` — `access_token://0_aa` is a credential in
+/// scheme's clothing, so `https: foo` still loses its value.
+const SCHEMES: &[&str] = &[
+    "amqp", "ftp", "grpc", "http", "https", "mongodb", "mysql", "postgres", "redis", "ssh", "ws",
+    "wss",
 ];
 
 /// A key name's parts, lowercased: split on `_`, `-`, `.` and at camelCase humps
@@ -296,39 +340,53 @@ const SECRET_SUFFIXES: &[&[u8]] = &[
     b"token",
 ];
 
+/// Whether the name's non-empty parts equal `entry` exactly.
+fn name_on(parts: &[Vec<u8>], entry: &[&str]) -> bool {
+    let parts: Vec<&[u8]> = parts
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(Vec::as_slice)
+        .collect();
+    parts.len() == entry.len() && parts.iter().zip(entry).all(|(p, e)| *p == e.as_bytes())
+}
+
 /// The `CREDENTIAL_KEYS` namespace (`docs/REDACTION-POLICY.md`): whether a key
 /// name — in a wire attribute map, an identifier's `name:value`, or keyed text
 /// inside free text — names a credential. A credential-named key's value dies
 /// whatever its shape; the name alone decides.
 pub fn credential_key(key: &[u8]) -> bool {
     let parts = key_parts(key);
-    let mut prev: &[u8] = b"";
+    let parts: Vec<Vec<u8>> = parts.into_iter().filter(|p| !p.is_empty()).collect();
+    // The whole name decides first: a closed set of names that look
+    // credential-shaped but are not — the safe list beats every rule
+    // below (review round 7, N1/N6 — `status_code`, `aws.s3.key`,
+    // `bypass`, `compass` keep; `backup_code` still dies).
+    if NON_CREDENTIAL_NAMES.iter().any(|e| name_on(&parts, e)) {
+        return false;
+    }
     for part in &parts {
-        let part = part.as_slice();
-        if SECRET_PARTS.iter().any(|s| s.as_bytes() == part)
+        if SECRET_PARTS.iter().any(|s| s.as_bytes() == part.as_slice())
             || SECRET_SUFFIXES.iter().any(|s| part.ends_with(s))
         {
             return true;
         }
-        // `code` is a credential only after a qualifier (review round 6,
-        // A3) — `auth_code` dies, `status_code` keeps.
-        if part == b"code" && CODE_QUALIFIERS.iter().any(|q| q.as_bytes() == prev) {
+        // `code` with siblings names a credential unless the whole name
+        // was declared safe above — `backup_code`, `security_code`,
+        // `oauth_code` die where a seven-name qualifier list kept
+        // admitting a new spelling (review round 7, N1). Bare `code`
+        // stays an identifier: `code:ab12cd`.
+        if part.as_slice() == b"code" && parts.len() > 1 {
             return true;
         }
-        prev = part;
     }
     // ANY part ending in `key` names a credential — `stripe_key`,
     // `hmac_key`, `privatekey`, `OpenAIApiKey`, `X-Api-Key`, `accesskey`
-    // (review round 6, B1) — unless the whole name is a data-model key on
-    // the safe list (`business_key`, `cache_key`, …). A part that is
-    // exactly `key` only counts with siblings: `key=article:42` is
-    // operational text, `x-api-key` is not.
-    !KEY_NAME_SAFE_LIST
+    // (review round 6, B1). A part that is exactly `key` only counts
+    // with siblings: `key=article:42` is operational text, `x-api-key`
+    // is not.
+    parts
         .iter()
-        .any(|s| key.eq_ignore_ascii_case(s.as_bytes()))
-        && parts
-            .iter()
-            .any(|p| p.ends_with(b"key") && (p.len() > 3 || parts.len() > 1))
+        .any(|p| p.ends_with(b"key") && (p.len() > 3 || parts.len() > 1))
 }
 
 fn is_key_byte(b: u8) -> bool {
@@ -399,6 +457,54 @@ fn hex_val(b: u8) -> u8 {
     }
 }
 
+/// Escape forms the decoder cannot plainly read (review round 7, N2):
+/// `%XX` percent-decoding is the ONLY supported escape. `%u` (`%u003A`),
+/// numeric HTML entities (`&#61;`, `&#x3a;`), named entities (`&colon;`)
+/// and `\x`/`\u` byte escapes hide keys and separators the way a nested
+/// `%25` does — `secret_value` finds no `:` in `password\x3ahunter2`
+/// and the credential stores verbatim. Like the capped-decode residual,
+/// the answer is to kill the field whole: an unreadable encoding can
+/// hide anything, so nothing in the field survives.
+fn undecodable_escape(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                if matches!(bytes.get(i + 1), Some(b'u' | b'U')) {
+                    return true;
+                }
+                i += 1;
+            }
+            b'\\' => {
+                if matches!(bytes.get(i + 1), Some(b'x' | b'X' | b'u' | b'U')) {
+                    return true;
+                }
+                i += 1;
+            }
+            b'&' => {
+                // `&#…;` numeric/hex entities — `&#` is never plain text.
+                if bytes.get(i + 1) == Some(&b'#') {
+                    return true;
+                }
+                // `&name;` named entities: letters only, bounded like the
+                // real vocabulary (`&colon;`, `&amp;`). An unclosed `&`
+                // or a non-letter run is literal text and keeps.
+                let name = bytes[i + 1..]
+                    .iter()
+                    .take(16)
+                    .take_while(|b| b.is_ascii_alphabetic())
+                    .count();
+                if name > 0 && bytes.get(i + 1 + name) == Some(&b';') {
+                    return true;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 /// The `(start, end)` spans of every secret shape in `view` — one scan.
 fn secret_spans(view: &[u8]) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
@@ -458,6 +564,14 @@ fn secret_spans(view: &[u8]) -> Vec<(usize, usize)> {
 /// `treat()` withholds those by name before a value ever reaches a scanner.
 pub fn redact(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
+    // An escape form the decoder cannot plainly read kills the WHOLE
+    // field before any span work (review round 7, N2): `%u`, `\x`,
+    // `\u`, `&#…;` and `&name;` hide keys and separators exactly the
+    // way the `%25` residual does, and fail-closed is the only honest
+    // answer to an unreadable encoding.
+    if undecodable_escape(bytes) {
+        return Some(REDACTED.to_owned());
+    }
     let mut spans = secret_spans(bytes);
     // Percent-encoded text hides keys and separators from the raw scanner
     // (review N7): `%63%6C…` is `client…`, `%3A` the `:`. An escape can also
@@ -476,6 +590,12 @@ pub fn redact(text: &str) -> Option<String> {
             let Some((decoded, m)) = percent_decode(&view) else {
                 break;
             };
+            // A pass can decode INTO an unsupported escape form — `%2575`
+            // yields `%u`, `%5C` a `\` — so every view gets the same
+            // fail-closed check the raw text did (review round 7, N2).
+            if undecodable_escape(&decoded) {
+                return Some(REDACTED.to_owned());
+            }
             // Compose the maps: decoded byte j spans view bytes o..o+len —
             // unwind through `map` to the raw extent covering them all.
             let composed: Vec<(usize, usize)> = m
@@ -812,16 +932,15 @@ pub fn looks_like_secret(text: &str, field: &str) -> bool {
         // credentials wearing a port's shape (review round 5, finding 5).
         let tail = &rest[key_len + 1..];
         let parts = key_parts(key);
-        // `code` is credential-shaped here when its qualifier is the key's
-        // own previous part — `reset.code:4421` is a PIN wearing a port's
-        // shape, not a service name (review round 6, A3 follow-up).
+        // `code` is credential-shaped here whenever the whole name is not
+        // on the closed safe list — `reset.code:4421` is a PIN wearing a
+        // port's shape, not a service name; `status_code:404` keeps
+        // (review round 6, A3 follow-up; round 7, N1).
         let last_is_credential = parts.last().is_some_and(|p| {
             credential_key(p)
                 || (p.as_slice() == b"code"
                     && parts.len() > 1
-                    && CODE_QUALIFIERS
-                        .iter()
-                        .any(|q| q.as_bytes() == parts[parts.len() - 2].as_slice()))
+                    && !NON_CREDENTIAL_NAMES.iter().any(|e| name_on(&parts, e)))
         });
         let state_tail = tail
             .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
@@ -832,6 +951,100 @@ pub fn looks_like_secret(text: &str, field: &str) -> bool {
             && tail.iter().all(u8::is_ascii_digit);
         !(state_tail || port_tail)
     })
+}
+
+/// Words join a free-text name only when it ends in one of these parts —
+/// the terminals the benign list's multi-word entries use (`status
+/// code`, `cache key`, `duration ms`) and the identifier words a
+/// credential name would wear (`session id`, `user name`). Under the
+/// rule a joined name is checked WHOLE against the closed lists, so a
+/// join can only ever take a keep away: `image sha256` and `worker
+/// --job` keep their single-word names, `verification code` and
+/// `secret key` become names that die (review round 7, N1).
+const JOINABLE_TAILS: &[&str] = &["code", "id", "key", "ms", "name"];
+
+/// The name of a `name<sep>value` segment, as parts: the run's own parts
+/// plus, when its last part is joinable, up to two words reached LEFT
+/// across whitespace (`verification code`, `one time code`). Three is
+/// the bound because the benign list's spaced entries are two parts; a
+/// longer run can only fail the list anyway. A flag's `--` is
+/// punctuation — it contributes no parts and separates the name from
+/// the word before it.
+fn segment_name(bytes: &[u8], key_start: usize, key_len: usize) -> Vec<Vec<u8>> {
+    let run_end = key_start + key_len;
+    let mut parts: Vec<Vec<u8>> = key_parts(&bytes[key_start..run_end])
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts
+        .last()
+        .is_some_and(|p| JOINABLE_TAILS.iter().any(|t| p.as_slice() == t.as_bytes()))
+    {
+        let mut left = key_start;
+        let mut joined: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..2 {
+            // The word before `left`, if it reaches `left` through whitespace.
+            let mut j = left;
+            while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+                j -= 1;
+            }
+            let end = j;
+            while j > 0 && is_key_byte(bytes[j - 1]) {
+                j -= 1;
+            }
+            // A reached word with no letter is punctuation (`--`), not a
+            // name part — it separates, so nothing beyond it joins either.
+            if j == end || !bytes[j..end].iter().any(u8::is_ascii_alphanumeric) {
+                break;
+            }
+            // A word that sits as a `name<sep>` VALUE cannot be a name —
+            // `status: degraded error_code:` keeps `degraded` out of
+            // `error_code`'s name (round 7: the join must never steal a
+            // value; every earlier segment dies whole on its own name).
+            let mut k = j;
+            while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                k -= 1;
+            }
+            if k > 0 && matches!(bytes[k - 1], b':' | b'=') {
+                break;
+            }
+            joined.extend(
+                key_parts(&bytes[j..end])
+                    .into_iter()
+                    .filter(|p| !p.is_empty()),
+            );
+            left = j;
+        }
+        joined.reverse();
+        joined.extend(parts);
+        parts = joined;
+    }
+    parts
+}
+
+/// Whether a free-text `name<sep>value` segment's name is on the closed
+/// benign list (review round 7, N1): a single word from `BENIGN_WORDS`,
+/// or a multi-word name from `NON_CREDENTIAL_NAMES` (a declared
+/// non-credential name is benign in text too — bare `code` excepted:
+/// `code: 482913` is too ambiguous to keep) or `BENIGN_TEXT_NAMES`.
+fn benign_text_name(parts: &[Vec<u8>]) -> bool {
+    if parts.len() == 1 {
+        return BENIGN_WORDS.iter().any(|w| parts[0] == w.as_bytes());
+    }
+    NON_CREDENTIAL_NAMES
+        .iter()
+        .chain(BENIGN_TEXT_NAMES)
+        .any(|e| name_on(parts, e))
+}
+
+/// The segment's last part is a URL scheme — `dial redis://…` still
+/// reads `redis:` as a scheme even though `dial` joined the name.
+/// Exempt only when `://` follows it (the caller checks), so
+/// `access_token://0_aa` and `https: foo` still lose the value.
+fn scheme_name(parts: &[Vec<u8>]) -> bool {
+    parts
+        .last()
+        .is_some_and(|p| SCHEMES.iter().any(|s| p.as_slice() == s.as_bytes()))
 }
 
 /// At `i`, returns `(bytes to keep before the redaction, end of the secret)`.
@@ -855,17 +1068,30 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     }
     // `key=value` / `key: value` where the key names a secret. The key must start here
     // (the caller checked the word boundary; a key byte before it would make it a suffix).
+    // `name<sep>value` — the keep is an ALLOWLIST (review round 7, N1):
+    // a segment keeps its value only under a name on the closed benign
+    // list; every other name loses it, whatever the value's shape. The
+    // name is up to three space-separated words ending at the separator —
+    // `verification code` is one name and so is `status code` (a benign
+    // entry), but `the status code` is a different name and loses its
+    // value like anything unlisted.
     if i == 0 || !is_key_byte(bytes[i - 1]) {
         let key_len = rest
             .iter()
             .take(64)
             .take_while(|b| is_key_byte(**b))
             .count();
-        if key_len > 0
-            && credential_key(&rest[..key_len])
-            && let Some((keep, len)) = secret_value(&rest[..key_len], &rest[key_len..])
-        {
-            return Some((key_len + keep, i + key_len + len));
+        if key_len > 0 {
+            let name = segment_name(bytes, i, key_len);
+            // A scheme exempts before `://` only — `https://h.io` keeps,
+            // `access_token://0_aa` and `https: foo` both lose the value
+            // (review round 7, N1).
+            if !(benign_text_name(&name)
+                || scheme_name(&name) && rest[key_len..].starts_with(b"://"))
+                && let Some((keep, len)) = secret_value(&rest[..key_len], &rest[key_len..])
+            {
+                return Some((key_len + keep, i + key_len + len));
+            }
         }
     }
     // A long mixed-case alphanumeric run is a credential shape (API keys, signing
@@ -1080,8 +1306,14 @@ mod tests {
     #[test]
     fn leaves_ordinary_text_alone_without_allocating() {
         assert_eq!(redact("publisher answered 503 after 2.1s"), None);
-        assert_eq!(redact("tokens=42 secretary: Ana"), None);
         assert_eq!(redact("sk-short"), None);
+        // …but only a benign name keeps its value (round 7, N1):
+        // `status` is on the list, `tokens`/`secretary` are not.
+        assert_eq!(redact("status: degraded"), None);
+        assert_eq!(
+            redact("tokens=42 secretary: Ana"),
+            Some("tokens=[redacted] secretary: [redacted]".to_owned())
+        );
     }
 
     #[test]
@@ -1095,7 +1327,10 @@ mod tests {
                 "got bearer abcdefgh12345678 back",
                 "got bearer [redacted] back",
             ),
-            ("url?password=hunter2&x=1", "url?password=[redacted]&x=1"),
+            (
+                "url?password=hunter2&x=1",
+                "url?password=[redacted]&x=[redacted]",
+            ),
             ("api_key: \"zzz-top\"", "api_key: \"[redacted]\""),
         ];
         for (input, want) in cases {
@@ -1138,10 +1373,13 @@ mod tests {
     #[test]
     fn redacts_the_shapes_the_first_pass_missed() {
         // A URL password may itself contain / ? #: the userinfo runs to the last
-        // @ before whitespace (white-hat review S1-2).
+        // @ before whitespace (white-hat review S1-2). Under the round-7
+        // allowlist the password's own `c=` is a non-benign `name=value`
+        // whose span takes the host tail with it — everything after the
+        // scheme dies, which is the fail-closed side.
         assert_eq!(
             redact("dial redis://:Zk3/Ab+c=@cache:6379/0").as_deref(),
-            Some("dial redis://:[redacted]@cache:6379/0")
+            Some("dial redis://:[redacted]")
         );
         for (input, want) in [
             ("PGPASSWORD=hunter2 ok", "PGPASSWORD=[redacted] ok"),
@@ -1198,10 +1436,11 @@ mod tests {
             out.contains("ana@x.io"),
             "the email is not a credential: {out:?}"
         );
-        // A real userinfo password still dies, / ? # inside included (S1-2).
+        // A real userinfo password still dies, / ? # inside included (S1-2) —
+        // and under round 7 its `c=` takes the host tail with it.
         assert_eq!(
             redact("dial redis://:Zk3/Ab+c=@cache:6379/0").as_deref(),
-            Some("dial redis://:[redacted]@cache:6379/0")
+            Some("dial redis://:[redacted]")
         );
     }
 
@@ -1268,7 +1507,7 @@ mod tests {
         // an unquoted value ends at whitespace, a quote or `&` only.
         assert_eq!(
             redact("password=hunter2,theme=dark;sid=abc123&x=1").as_deref(),
-            Some("password=[redacted]&x=1")
+            Some("password=[redacted]&x=[redacted]")
         );
         // N7d: a bare lowercase-hex run is a credential shape at 40+ chars —
         // a commit-length SHA is the accepted cost (hashes name nothing a

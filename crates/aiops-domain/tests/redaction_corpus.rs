@@ -1,11 +1,15 @@
 //! The labelled redaction corpus (the review's Ruling, 2026-11-20), split per
 //! `docs/REDACTION-POLICY.md` into two tiers. `KEYED_REDACT` is the
-//! deterministic tier: a `CREDENTIAL_KEYS` name in `k=v` / `k:v` / `"k":"v"`
-//! (encoded or escaped however deep) decides — the value dies whatever its
-//! shape, and the tier's 100% is constructional: the rule is a closed set,
-//! not a measured heuristic. `BACKSTOP_REDACT` is the measured tier: unkeyed
-//! text where `redact`'s heuristics are the only line — token runs, provider
-//! prefixes, JWTs, userinfo, PEM. Its guarantee is the corpus itself plus the
+//! deterministic tier: a `name<sep>value` segment in free text is decided by
+//! the NAME alone — a name on the closed benign list keeps its value, every
+//! other name loses it whatever its shape, and a field carrying an escape
+//! form the decoder cannot plainly read (`%u`, `&#…;`, `&name;`, `\x`, `\u`,
+//! a nested `%25` residual) dies whole (review round 7, N1+N2 — the
+//! credential-word lists are gone; the keep is the closed side). The tier's
+//! 100% is constructional: the rule is a closed set, not a measured
+//! heuristic. `BACKSTOP_REDACT` is the measured tier: unkeyed text where
+//! `redact`'s heuristics are the only line — token runs, provider prefixes,
+//! JWTs, userinfo, PEM. Its guarantee is the corpus itself plus the
 //! documented residual below — that residual is the *whole* residual, now
 //! that keyed text answers to the closed rule. `MUST_KEEP` keeps its zero
 //! false-positive budget — every keep case is a shape a review round asked
@@ -32,20 +36,25 @@ use aiops_domain::policy::{looks_like_secret, redact};
 use proptest::prelude::*;
 use std::fmt::Write as _;
 
-/// The deterministic tier: a `CREDENTIAL_KEYS`-named key in `k=v`, `k:v`,
-/// `"k":"v"` or a header line decides, and the value dies whatever its
-/// shape — quoted, bracketed, container-nested, percent-encoded once or
-/// twice, or JSON-escaped. 100% by construction: the deciding rule is a
-/// closed name set (`credential_key`), not a value-shape heuristic.
+/// The deterministic tier: a `name<sep>value` segment is decided by its
+/// NAME alone (review round 7, N1) — a name on the closed benign list
+/// keeps its value, every other name loses it whatever its shape, and an
+/// escape form the decoder cannot plainly read wipes the WHOLE field
+/// (N2). 100% by construction: the deciding rule is a closed name set,
+/// not a value-shape heuristic.
 const KEYED_REDACT: &[(&str, &str)] = &[
     // Keyed secrets, quoted and unquoted.
     ("password=hunter2", "password=[redacted]"),
     ("api_key: \"zzz-top\"", "api_key: \"[redacted]\""),
     ("secret: mykey123", "secret: [redacted]"),
     // An unquoted value stops only at whitespace, a quote or `&` — `,` and
-    // `;` are part of the credential, not separators (N7c).
+    // `;` are part of the credential, not separators (N7c). `x` is not a
+    // benign name either, so its value dies beside the password's.
     ("password=Zq8,kLm;Pw", "password=[redacted]"),
-    ("url?password=hunter2&x=1", "url?password=[redacted]&x=1"),
+    (
+        "url?password=hunter2&x=1",
+        "url?password=[redacted]&x=[redacted]",
+    ),
     // A credential inside a JSON container reaches to the value's end, not
     // the first bracket it sees (NF2).
     (
@@ -105,9 +114,12 @@ const KEYED_REDACT: &[(&str, &str)] = &[
         concat!("{\"password\":\"Zq8", "\\", "nkLm\"}"),
         "{\"password\":\"[redacted]\"}",
     ),
+    // …but `\u` (single OR after a literal-backslash run) is an escape
+    // form the decoder cannot plainly read (review round 7, N2), so the
+    // whole field dies — not a span inside it.
     (
         concat!("{\"password\":\"Zq8", "\\", "u00e9kLm\"}"),
-        "{\"password\":\"[redacted]\"}",
+        "[redacted]",
     ),
     // In an escaped-quote context (`\"key\":\"value\"`) a backslash RUN of
     // two or more is the value's own content — `\\` a literal backslash,
@@ -120,7 +132,7 @@ const KEYED_REDACT: &[(&str, &str)] = &[
     ),
     (
         concat!("{\"password\":\"Zq8", "\\", "\\", "u00e9kLm\"}"),
-        "{\"password\":\"[redacted]\"}",
+        "[redacted]",
     ),
     (
         concat!("{\"password\":\"Zq8", "\\", "\\", "nkLm\"}"),
@@ -130,6 +142,64 @@ const KEYED_REDACT: &[(&str, &str)] = &[
         concat!("{\"password\":\"Zq8", "\\", "\\", "/kLm\"}"),
         "{\"password\":\"[redacted]\"}",
     ),
+    // Review round 7, N1 — `code` after ANY non-benign word names a
+    // credential. The qualifier list admitted every one of these; the
+    // allowlist admits none of them. The name keeps; the value dies.
+    ("backup_code=ab12cd34", "backup_code=[redacted]"),
+    ("security_code: 123", "security_code: [redacted]"),
+    ("device_code=dev-99", "device_code=[redacted]"),
+    ("login_code: hunter2", "login_code: [redacted]"),
+    ("access_code=t0k", "access_code=[redacted]"),
+    ("oauth_code=t0k", "oauth_code=[redacted]"),
+    ("one_time_code=482913", "one_time_code=[redacted]"),
+    ("2fa_code=482913", "2fa_code=[redacted]"),
+    ("verification code: 482913", "verification code: [redacted]"),
+    // A name that merely CONTAINS a benign word is a different name —
+    // `the status code` is not `status code`; prose words in front of
+    // a benign name poison it the same way.
+    ("the status code: 503", "the status code: [redacted]"),
+    (
+        "upstream answered status code: 503",
+        "upstream answered status code: [redacted]",
+    ),
+    // `code` bare is a keepable identifier in typed fields; in free text
+    // its value is still too ambiguous to keep.
+    ("code: 482913", "code: [redacted]"),
+    // A kept value is still scanned — a nested `name:value` is judged
+    // by its own name, so `article:42` dies inside a benign `key=…`.
+    ("key=article:42", "key=article:[redacted]"),
+    (
+        "cache key=article:42 missed",
+        "cache key=article:[redacted] missed",
+    ),
+    // Names that once kept their values by not being credential-shaped
+    // (moved from MUST_KEEP — the allowlist keeps only its own).
+    (
+        "tokens=42 secretary: Ana",
+        "tokens=[redacted] secretary: [redacted]",
+    ),
+    (
+        "tokens=42 secretary: Ana author=Bo",
+        "tokens=[redacted] secretary: [redacted] author=[redacted]",
+    ),
+    (
+        "source.service: runner-07:8080",
+        "source.service: [redacted]",
+    ),
+    // Review round 7, N2 — `%XX` is the only supported escape; every
+    // other form wipes the field WHOLE, never a span inside it.
+    ("password%u003Ahunter2", "[redacted]"),
+    ("password&#x3a;hunter2", "[redacted]"),
+    ("password&#61;hunter2", "[redacted]"),
+    ("password\\x3ahunter2", "[redacted]"),
+    ("password&colon;hunter2", "[redacted]"),
+    ("password\\u003Ahunter2", "[redacted]"),
+    // …and a pass that decodes INTO one — `%25u` → `%u`.
+    ("password%25u003Ahunter2", "[redacted]"),
+    // Base64 under the 32-char run threshold still dies — not for its
+    // shape but because `password…` text hides a credential (N2, S3):
+    // the value of a non-benign name, percent-free, is the run itself.
+    ("secret: cGFzc3dvcmQ9aHVudGVyMg==", "secret: [redacted]"),
 ];
 
 /// The measured backstop tier: unkeyed text where no schema or key name can
@@ -207,10 +277,12 @@ const BACKSTOP_REDACT: &[(&str, &str)] = &[
         ),
         "https://h.io[redacted]",
     ),
-    // Encoded input only ADDS redaction: %0C may not split a userinfo shape.
+    // Encoded input only ADDS redaction: %0C may not split a userinfo
+    // shape — and under round 7 `aaa` is a non-benign name, so its `:`
+    // takes the whole userinfo tail with it.
     (
         "postgres://aaa:%0C$Aa@aaa.aa/db",
-        "postgres://aaa:[redacted]@aaa.aa/db",
+        "postgres://aaa:[redacted]",
     ),
     // A webhook path dies inside the host — the `.`-evidenced run keeps its
     // name-shaped prefix (`com`) and kills the segments no human would name.
@@ -221,8 +293,9 @@ const BACKSTOP_REDACT: &[(&str, &str)] = &[
     // The review's `%253A` case: `:` and `@` double-encoded inside userinfo
     // stay `%3A`/`%40` after one pass — a second decode finds `u:ab@`, and a
     // two-char password is too short for any run rule, so only the second
-    // pass can kill it.
-    ("x://u%253A%2561%2562%2540h", "x://u%253A[redacted]%2540h"),
+    // pass can kill it. Under round 7 `x` is no scheme at all — a
+    // non-benign name — so its `:` takes the whole tail.
+    ("x://u%253A%2561%2562%2540h", "x:[redacted]"),
     // Base64url secrets in URL paths (review R1): `-`/`_` bytes are run
     // members, never path evidence, and a segment is pathy only when every
     // `-`/`_`-split piece is name-shaped. Telegram bot token, a bare
@@ -314,9 +387,10 @@ const BACKSTOP_REDACT: &[(&str, &str)] = &[
     ("x _glpat-AbCdEfGhIjKlMnOpQrSt_ y", "x _[redacted] y"),
     ("x _0123456789abcdef0123456789abcdef_ y", "x _[redacted]_ y"),
     // …and inside an escaped-quote context, where the `_` follows `\"`.
+    // `msg` is not a benign name either, so the whole value dies (round 7).
     (
         concat!("{\"msg\":\"x _", "AKIA", "IOSFODNN7EXAMPLE_ y\"}"),
-        "{\"msg\":\"x _[redacted] y\"}",
+        "{\"msg\":\"[redacted]\"}",
     ),
     // A std-base64 token may LEAD with `/` — 1 in 64 unpadded 24-byte draws:
     // `/` must open a run the way `+` does, or the 31-char tail survives
@@ -695,15 +769,13 @@ const TOKEN_FIXTURES: &[(&str, &str, &str, &str, &str)] = &[
 ];
 
 /// Readable operational text — the false-positive budget is zero for these;
-/// each was named by a review round as a shape that must survive.
+/// each was named by a review round as a shape that must survive. Under the
+/// round-7 allowlist a `name<sep>value` segment keeps only on a benign name
+/// — the keep rows below exercise exactly that list, and each non-benign
+/// row moved to `KEYED_REDACT`.
 const MUST_KEEP: &[&str] = &[
     "publisher answered 503 after 2.1s",
-    "tokens=42 secretary: Ana",
     "sk-short",
-    // `auth:login`-style codes keep in identifier fields (`looks_like_secret`
-    // is the N3 surface); in free text `auth:`/`session:` name secret keys —
-    // they redact their values, as the N4 cases require.
-    "source.service: runner-07:8080",
     "mistralai/Mistral-7B-Instruct-v0.3",
     "mistralai/Mixtral-8x22B-Instruct-v0.1",
     "meta-llama/Llama-3.1-8B-Instruct",
@@ -717,6 +789,38 @@ const MUST_KEEP: &[&str] = &[
     "mistralai/Mistral-7B-Instruct-v0",
     "run RunId42-Error retried",
     "log collector-2026-11-20 rotated",
+    // The benign names keep their values (review round 7, N1): the whole
+    // closed list in free text, single words and the safe `*code` names.
+    "status: degraded",
+    "status code: 503",
+    // A hard boundary ends the name: after `;` the name is exactly
+    // `status code`, which keeps.
+    "upstream answered; status code: 503",
+    "status_code: 404",
+    "http.status_code: 503",
+    "error: connect refused",
+    "error_code: ECONNREFUSED",
+    "exit_code: 1",
+    "host: db-01",
+    "port: 5432",
+    "method: POST",
+    "route: /v1/ingest",
+    "attempt: 2 of 3",
+    "retry: later",
+    "duration_ms: 42",
+    "key=article-42",
+    "cache key=user:42 missed",
+    "url: https://hooks.example.com/ingest",
+    "timeout: 30s",
+    "count: 42",
+    "state: pending",
+    "reason: busy",
+    "job: req-7",
+    "message: done",
+    "path: /var/log/x.log",
+    "id: req-42",
+    "user: ana",
+    "name: publish",
 ];
 
 /// sha256 digests are content identifiers, not credentials (NF3): both the
@@ -1112,11 +1216,36 @@ fn identifier_fields() {
         "sms_code:x",
         "reset.code:x",
         "recovery_code:x",
+        // Review round 7, N1 — `code` after ANY non-safe word names a
+        // credential; the qualifier list is gone, the keep is the
+        // closed `*code` names above.
+        "backup_code:x",
+        "security_code:x",
+        "device_code:x",
+        "login_code:x",
+        "access_code:x",
+        "oauth_code:x",
+        "one_time_code:x",
+        "2fa_code:x",
+        // A `*key` name that is not on the operational list is still a
+        // credential even though it is a real-world OTel key's sibling.
+        "encryption_key:x",
+        "tls.key:x",
     ] {
         assert!(
             looks_like_secret(input, "name"),
             "credential-named: {input}"
         );
+    }
+    // …and the N6 operational names keep as identifiers (a Kafka record
+    // key, an S3 object key, `bypass`, `compass`).
+    for input in [
+        "messaging.kafka.message.key:rec-42",
+        "aws.s3.key:obj/2026/report",
+        "bypass:main",
+        "compass:prod",
+    ] {
+        assert!(!looks_like_secret(input, "name"), "keep: {input}");
     }
 }
 

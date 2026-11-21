@@ -21,7 +21,7 @@ rule, never a guess:
 | `identifier` | Bounded charset `[A-Za-z0-9._:/@-]` + `looks_like_secret` — the CLOSED refuse check: a credential-keyed `k:v` tail outside the state-word allowlist, a bare ≥32-hex run (allowed ONLY in `release` and `request_id` — the two fields declared to carry hex), or a known token shape refuses by name. Stored verbatim otherwise (identifiers are never rewritten — `[redacted]` would corrupt what the caller reads back). | `name`, `release`, `deployment`, `request_id`, `error_code`, `model`, `prompt_version`, `config_version`, `source.service`, `source.sdk`, `cost_estimate.basis` |
 | `key` | Attribute keys: `[a-z0-9._]` + `Policy::treat` — a `CREDENTIAL_KEYS` name is **always Withheld** (an opt-in cannot whitelist a credential — new rule); then the default allowlist, then opt-in; anything else is Withheld — neither key nor value stored. | `attributes` keys |
 | `keyed_value` | An attribute value lives or dies by its key's treatment: Withheld and credential-named keys store nothing, *whatever the value's shape* (`hunter2` under `attributes.password` dies by rule). Stored string values then pass the free-text backstop as defense in depth. | `attributes` values |
-| `free_text` | `redact()` — the heuristic scanner. This is the only heuristic role left. | `error_message` |
+| `free_text` | `redact()` — the heuristic scanner. Inside it, `name<sep>value` is an **allowlist** (round 7): only a benign name keeps its value. | `error_message` |
 
 Numeric/bool/`Option` fields and `Refusal.field` (`&'static str` — the
 schema name, never client data) carry no text and need no role.
@@ -45,6 +45,80 @@ schema name, never client data) carry no text and need no role.
   renamed to say what they are: a key *namespace*, not a value guess).
 - The console shows only stored fields, so roles apply once, at ingest;
   the render path inherits the decision (text-as-text rendering stays).
+
+## Free text is an allowlist (round 7)
+
+Seven rounds of credential-word lists each opened a new hole (round 7
+N1: `backup_code`, `security_code`, `device_code`, `login_code`,
+`access_code`, `oauth_code`, `one_time_code`, `2fa_code` all slipped a
+seven-name qualifier list, and free-text `verification code: 482913`
+with them). The keep is now the closed side: in `free_text`, every
+`name<sep>value` segment keeps its value **only if the name is on the
+benign list** — every other name loses its value, whatever the value's
+shape. A name containing a benign word is a different name:
+`the status code: 503` is not `status code`.
+
+### The benign free-text list — and why each entry earns it
+
+Single words (`BENIGN_WORDS`), each the generic operational vocabulary
+an error message carries with no credential interpretation:
+
+- `status`, `state`, `reason`, `error` — outcome words.
+- `method`, `route`, `path`, `url` — request vocabulary.
+- `host`, `port` — endpoint vocabulary.
+- `attempt`, `retry`, `count`, `timeout`, `duration` — scheduling words.
+- `id`, `name`, `job`, `message`, `user` — entity words.
+- `key` — a lone `key=x` is a map lookup (`cache key=article:42`), not a
+  credential name; any *compound* `*key` name is a different name and
+  dies.
+- `sha256` — digest labels keep digests (`sha256: <hex>` is a content
+  identifier, not a credential).
+
+Multi-word names (`NON_CREDENTIAL_NAMES` ∪ `BENIGN_TEXT_NAMES`), each
+declared non-credential for the identifier roles too:
+
+- `status code`, `http status code`, `error code`, `exit code`,
+  `reason code`, `result code` — outcome codes, not credentials.
+- `zip code`, `area code`, `postal code`, `country code`,
+  `currency code`, `iso code` — data codes.
+- `business key`, `cache key`, `foreign key`, `idempotency key`,
+  `partition key`, `primary key`, `public key`, `sort key` — data-model
+  and idempotence vocabulary.
+- `aws s3 key` (`aws.s3.key`), `messaging kafka message key` — real OTel
+  attribute names for an object key and a record key (round 7 N6).
+- `bypass`, `compass` — real words that end in `pass` and name no secret
+  (round 7 N6).
+- `duration ms` — the elapsed-time label.
+
+Bare `code` is **not** benign in free text — `code: 482913` is a PIN
+shape too often. Every `*code` compound is a credential unless listed
+above. Every `*key` compound is a credential unless listed above. Every
+word ending in `pass` is a credential unless listed. The list is CLOSED:
+adding a name is a policy change, and mutant
+`benign-list-admits-credential` proves the suite notices (it re-admits
+`backup_code` and must go red).
+
+### Escapes: decodable or dead (round 7, N2)
+
+`%XX` is the only encoding the scanner decodes (bounded passes). Any
+other escape form — `%u`, `&#…;`, `&name;`, `\x`, `\u`, NUL, a literal
+`\`, or residue a decode pass produces (`%25u` → `%u`) — is
+undecodable-by-contract, so the **whole field** dies as `[redacted]`,
+name and all. Span-level work once stored `password[redacted]hunter2`
+beside a marker; the whole-field wipe removes the ambiguity class
+entirely. A `<scheme>://` URL is exempt only for a listed scheme —
+`access_token://x` is a credential in scheme's clothing.
+
+### Identifier roles and the same closed list
+
+`credential_key` consults `NON_CREDENTIAL_NAMES` first — the same list
+— so `aws.s3.key`, `messaging.kafka.message.key`, `bypass` and `compass`
+opt in, store as attributes and keep as `source.service`-shaped
+identifiers, while `backup_code`, `one_time_code`, `stripe_key`,
+`pgpass` and every unlisted `*code`/`*key`/`*pass` refuse opt-in at the
+CLI, withhold as attributes even behind the CLI's back, and refuse as
+identifiers (never rewritten — a refused identifier is a `400`, not a
+`[redacted]` that would corrupt what the caller reads back).
 
 ## Corpus migration — two tiers
 
@@ -93,6 +167,11 @@ is a bug regardless of shape.
   `error_message` and stored attribute strings; mutant
   `keyed-text-kept` (the key-match arm of `match_secret` skipped) must
   red.
+- **the benign list admits nothing new** — mutant
+  `benign-list-admits-credential` (a credential name appended to the
+  allowlist) must red on `non_benign_names_and_bad_escapes_lose_the_field`.
+- **undecodable escapes wipe the field** — mutant `escape-forms-pass`
+  (`undecodable_escape` answers `false`) must red on the same test.
 - **identifier credential refuses** — the N-E set; mutant
   `identifier-credential-stored` (the `k:v` tail rule removed) must red.
 

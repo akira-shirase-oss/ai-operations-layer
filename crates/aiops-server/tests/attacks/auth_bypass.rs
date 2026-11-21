@@ -613,13 +613,28 @@ async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
     );
 
     // Clear #1 by hand — the resync lands now and stamps the debounce
-    // window. Then re-warm the cache so a *stale* positive entry is what a
-    // dropped hint would leave behind.
+    // window. Wait on the resync COUNTER, not a wall clock (review
+    // round 7, N5): only a landed resync proves the window is open, so
+    // clear #2 (the opt-in UPDATE's own notify) is what a dropped hint
+    // would lose. Then re-warm the cache so a *stale* positive entry is
+    // what a dropped hint would leave behind.
+    let resyncs0 = resync_count(&s.base, &admin).await;
     sqlx::query("SELECT pg_notify('aiops_credential_revoked', 'clear')")
         .execute(&pool)
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    loop {
+        let resyncs = resync_count(&s.base, &admin).await;
+        if resyncs > resyncs0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "clear #1's resync never landed — the debounce window is unprovable"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&e)).await;
     assert_eq!(status, 200, "{body}");
 
@@ -706,6 +721,13 @@ async fn a_clear_flood_coalesces_and_digests_still_evict(pool: PgPool) {
         200
     );
     let resyncs0 = resync_count(&s.base, &admin).await;
+    // Notices baseline too (review round 7, N5): heartbeats already count,
+    // so `>= 501` proves nothing — only the flood's own +500 and the digest's
+    // +1 is a landed queue.
+    let notices0 = {
+        let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
+        stats["revocation"]["notices"].as_u64().unwrap_or(0)
+    };
 
     // The flood: 500 `clear` notices, one per transaction — the attacker's
     // shape (a NOTIFY needs a commit; one per tx is how the global queue
@@ -736,7 +758,10 @@ async fn a_clear_flood_coalesces_and_digests_still_evict(pool: PgPool) {
     let mut notices = 0u64;
     while std::time::Instant::now() < deadline {
         let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
-        notices = stats["revocation"]["notices"].as_u64().unwrap_or(0);
+        notices = stats["revocation"]["notices"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(notices0);
         if notices >= 501 {
             break;
         }
@@ -744,7 +769,7 @@ async fn a_clear_flood_coalesces_and_digests_still_evict(pool: PgPool) {
     }
     assert!(
         notices >= 501,
-        "the digest notice queued behind the clear flood — {notices} notices in 2 s"
+        "the digest notice queued behind the clear flood — {notices} new notices in 2 s"
     );
     // The eviction it stood for: the cached token is refused.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);

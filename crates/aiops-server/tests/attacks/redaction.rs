@@ -369,7 +369,7 @@ async fn the_default_attribute_surface_survives_code(pool: PgPool) {
     events[0].attributes = json!({"http.status_code": "503", "error.type": "http"})
         .as_object()
         .cloned();
-    events[2].error_message = Some("upstream answered status code: 503".to_owned());
+    events[2].error_message = Some("upstream answered; status code: 503".to_owned());
     let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -605,5 +605,205 @@ async fn pin_tails_and_new_credential_keys_still_refuse(pool: PgPool) {
         )
         .await;
         assert_eq!(status, 200, "{service} refused: {body}");
+    }
+}
+
+/// Review round 7, N1+N2: free text is an ALLOWLIST — a `name<sep>value`
+/// segment keeps its value only under a benign name, every other name
+/// loses it whatever its shape, and an escape form the decoder cannot
+/// plainly read (`%u`, `&#…;`, `&name;`, `\x`, `\u`, or one produced by a
+/// decode pass) wipes the WHOLE field.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn non_benign_names_and_bad_escapes_lose_the_field(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let key = create_ingest_key(&s.url, "pilot", "h");
+
+    // N1 — `code` after ANY non-benign word names a credential; the
+    // qualifier list is gone, the keep is the closed list's side.
+    for (n, msg, died) in [
+        (0u64, "backup_code=cv0sent", "cv0sent"),
+        (1, "security_code: cv1sent", "cv1sent"),
+        (2, "device_code=cv2sent", "cv2sent"),
+        (3, "login_code: cv3sent", "cv3sent"),
+        (4, "access_code=cv4sent", "cv4sent"),
+        (5, "oauth_code=cv5sent", "cv5sent"),
+        (6, "one_time_code=cv6sent", "cv6sent"),
+        (7, "2fa_code=cv7sent", "cv7sent"),
+        (8, "verification code: cv8sent", "cv8sent"),
+        // A name that merely CONTAINS a benign word is a different name.
+        (9, "the status code: cv9sent", "cv9sent"),
+        // Short base64 under the 32-char run threshold (the N2 S3 leak).
+        (
+            10,
+            "secret: cGFzc3dvcmQ9aHVudGVyMg==",
+            "cGFzc3dvcmQ9aHVudGVyMg==",
+        ),
+    ] {
+        let mut events = journey(0x44, n * 100);
+        events[2].error_message = Some(msg.to_owned());
+        let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+        assert_eq!(status, 200, "{msg}: {body}");
+        let stored = stored_bodies(&pool).await;
+        assert!(!stored.contains(died), "{died} kept: {stored}");
+        assert!(
+            stored.contains("[redacted]"),
+            "{msg} stored unmarked: {stored}"
+        );
+    }
+
+    // The benign names keep their values — the keep side of the closed
+    // list must survive the flip as much as the die side.
+    let mut events = journey(0x45, 0);
+    events[2].error_message = Some(
+        "status: degraded error_code: E42 duration_ms: 91 cache key=u-1 url: https://h.io/x"
+            .to_owned(),
+    );
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+    assert_eq!(status, 200, "{body}");
+    let stored = stored_bodies(&pool).await;
+    for kept in [
+        "status: degraded",
+        "error_code: E42",
+        "duration_ms: 91",
+        "cache key=u-1",
+        "url: https://h.io/x",
+    ] {
+        assert!(stored.contains(kept), "benign value redacted: {stored}");
+    }
+
+    // N2 — only `%XX` decodes; every other escape form fails the WHOLE
+    // field — the name dies with its value, not just the value.
+    for (n, msg, prefix, tail) in [
+        (0u64, "password%u003Ahx0sent", "password%u003A", "hx0sent"),
+        (1, "password&#x3a;hx1sent", "password&#x3a;", "hx1sent"),
+        (2, "password&#61;hx2sent", "password&#61;", "hx2sent"),
+        (3, r"password\x3ahx3sent", r"password\x3a", "hx3sent"),
+        (4, "password&colon;hx4sent", "password&colon;", "hx4sent"),
+        (5, r"password\u003Ahx5sent", r"password\u003A", "hx5sent"),
+        // A decode pass can itself PRODUCE the form — `%25u` → `%u`.
+        (6, "password%25u003Ahx6sent", "password%25u003A", "hx6sent"),
+    ] {
+        let mut events = journey(0x46, n * 100);
+        events[2].error_message = Some(msg.to_owned());
+        let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+        assert_eq!(status, 200, "{msg}: {body}");
+        let stored = stored_bodies(&pool).await;
+        assert!(
+            !stored.contains(prefix) && !stored.contains(tail),
+            "{msg} left field bytes stored: {stored}"
+        );
+    }
+}
+
+/// Review round 7, N1+N6: `*code` names outside the closed safe list are
+/// credential-named everywhere — opt-in refused at the CLI, withheld as
+/// attributes even behind the CLI's back, refused as identifiers — while
+/// the real-world operational names (a Kafka record key, an S3 object
+/// key, `bypass`, `compass`) opt in and store.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn credential_codes_refuse_and_operational_keys_opt_in(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+
+    // The CLI refuses every N1 credential `*code` name.
+    for keys in [
+        "backup_code",
+        "security_code",
+        "device_code",
+        "login_code",
+        "access_code",
+        "oauth_code",
+        "one_time_code",
+        "2fa_code",
+    ] {
+        let (ok, out, err) =
+            cli_status(&s.url, &["admin", "set-opt-in", "--project", "pilot", keys]);
+        assert!(!ok, "set-opt-in {keys} succeeded: {out}");
+        assert!(
+            err.contains(keys) || out.contains(keys),
+            "the refusal must name the key: {err}"
+        );
+    }
+    // …and admits the operational names the `*key`/`*pass` rules cover
+    // (N6): a Kafka record key, an S3 object key, `bypass`, `compass`.
+    for keys in [
+        "messaging.kafka.message.key",
+        "aws.s3.key",
+        "bypass",
+        "compass",
+    ] {
+        let (ok, out, err) =
+            cli_status(&s.url, &["admin", "set-opt-in", "--project", "pilot", keys]);
+        assert!(ok, "set-opt-in {keys} refused: {err} / {out}");
+    }
+
+    // An opt-in row written behind the CLI's back still cannot reach a
+    // credential `*code` — while the operational names store.
+    sqlx::query(
+        "UPDATE projects SET opt_in_attribute_keys = '{backup_code,messaging.kafka.message.key,aws.s3.key,bypass,compass}'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let key = create_ingest_key(&s.url, "pilot", "h");
+    let mut events = journey(0x47, 0);
+    events[0].attributes = json!({
+        "backup_code": "cv-sent",
+        "messaging.kafka.message.key": "rec-42",
+        "aws.s3.key": "obj-7",
+        "bypass": "main",
+        "compass": "prod",
+    })
+    .as_object()
+    .cloned();
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["withheld_attributes"].as_u64().unwrap(),
+        1,
+        "only the credential code may be withheld: {body}"
+    );
+    let stored = stored_bodies(&pool).await;
+    assert!(!stored.contains("cv-sent"), "backup_code stored: {stored}");
+    assert!(
+        !stored.contains("backup_code"),
+        "credential key name stored: {stored}"
+    );
+    for kept in ["rec-42", "obj-7", "main", "prod"] {
+        assert!(stored.contains(kept), "operational value dropped: {stored}");
+    }
+
+    // Identifiers: the N1 `*code` names refuse (status + code); the
+    // operational names keep.
+    for (n, (service, want)) in [
+        ("backup_code:cv-sent", 400u16),
+        ("one_time_code:cv", 400),
+        ("2fa_code:cv", 400),
+        ("messaging.kafka.message.key:rec-42", 200),
+        ("aws.s3.key:obj-7", 200),
+        ("bypass:main", 200),
+        ("compass:prod", 200),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, body, _) = post_ingest(
+            &s.base,
+            Some(&key),
+            crate::shared::batch_from(
+                "11111111111111111111111111111111",
+                &journey(0x48, n as u64 * 100),
+            )
+            .replace("reference-host", service),
+        )
+        .await;
+        assert_eq!(status, *want, "{service}: {body}");
+        if *want == 400 {
+            assert_eq!(
+                body["error"]["code"], "invalid_source",
+                "{service}: the envelope must carry the code: {body}"
+            );
+        }
     }
 }

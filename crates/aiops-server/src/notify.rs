@@ -270,7 +270,6 @@ fn handle(
     match payload {
         "heartbeat" => {}
         "clear" => {
-            tracing::info!("revocation channel hinted a clear; resync scheduled");
             // pending = max(last + 1 s, now): at most one resync per
             // window, and a clear inside the window waits for its
             // TRAILING edge (review round 5, finding 2) — the pump's
@@ -282,6 +281,13 @@ fn handle(
                 Ok(last) => (*last + RESYNC_DEBOUNCE).max(Instant::now()),
             };
             let deadline = tokio::time::Instant::from_std(pending);
+            // One log line per SCHEDULED resync, not per hint (review
+            // round 7, N7): a `clear` inside the window only coalesces
+            // the pending deadline, and a flood is attacker-shaped — it
+            // must not buy a line per message.
+            if resync_at.is_none() {
+                tracing::info!("revocation channel hinted a clear; resync scheduled");
+            }
             *resync_at = Some(resync_at.map_or(deadline, |d| d.min(deadline)));
         }
         _ => {

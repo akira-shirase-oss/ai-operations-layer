@@ -71,20 +71,27 @@ MUTANTS = {
             ),
             e(
                 S / "notify.rs",
-                "    Metrics::add(&state.revocation_notices, 1);",
-                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, last_resync, resync_at);\n    return;",
+                """            state.tokens.remove(&digest);
+            state.ingest_keys.remove(&digest);
+            tracing::info!("revoked credential evicted from caches");""",
+                "            let _ = digest;",
             ),
         ],
         ["an_in_process_revoke_dies_before_the_next_request"],
     ),
     # The NOTIFY listener is the only way a peer-process revoke reaches this
-    # collector's cache. Deafen handle() and the poll sees 200 until the TTL.
+    # collector's cache. Cut the digest eviction and the poll sees 200 until
+    # the TTL. (A whole-handle early `return` leaves unreachable match arms —
+    # uncompilable under the harness's -D warnings, so the mutant cuts the
+    # eviction calls themselves.)
     "notify-deaf": (
         [
             e(
                 S / "notify.rs",
-                "    Metrics::add(&state.revocation_notices, 1);",
-                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, last_resync, resync_at);\n    return;",
+                """            state.tokens.remove(&digest);
+            state.ingest_keys.remove(&digest);
+            tracing::info!("revoked credential evicted from caches");""",
+                "            let _ = digest;",
             )
         ],
         ["a_peer_revoke_is_refused_on_the_next_request"],
@@ -116,8 +123,10 @@ MUTANTS = {
             ),
             e(
                 S / "notify.rs",
-                "    Metrics::add(&state.revocation_notices, 1);",
-                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, last_resync, resync_at);\n    return;",
+                """            state.tokens.remove(&digest);
+            state.ingest_keys.remove(&digest);
+            tracing::info!("revoked credential evicted from caches");""",
+                "            let _ = digest;",
             ),
             e(
                 S / "app.rs",
@@ -167,8 +176,19 @@ MUTANTS = {
         [
             e(
                 S / "notify.rs",
-                '                tracing::warn!(error = %e, "revocation resync failed; caches cleared, retrying");',
-                '                tracing::warn!(error = %e, "revocation resync failed; caches cleared, retrying");\n                return true;',
+                """                if tokio::select! {
+                    () = cancel.cancelled() => false,
+                    () = tokio::time::sleep(backoff) => true,
+                } {
+                    backoff = (backoff * 2).min(RESYNC_BACKOFF_MAX);
+                    continue;
+                }
+                return false;""",
+                """                if backoff >= RESYNC_BACKOFF_MAX {
+                    let _ = cancel.cancelled();
+                }
+                backoff = RESYNC_BACKOFF_MAX;
+                return backoff < RESYNC_BACKOFF_MAX;""",
             ),
         ],
         ["a_failed_catch_up_recovers_instead_of_staying_deaf"],
@@ -204,12 +224,12 @@ MUTANTS = {
             e(
                 S / "app.rs",
                 "        .layer(DefaultBodyLimit::max(body_limit))\n        .layer(RequestBodyLimitLayer::new(body_limit));",
-                "        .layer(DefaultBodyLimit::disable())\n        .layer(RequestBodyLimitLayer::new(usize::MAX));",
+                "        .layer(DefaultBodyLimit::disable())\n        .layer(RequestBodyLimitLayer::new(body_limit.max(usize::MAX)));",
             ),
             e(
                 S / "ingest.rs",
                 "    let limit = app.limits.max_body_bytes;",
-                "    let limit = usize::MAX;",
+                "    let limit = app.limits.max_body_bytes.max(usize::MAX);",
             ),
         ],
         ["bodies_over_every_cap_are_shed_not_parsed"],
@@ -224,7 +244,10 @@ MUTANTS = {
             StatusCode::SERVICE_UNAVAILABLE,
             timeout,
         ));""",
-                ";",
+                """        .layer(TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Duration::from_secs(3600).max(timeout),
+        ));""",
             )
         ],
         ["a_body_sent_one_byte_a_heartbeat_is_bounded"],
@@ -252,7 +275,7 @@ MUTANTS = {
         Metrics::add(&app.metrics.rate_limited, 1);
         return Err(ApiError::RateLimited { retry_after_secs });
     }""",
-                "",
+                """    let _ = app.ingest_buckets.take(key.id, 1, app.now().unix_micros());""",
             ),
             e(
                 S / "ingest.rs",
@@ -263,7 +286,9 @@ MUTANTS = {
         Metrics::add(&app.metrics.rate_limited, 1);
         return Err(ApiError::RateLimited { retry_after_secs });
     }""",
-                "",
+                """    let _ = app
+        .ingest_buckets
+        .take(key.id, count.saturating_sub(1), received_at.unix_micros());""",
             ),
         ],
         ["forwarded_headers_do_not_move_the_per_token_bucket"],
@@ -293,10 +318,13 @@ MUTANTS = {
     "request-id-trusted": (
         [
             e(
-                S / "app.rs",
-                """        .layer(middleware::from_fn(sanitize_request_id))
-        .layer(SetRequestIdLayer::new(request_id.clone(), MakeRequestUuid))""",
-                "",
+                S / "error.rs",
+                """    if bad {
+        request.headers_mut().remove(REQUEST_ID_HEADER);
+    }""",
+                """    if !bad {
+        request.headers_mut().remove(REQUEST_ID_HEADER);
+    }""",
             )
         ],
         ["a_hostile_request_id_never_reaches_the_wire"],
@@ -307,13 +335,19 @@ MUTANTS = {
         [
             e(
                 T / "lib.rs",
-                "pub fn audit_slug(s: &str) -> &str {",
-                "pub fn audit_slug(s: &str) -> &str {\n    return s;",
+                """            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-');
+    if ok { s } else { "<invalid>" }""",
+                """            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-');
+    if ok || s.len() < usize::MAX {
+        s
+    } else {
+        "<invalid>"
+    }""",
             ),
             e(
                 T / "lib.rs",
-                "pub fn audit_target(s: &str) -> &str {",
-                "pub fn audit_target(s: &str) -> &str {\n    return s;",
+                "    if hex32 || uuid { s } else { \"<invalid>\" }",
+                "    if hex32 || uuid || s.len() < usize::MAX { s } else { \"<invalid>\" }",
             ),
         ],
         ["forged_slugs_and_ids_in_paths_are_never_stored_raw"],
@@ -359,7 +393,8 @@ MUTANTS = {
                 return Err(ApiError::RateLimited { retry_after_secs });
             }
             Ok(Actor { token })""",
-                "            Ok(Actor { token })",
+                """            let _ = buckets.take(token.id, 1, now.unix_micros());
+            Ok(Actor { token })""",
             )
         ],
         ["bursts_spend_their_own_budget_on_every_surface"],
@@ -439,8 +474,9 @@ MUTANTS = {
                 """pub fn business_key_id(s: &str) -> bool {
     !s.is_empty()""",
                 """pub fn business_key_id(s: &str) -> bool {
-    let _ = s;
-    return true;
+    if s.len() < usize::MAX {
+        return true;
+    }
     !s.is_empty()""",
             )
         ],
@@ -476,7 +512,10 @@ MUTANTS = {
         }""",
             )
         ],
-        ["a_credential_key_is_withheld_even_when_opted_in"],
+        [
+            "a_credential_key_is_withheld_even_when_opted_in",
+            "credential_codes_refuse_and_operational_keys_opt_in",
+        ],
     ),
     # A credential key's value must die whatever its shape — the key's name
     # decides. Answering OptIn instead puts the value through the free-text
@@ -493,7 +532,10 @@ MUTANTS = {
         }""",
             )
         ],
-        ["a_credential_key_is_withheld_even_when_opted_in"],
+        [
+            "a_credential_key_is_withheld_even_when_opted_in",
+            "credential_codes_refuse_and_operational_keys_opt_in",
+        ],
     ),
     # An unknown attribute key is withheld by default; answering Default
     # stores every unlisted key the caller invents.
@@ -527,18 +569,21 @@ MUTANTS = {
         ],
         ["a_field_the_event_type_does_not_carry_is_refused"],
     ),
-    # In free text, `key=value` under a credential name still loses the
-    # value — the keyed arm is what strips it; a `password=hunter2` inside
-    # an error_message otherwise stores `hunter2` raw.
+    # In free text, `name<sep>value` keeps its value only under a benign
+    # name — the allowlist gate is what strips it; a `password=hunter2`
+    # inside an error_message otherwise stores raw.
     "keyed-text-kept": (
         [
             e(
                 D / "policy.rs",
-                "            && credential_key(&rest[..key_len])",
-                "            && false && credential_key(&rest[..key_len])",
+                "            if !(benign_text_name(&name)",
+                "            if !(benign_text_name(&name) || true",
             )
         ],
-        ["keyed_text_inside_free_text_loses_the_value"],
+        [
+            "keyed_text_inside_free_text_loses_the_value",
+            "non_benign_names_and_bad_escapes_lose_the_field",
+        ],
     ),
     # An identifier field refuses credential-keyed `name:value` — the tail
     # check deciding that is narrowed to state words and ONE port piece
@@ -549,10 +594,13 @@ MUTANTS = {
             e(
                 D / "policy.rs",
                 """        !(state_tail || port_tail)""",
-                """        false""",
+                """        !(state_tail || port_tail) && tail.is_empty()""",
             )
         ],
-        ["a_credential_shaped_identifier_is_refused_not_rewritten"],
+        [
+            "a_credential_shaped_identifier_is_refused_not_rewritten",
+            "credential_codes_refuse_and_operational_keys_opt_in",
+        ],
     ),
     # Review round 5, finding 1: the N-J skip must exempt the position after
     # a leading `_` — without it every `_`-wrapped credential survives.
@@ -638,7 +686,7 @@ MUTANTS = {
             e(
                 D / "policy.rs",
                 """        && !BARE_HEX_KEPT.contains(&field)""",
-                """        && !["__none__"].contains(&field)""",
+                """        && !["__none__"].contains(&field) && BARE_HEX_KEPT.len() < usize::MAX""",
             )
         ],
         ["a_commit_sha_and_a_hex_trace_id_are_identifiers"],
@@ -654,10 +702,14 @@ MUTANTS = {
             && tail.len() <= 5
             && tail.iter().all(u8::is_ascii_digit);
         !(state_tail || port_tail)""",
-                """        !(tail
-            .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
-            .all(|p| STATE_WORDS.contains(&p)
-                || (p.len() <= 5 && !p.is_empty() && p.iter().all(u8::is_ascii_digit))))""",
+                """        !(state_tail
+            || last_is_credential
+            || tail
+                .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
+                .all(|p| {
+                    STATE_WORDS.contains(&p)
+                        || (p.len() <= 5 && !p.is_empty() && p.iter().all(u8::is_ascii_digit))
+                }))""",
             )
         ],
         ["pin_tails_and_new_credential_keys_still_refuse"],
@@ -728,12 +780,12 @@ MUTANTS = {
         [
             e(
                 D / "policy.rs",
-                """        && parts
-            .iter()
-            .any(|p| p.ends_with(b"key") && (p.len() > 3 || parts.len() > 1))""",
-                """        && parts
-            .iter()
-            .any(|p| p.ends_with(b"key") && p.len() > 3 && parts.len() > 100)""",
+                """    parts
+        .iter()
+        .any(|p| p.ends_with(b"key") && (p.len() > 3 || parts.len() > 1))""",
+                """    parts
+        .iter()
+        .any(|p| p.ends_with(b"key") && p.len() > 3 && parts.len() > 100)""",
             )
         ],
         ["credential_named_keys_die_everywhere_opt_in_cannot_reach"],
@@ -754,24 +806,33 @@ MUTANTS = {
                 """            let _ = &keys;""",
             )
         ],
-        ["credential_named_keys_die_everywhere_opt_in_cannot_reach"],
+        [
+            "credential_named_keys_die_everywhere_opt_in_cannot_reach",
+            "credential_codes_refuse_and_operational_keys_opt_in",
+        ],
     ),
-    # Review round 6, A3: `code` names a credential only after a qualifier —
-    # unconditionally it withholds the default `http.status_code` attribute
-    # and redacts ordinary "status code: 503" text.
+    # Review round 7, N1: the whole name decides through a CLOSED safe
+    # list — removing it re-credentials `status_code`/`error_code` (the
+    # default attribute surface dies) and `aws.s3.key`/`bypass`/`compass`
+    # (the opt-in test's operational keeps refuse).
     "code-names-credential": (
         [
             e(
                 D / "policy.rs",
-                """        if part == b"code" && CODE_QUALIFIERS.iter().any(|q| q.as_bytes() == prev) {""",
-                """        if part == b"code" {""",
+                """    if NON_CREDENTIAL_NAMES.iter().any(|e| name_on(&parts, e)) {
+        return false;
+    }""",
+                """    let _ = NON_CREDENTIAL_NAMES;""",
             )
         ],
-        ["the_default_attribute_surface_survives_code"],
+        [
+            "the_default_attribute_surface_survives_code",
+            "credential_codes_refuse_and_operational_keys_opt_in",
+        ],
     ),
-    # Review round 6, A3 follow-up: a qualified `code` key makes a digit
-    # tail a PIN — checking only the bare last part lets `reset.code:4421`
-    # ride the port exemption.
+    # Review round 6, A3 follow-up + round 7, N1: a credential `*code` key
+    # makes a digit tail a PIN — checking only the bare last part lets
+    # `reset.code:4421` ride the port exemption.
     "qualified-code-tail-a-port": (
         [
             e(
@@ -780,9 +841,7 @@ MUTANTS = {
             credential_key(p)
                 || (p.as_slice() == b"code"
                     && parts.len() > 1
-                    && CODE_QUALIFIERS
-                        .iter()
-                        .any(|q| q.as_bytes() == parts[parts.len() - 2].as_slice()))
+                    && !NON_CREDENTIAL_NAMES.iter().any(|e| name_on(&parts, e)))
         });""",
                 """        let last_is_credential = parts.last().is_some_and(|p| credential_key(p));""",
             )
@@ -803,8 +862,15 @@ MUTANTS = {
                 Ok(last) => (*last + RESYNC_DEBOUNCE).max(Instant::now()),
             };
             let deadline = tokio::time::Instant::from_std(pending);
+            // One log line per SCHEDULED resync, not per hint (review
+            // round 7, N7): a `clear` inside the window only coalesces
+            // the pending deadline, and a flood is attacker-shaped — it
+            // must not buy a line per message.
+            if resync_at.is_none() {
+                tracing::info!("revocation channel hinted a clear; resync scheduled");
+            }
             *resync_at = Some(resync_at.map_or(deadline, |d| d.min(deadline)));""",
-                """            let _ = (last_resync, resync_at);""",
+                """            let _ = (last_resync, resync_at, RESYNC_DEBOUNCE);""",
             )
         ],
         [
@@ -814,13 +880,15 @@ MUTANTS = {
     ),
     # Review round 6, A2: the trailing-edge debounce is what bounds a clear
     # flood — scheduling every hint for `now` serialises one resync per
-    # notice, so the resync count blows past the bound.
+    # notice, so the resync count blows past the bound. The mutant keeps
+    # `RESYNC_DEBOUNCE` referenced or the -D warnings build fails on the
+    # unused constant and the kill is inconclusive.
     "clear-debounce-removed": (
         [
             e(
                 S / "notify.rs",
                 "                Ok(last) => (*last + RESYNC_DEBOUNCE).max(Instant::now()),",
-                "                Ok(_) => Instant::now(),",
+                "                Ok(last) => {\n                    let _ = (last, RESYNC_DEBOUNCE);\n                    Instant::now()\n                }",
             )
         ],
         ["a_clear_flood_coalesces_and_digests_still_evict"],
@@ -840,9 +908,9 @@ MUTANTS = {
                         Metrics::add(&state.revocation_gaps, 1);
                         return true;
                     }""",
-                """                match revocation_beat(writer).await {
-                    Ok(()) => {}
-                    Err(e) => {
+                """                match tokio::time::timeout(BEAT_TIMEOUT * 1000, revocation_beat(writer)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
                         tracing::warn!(error = %e, "revocation heartbeat failed; reconnecting");
                         Metrics::add(&state.revocation_gaps, 1);
                         return true;
@@ -910,7 +978,299 @@ MUTANTS = {
             "an_unarmed_revocation_trigger_reads_as_a_gap",
         ],
     ),
+    # Review round 7, N1: a skipped heartbeat trigger must read as a gap.
+    # Two legs detect it — the beat's arming check (fast) and
+    # HEARTBEAT_DEADLINE on the last observed notice (slow, still inside
+    # the test's 30 s window) — so the mutant cuts both: the heartbeat
+    # row leaves the arming list AND the deadline outlives the poll.
+    "beat-skips-trigger": (
+        [
+            e(
+                T / "lib.rs",
+                """             ('projects', 'projects_opt_in_notify'),
+             ('revocation_heartbeat', 'revocation_heartbeat_notify')""",
+                """             ('projects', 'projects_opt_in_notify')""",
+            ),
+            e(
+                S / "notify.rs",
+                "const HEARTBEAT_DEADLINE: Duration = Duration::from_secs(10);",
+                "const HEARTBEAT_DEADLINE: Duration = Duration::from_secs(3600);",
+            ),
+        ],
+        ["a_beat_that_skips_the_trigger_reads_as_a_gap"],
+    ),
+    # Review round 7, ruling: a credential name must never enter the
+    # benign list. Adding `backup_code` re-admits the N1 leak —
+    # `backup_code=cv0sent` keeps its value.
+    "benign-list-admits-credential": (
+        [
+            e(
+                D / "policy.rs",
+                """const BENIGN_TEXT_NAMES: &[&[&str]] = &[&["duration", "ms"]];""",
+                """const BENIGN_TEXT_NAMES: &[&[&str]] = &[&["backup", "code"], &["duration", "ms"]];""",
+            )
+        ],
+        ["non_benign_names_and_bad_escapes_lose_the_field"],
+    ),
+    # Review round 7, N2: only `%XX` decodes — every other escape form
+    # fails the whole field. Answering `false` always stores
+    # `password%u003Ahunter2` verbatim.
+    "escape-forms-pass": (
+        [
+            e(
+                D / "policy.rs",
+                """fn undecodable_escape(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                if matches!(bytes.get(i + 1), Some(b'u' | b'U')) {
+                    return true;
+                }
+                i += 1;
+            }
+            b'\\\\' => {
+                if matches!(bytes.get(i + 1), Some(b'x' | b'X' | b'u' | b'U')) {
+                    return true;
+                }
+                i += 1;
+            }
+            b'&' => {
+                // `&#…;` numeric/hex entities — `&#` is never plain text.
+                if bytes.get(i + 1) == Some(&b'#') {
+                    return true;
+                }
+                // `&name;` named entities: letters only, bounded like the
+                // real vocabulary (`&colon;`, `&amp;`). An unclosed `&`
+                // or a non-letter run is literal text and keeps.
+                let name = bytes[i + 1..]
+                    .iter()
+                    .take(16)
+                    .take_while(|b| b.is_ascii_alphabetic())
+                    .count();
+                if name > 0 && bytes.get(i + 1 + name) == Some(&b';') {
+                    return true;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}""",
+                """fn undecodable_escape(bytes: &[u8]) -> bool {
+    let _ = bytes;
+    false
+}""",
+            )
+        ],
+        ["non_benign_names_and_bad_escapes_lose_the_field"],
+    ),
 }
+
+# The decisive-assertion pin of every attack test (review round 7, N4-b):
+# a kill counts only when the named test's panic lands at one of these
+# lines — the test's OWN verdict assertions, in its file. `audit` checks
+# each pinned line still carries an assert/panic so a shifted file can't
+# silently unpin a test; a panic anywhere else (a helper unwrap, setup,
+# compile) is INCONCLUSIVE, not a kill.
+PINS = {
+    "every_absent_or_malformed_credential_is_refused_everywhere": (
+        "auth_bypass.rs",
+        [23, 24, 43, 53, 65, 70],
+    ),
+    "an_in_process_revoke_dies_before_the_next_request": (
+        "auth_bypass.rs",
+        [120, 127, 136, 137],
+    ),
+    "a_peer_revoke_is_refused_on_the_next_request": ("auth_bypass.rs", [184]),
+    "a_revocation_survives_the_listener_dying": ("auth_bypass.rs", [246, 267]),
+    "a_failed_catch_up_recovers_instead_of_staying_deaf": (
+        "auth_bypass.rs",
+        [374, 389],
+    ),
+    "a_revoke_inside_the_gap_only_the_catch_up_can_see": ("auth_bypass.rs", [437]),
+    "a_beat_that_skips_the_trigger_reads_as_a_gap": ("auth_bypass.rs", [467]),
+    "a_delete_invisible_to_the_channel_is_caught_by_the_resync": (
+        "auth_bypass.rs",
+        [529],
+    ),
+    "the_cli_will_not_mint_a_contradictory_admin_or_scopeless_token": (
+        "auth_bypass.rs",
+        [556, 570],
+    ),
+    "two_clears_half_a_second_apart_both_land": (
+        "auth_bypass.rs",
+        [632, 666, 679, 686],
+    ),
+    "a_clear_flood_coalesces_and_digests_still_evict": (
+        "auth_bypass.rs",
+        [770, 781, 793, 797],
+    ),
+    "an_unarmed_revocation_trigger_reads_as_a_gap": ("auth_bypass.rs", [826]),
+    "a_beat_under_a_row_lock_reads_as_a_gap": ("auth_bypass.rs", [860]),
+    "a_disabled_revoke_trigger_reads_as_a_gap": ("auth_bypass.rs", [889]),
+    "bodies_over_every_cap_are_shed_not_parsed": (
+        "bodies.rs",
+        [31, 35, 51, 63, 79, 87],
+    ),
+    "a_body_sent_one_byte_a_heartbeat_is_bounded": ("bodies.rs", [173, 175, 179]),
+    "one_projects_credentials_never_touch_anothers": (
+        "cross_tenant.rs",
+        [38, 53, 82, 83, 95],
+    ),
+    "forwarded_headers_do_not_move_the_per_token_bucket": (
+        "headers_spoof.rs",
+        [42, 48],
+    ),
+    "conflicting_authorization_lines_have_one_verdict": (
+        "headers_spoof.rs",
+        [78, 89, 95],
+    ),
+    "a_hostile_request_id_never_reaches_the_wire": (
+        "headers_spoof.rs",
+        [135, 136, 145],
+    ),
+    "forged_slugs_and_ids_in_paths_are_never_stored_raw": ("inject.rs", [31, 39]),
+    "error_bodies_never_echo_attacker_bytes": ("inject.rs", [89, 96, 97]),
+    "bursts_spend_their_own_budget_on_every_surface": (
+        "rate_limit.rs",
+        [36, 37, 38, 47, 50, 54],
+    ),
+    "a_malformed_flood_still_spends_the_ingest_budget_over_http": (
+        "rate_limit.rs",
+        [79, 80],
+    ),
+    "an_unknown_slug_flood_stops_at_its_own_bucket": (
+        "rate_limit.rs",
+        [111, 115, 116, 122],
+    ),
+    "a_credential_key_is_withheld_even_when_opted_in": (
+        "redaction.rs",
+        [48, 55, 59],
+    ),
+    "an_unknown_attribute_key_is_withheld": ("redaction.rs", [77, 79, 83, 87]),
+    "a_field_the_event_type_does_not_carry_is_refused": ("redaction.rs", [110]),
+    "keyed_text_inside_free_text_loses_the_value": ("redaction.rs", [131, 135]),
+    "a_credential_shaped_identifier_is_refused_not_rewritten": (
+        "redaction.rs",
+        [156, 159, 167],
+    ),
+    "an_underscore_wrapped_token_dies_in_free_text": ("redaction.rs", [201, 205]),
+    "a_leading_slash_token_dies_in_free_text": ("redaction.rs", [228]),
+    "a_nested_escape_erases_the_whole_field": ("redaction.rs", [254, 258, 264]),
+    "a_bare_hex_credential_dies_outside_release_and_request_id": (
+        "redaction.rs",
+        [296, 297, 314, 333, 348],
+    ),
+    "the_default_attribute_surface_survives_code": (
+        "redaction.rs",
+        [374, 375, 381, 385, 399, 408, 409, 422, 423],
+    ),
+    "credential_named_keys_die_everywhere_opt_in_cannot_reach": (
+        "redaction.rs",
+        [440, 441, 465, 473, 476, 487, 523],
+    ),
+    "a_commit_sha_and_a_hex_trace_id_are_identifiers": ("redaction.rs", [546, 550]),
+    "pin_tails_and_new_credential_keys_still_refuse": (
+        "redaction.rs",
+        [585, 591, 607],
+    ),
+    "non_benign_names_and_bad_escapes_lose_the_field": (
+        "redaction.rs",
+        [646, 648, 672, 690, 692],
+    ),
+    "credential_codes_refuse_and_operational_keys_opt_in": (
+        "redaction.rs",
+        [722, 723, 738, 762, 768, 774, 801],
+    ),
+    "a_replayed_batch_is_counted_not_rewritten": ("replay.rs", [23, 27, 35, 36]),
+    "a_replayed_control_call_returns_the_same_record": ("replay.rs", [65, 71]),
+    "a_forged_business_key_never_reaches_the_authority": (
+        "ssrf_keys.rs",
+        [95, 96, 99, 113, 138],
+    ),
+}
+
+# An attack test with NO mutant needs a written exemption here (N4-h) —
+# the exemption IS the admission that the harness cannot prove it.
+# Every test today carries a mutant, so this is empty on purpose.
+EXEMPTIONS: dict[str, str] = {}
+
+
+def attack_tests() -> dict[str, str]:
+    """Every `#[sqlx::test]` attack test: name -> its file name."""
+    import re
+
+    out: dict[str, str] = {}
+    for f in sorted((ROOT / "crates/aiops-server/tests/attacks").glob("*.rs")):
+        if f.name == "common.rs":
+            continue
+        src = f.read_text()
+        for m in re.finditer(r"#\[sqlx::test[^\]]*\]\s*\n\s*async fn (\w+)", src):
+            out[m.group(1)] = f.name
+    return out
+
+
+def pin(test: str) -> None:
+    """Print the test's pin as `file:l1,l2,...` for the shell to grep."""
+    file, lines = PINS[test]
+    print(f"{file}:{','.join(str(n) for n in lines)}")
+
+
+def audit() -> int:
+    """N4-(h): enumerate every attack test — each needs a mutant or a
+    written exemption — plus pin sanity (N4-b): every pinned line must
+    still carry an assert/panic, every pin must map to a real test, and
+    every mutant's test list must pin to real tests."""
+    tests = attack_tests()
+    bad = 0
+    covered = {t for _, ts in MUTANTS.values() for t in ts}
+    for t, file in tests.items():
+        if t not in covered and t not in EXEMPTIONS:
+            print(f"audit: {t} ({file}) has no mutant and no exemption")
+            bad += 1
+        if t not in PINS:
+            print(f"audit: {t} ({file}) has no decisive-assertion pin")
+            bad += 1
+    for t in PINS:
+        if t not in tests:
+            print(f"audit: pin {t} is not an attack test")
+            bad += 1
+    for m, (_, ts) in MUTANTS.items():
+        for t in ts:
+            if t not in tests:
+                print(f"audit: mutant {m} lists non-test {t}")
+                bad += 1
+            elif t not in PINS:
+                print(f"audit: mutant {m} lists unpinned test {t}")
+                bad += 1
+    for t, (file, lines) in PINS.items():
+        path = ROOT / "crates/aiops-server/tests/attacks" / file
+        if not path.exists():
+            print(f"audit: pin {t} names missing file {file}")
+            bad += 1
+            continue
+        src = path.read_text().splitlines()
+        for n in lines:
+            if not (0 < n <= len(src)):
+                print(f"audit: pin {t}:{file}:{n} is out of range — the file moved")
+                bad += 1
+                continue
+            if "assert" not in src[n - 1] and "panic" not in src[n - 1]:
+                print(
+                    f"audit: pin {t}:{file}:{n} is not an assertion "
+                    f"({src[n - 1].strip()[:60]}) — the file moved"
+                )
+                bad += 1
+    if bad:
+        return 1
+    print(
+        f"audit: {len(tests)} attack tests — "
+        f"{sum(1 for t in tests if t in covered)} mutant-covered, "
+        f"{len(EXEMPTIONS)} exempted, {len(PINS)} pinned"
+    )
+    return 0
 
 
 def _bak(name: str, path: Path) -> Path:
@@ -940,7 +1300,9 @@ def mutate(name: str) -> None:
 
 
 def restore(name: str) -> None:
-    """Put back every file `name` touched — byte-for-byte from its backup."""
+    """Put back every file `name` touched — byte-for-byte from its backup.
+    A file with no backup was never edited (an apply killed mid-mutant),
+    so skipping it is what makes an EXIT-trap restore safe."""
     edits, _ = MUTANTS[name]
     seen: set[Path] = set()
     for path, _, _ in edits:
@@ -949,12 +1311,12 @@ def restore(name: str) -> None:
         seen.add(path)
         bak = _bak(name, path)
         if not bak.exists():
-            sys.exit(f"restore {name}: no backup for {path}")
+            continue
         path.write_bytes(bak.read_bytes())
         bak.unlink()
 
 
-def tests(name: str) -> None:
+def _test_lines(name: str) -> None:
     print(" ".join(MUTANTS[name][1]))
 
 
@@ -963,12 +1325,24 @@ if __name__ == "__main__":
     if cmd == "list":
         print("\n".join(MUTANTS))
         sys.exit(0)
+    if cmd == "audit":
+        sys.exit(audit())
     name = sys.argv[2] if len(sys.argv) > 2 else ""
     if cmd == "apply" and name:
+        if name not in MUTANTS:
+            sys.exit(f"unknown mutant: {name}")
         mutate(name)
     elif cmd == "restore" and name:
+        if name not in MUTANTS:
+            sys.exit(f"unknown mutant: {name}")
         restore(name)
     elif cmd == "tests" and name:
-        tests(name)
+        if name not in MUTANTS:
+            sys.exit(f"unknown mutant: {name}")
+        _test_lines(name)
+    elif cmd == "pin" and name:
+        if name not in PINS:
+            sys.exit(f"unpinned test: {name}")
+        pin(name)
     else:
-        sys.exit("usage: mutants.py apply|restore|tests <name> | list")
+        sys.exit("usage: mutants.py apply|restore|tests <name> | pin <test> | list | audit")

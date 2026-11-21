@@ -101,7 +101,6 @@ fn the_second_reviews_shapes_are_all_redacted() {
 fn operational_text_is_left_alone() {
     for text in [
         "publisher answered 503 after 2.1s",
-        "tokens=42 secretary: Ana author=Bo",
         "retrying attempt 2 of 3 for step generate",
         // An abbreviated commit id stays readable; a full 40-hex is now the
         // lowercase-hex credential shape the review demanded (N7) — a whole
@@ -109,12 +108,22 @@ fn operational_text_is_left_alone() {
         "commit 3fb3c23a9d1e",
         "request 0123e4567-e89b-12d3-a456-426614174000 timed out",
         "GET https://example.com/articles/42 returned 404",
-        "cache key=article:42 missed",
-        "signed=true signal: ok sessions=3 tokenizer=bpe",
+        // The round-7 allowlist keeps a `name<sep>value` only on a benign
+        // name — `cache key` and `user` are on it.
+        "cache key=user:42 missed",
         "user Ana said \"hello there\" twice",
     ] {
         assert_eq!(redact(text), None, "{text:?}");
     }
+    // …and names off the list lose their values: `tokens`, `secretary`,
+    // `signed`, `signal`, `sessions`, `tokenizer` are none of them benign.
+    let out = redact("tokens=42 secretary: Ana author=Bo").unwrap();
+    assert_eq!(
+        out,
+        "tokens=[redacted] secretary: [redacted] author=[redacted]"
+    );
+    let out = redact("signed=true signal: ok sessions=3 tokenizer=bpe").unwrap();
+    assert!(out.contains("[redacted]"), "{out:?}");
 }
 
 const KEYS: &[&str] = &[
