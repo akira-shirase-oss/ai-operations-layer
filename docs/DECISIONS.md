@@ -450,3 +450,23 @@ named decision when the relevant milestone starts.
   on a peer's cache TTL — and a re-established LISTEN clears both
   credential caches outright, the only safe resume after missed notices.
   The UI audit records these exclusions with this rationale.
+- **D-035 — Keep-alive idle bounds live on the client side: every reuser
+  must idle below the collector's 10 s header bound (2026-11-21).**
+  hyper's `header_read_timeout` bounds the wait for a request head — and
+  the *idle wait between requests* on a kept-alive connection is the same
+  wait. When it fires, the connection closes with no answer; a client or
+  proxy that reuses a connection idle past the bound races the close (a
+  Go/k6 `readLoopPeekFailLocked`/status 0, a proxy's 502 on a
+  non-idempotent request — the class the 1M control run met at the 300 s
+  lifetime tick). Separating the bounds inside hyper is not on offer, so
+  the contract is on the reusers: Caddy's upstream pool retires an idle
+  connection at 5 s (`transport http { keepalive 5s }`), and every k6
+  scenario sets `noVUConnectionReuse: true` — connections retire at the
+  iteration boundary, leaving a VU's idle at its intra-iteration poll
+  sleeps, far under 10 s. The collector's own part is pinned in
+  `serve.rs`: inside the bound a reuse gets a whole response; past it the
+  reuse sees a clean FIN before any request bytes — never a reset
+  mid-request (`deploy.rs`, `serve.rs` tests). Trade-off: k6 connections
+  no longer cross iterations — a slightly heavier connect path per
+  iteration, accepted; keep-alive inside an iteration (where the load
+  matters) is unchanged.

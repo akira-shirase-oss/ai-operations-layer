@@ -42,6 +42,10 @@ const authUnavailable = new Counter('authority_unavailable');
 const noOps = new Counter('ops_list_empty');
 
 export const options = {
+  // A VU's connection must not idle past the collector's 10 s header
+  // bound, whose idle close races a reuse (D-035): connections retire at
+  // each iteration, and the intra-iteration gaps are the poll sleeps.
+  noVUConnectionReuse: true,
   scenarios: {
     submit: {
       executor: 'constant-arrival-rate',

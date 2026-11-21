@@ -85,6 +85,57 @@ async fn an_idle_keep_alive_connection_is_closed() {
     );
 }
 
+// The keep-alive race from the client side (D-035). A request sent inside
+// the idle bound is answered whole; past the bound the connection is
+// already closed — a client that looks before writing sees a clean FIN and
+// retries on a fresh connection, never a reset after its request bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_reuse_gets_an_answer_or_a_clean_close_never_a_reset() {
+    let (addr, _token) = server(one_second()).await;
+    let mut s = TcpStream::connect(&addr).await.unwrap();
+    s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 512];
+    let n = s.read(&mut buf).await.unwrap();
+    let first = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(first.starts_with("HTTP/1.1 200"), "{first}");
+    // Inside the 1 s bound the same connection still serves, whole.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let n = s.read(&mut buf).await.unwrap();
+    let second = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(second.starts_with("HTTP/1.1 200"), "{second}");
+    // Well past the bound (1.4 s > 1 s) the server has already closed: the
+    // reuse sees a clean FIN before any new request's bytes — never a
+    // reset mid-request.
+    tokio::time::sleep(Duration::from_millis(1_400)).await;
+    match s.try_read(&mut buf) {
+        Ok(0) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let n = s.read(&mut buf).await.unwrap();
+            let answer = String::from_utf8_lossy(&buf[..n]).into_owned();
+            assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+            return;
+        }
+        other => panic!("the idle close must land before reuse: {other:?}"),
+    }
+    // The retried request on a fresh connection is answered whole.
+    let mut retry = TcpStream::connect(&addr).await.unwrap();
+    retry
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let n = retry.read(&mut buf).await.unwrap();
+    let answer = String::from_utf8_lossy(&buf[..n]).into_owned();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connections_beyond_the_cap_wait_until_one_is_free() {
     let (addr, _token) = server(ServeLimits {

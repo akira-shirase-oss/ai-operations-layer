@@ -13,6 +13,11 @@ aiops.example.com {
 		transport http {
 			dial_timeout 2s
 			response_header_timeout 15s
+			# The collector closes a connection idle for its header-read
+			# bound (10 s) with no answer; the pool must retire an idle
+			# upstream below that or a reuse races the close — a 502 for a
+			# non-idempotent request (D-035).
+			keepalive 5s
 		}
 	}
 	# Hosts post to /v1/ingest; people use /console/; nothing else is served.

@@ -35,6 +35,10 @@ const serverErrors = new Counter('batches_server_error');
 const acknowledged = new Counter('events_acknowledged');
 
 export const options = {
+	// A VU's connection must not idle past the collector's 10 s header
+	// bound, whose idle close races a reuse (D-035): connections retire at
+	// each iteration, and the intra-iteration gaps are the poll sleeps.
+	noVUConnectionReuse: true,
 	discardResponseBodies: false,
 	scenarios: {
 		ingest: {

@@ -12,6 +12,10 @@ const RUN_ID = (__ENV.RUN_ID || '0000beef').padStart(8, '0').slice(0, 8);
 const OPERATIONS = Number(__ENV.OPERATIONS || 1);
 
 export const options = {
+	// A VU's connection must not idle past the collector's 10 s header
+	// bound, whose idle close races a reuse (D-035): connections retire at
+	// each iteration, and the intra-iteration gaps are the poll sleeps.
+	noVUConnectionReuse: true,
 	scenarios: {
 		timeline: {
 			executor: 'constant-arrival-rate',
