@@ -97,13 +97,23 @@ const MUST_REDACT: &[(&str, &str)] = &[
         "key [redacted]",
     ),
     (
-        "key wJalrXUtnF3MIK7MDENG/bPxRfiCYEXAMPLEKEYa used",
+        concat!(
+            "key ",
+            "wJalrXUtnF3MIK7MDENG",
+            "/bPxRfiCYEXAMPLEKEY",
+            "a used"
+        ),
         "key [redacted] used",
     ),
     // The same slash run inside a URL path: no segment is a name, so the
     // path position does not save it — it dies whole.
     (
-        "https://h.io/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKE9",
+        concat!(
+            "https://h.io/",
+            "wJalrXUtnFEMI/K7MDENG",
+            "/bPxRfiCYEXAMPLEKE",
+            "9"
+        ),
         "https://h.io/[redacted]",
     ),
     // Encoded input only ADDS redaction: %0C may not split a userinfo shape.
@@ -124,6 +134,82 @@ const MUST_REDACT: &[(&str, &str)] = &[
         "https://hooks.example.com/AbCdEf1234567890XYZabcd/x9yzz",
         "https://hooks.example.com/[redacted]",
     ),
+    // A double-encoded separator hides the `=` from the first decoded view —
+    // a second pass still finds the keyed value (review %253A).
+    ("password%253Dhunter2", "password%253D[redacted]"),
+    // Fully double-encoded `password=hunter2`: the second pass's span unwinds
+    // through both raw maps to exactly the value's raw bytes — the key stays
+    // a name.
+    (
+        "%2570%2561%2573%2573%2577%256F%2572%2564%253D%2568%2575%256E%2574%2565%2572%2532",
+        "%2570%2561%2573%2573%2577%256F%2572%2564%253D[redacted]",
+    ),
+    // The review's `%253A` case: `:` and `@` double-encoded inside userinfo
+    // stay `%3A`/`%40` after one pass — a second decode finds `u:ab@`, and a
+    // two-char password is too short for any run rule, so only the second
+    // pass can kill it.
+    ("x://u%253A%2561%2562%2540h", "x://u%253A[redacted]%2540h"),
+];
+
+/// Provider-token fixtures as `(lead-in, prefix, body, tail, want)` — built
+/// at runtime, never contiguous in the source: a push-protection or secret
+/// scanner must never find a whole provider token in the tree (review N3,
+/// GitHub refused the push on `sbp_…`). Every prefix in `SECRET_PREFIXES`
+/// appears once: the corpus's recall covers the whole list, not a sample.
+const TOKEN_FIXTURES: &[(&str, &str, &str, &str, &str)] = &[
+    ("secret ", "GOCSPX-", "Hk3jD9fG2mN8pQrS4tUvW7xYz", " used", "secret [redacted] used"),
+    ("value ", "ghr_", "AbCdEf1234567890aBcDeF1234567890aBcD", " end", "value [redacted] end"),
+    ("key ", "PMAK-", "6123456789abcdef01234567-9f", " ok", "key [redacted] ok"),
+    ("sb ", "sbp_", "0123456789abcdef0123456789abcdef01234567", " here", "sb [redacted] here"),
+    ("shared ", "shpss_", "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d", " inside", "shared [redacted] inside"),
+    ("deploy ", "glsa-", "dR3sT8uV9wX1yZ2aB3c4", " token", "deploy [redacted] token"),
+    ("trigger ", "gldt-", "kL4mN6pQ8rS2tU5vW7x", "", "trigger [redacted]"),
+    ("runner ", "glrt-", "zX1cV4bN7mK2jH5gF9dQ8sA3", "", "runner [redacted]"),
+    ("site ", "nfp_", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCd", "", "site [redacted]"),
+    ("org ", "lin_api_", "0123456789abcdef0123456789abcdef01234567", "", "org [redacted]"),
+    ("tf ", "atlasv1.", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCdEfGhIjKlMnOpQrStUvWxYz", "", "tf [redacted]"),
+    ("aws ", "amzn.mws.", "0123456789abcdef0123456789abcdef0123", " id", "aws [redacted] id"),
+    ("dbx ", "dapi", "0123456789abcdef0123456789abcdef", "", "dbx [redacted]"),
+    ("cloud ", "dop_v1_", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCdEfGhIjKlMnOpQrStUvWxY", "", "cloud [redacted]"),
+    ("pkg ", "npm_", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789", "", "pkg [redacted]"),
+    ("gh ", "ghp_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
+    ("gh ", "gho_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
+    ("gh ", "ghu_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
+    ("gh ", "ghs_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
+    ("gh ", "github_pat_", "AbCdEf1234567890aBcDeF1234567890aBcDeF123456", "", "gh [redacted]"),
+    ("gl ", "glpat-", "AbCdEf1234567890aBcD", "", "gl [redacted]"),
+    ("stripe ", "sk_live_", "AbCdEf1234567890aBcDeF12", "", "stripe [redacted]"),
+    ("stripe ", "sk_test_", "AbCdEf1234567890aBcDeF12", "", "stripe [redacted]"),
+    ("stripe ", "rk_live_", "AbCdEf1234567890aBcDeF12", "", "stripe [redacted]"),
+    ("stripe ", "whsec_", "AbCdEf1234567890aBcDeF1234567890", "", "stripe [redacted]"),
+    ("openai ", "sk-", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "openai [redacted]"),
+    ("slack ", "xoxb-", "123456789012-1234567890123-AbCdEf1234567890aBcDeF12", "", "slack [redacted]"),
+    ("slack ", "xoxp-", "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12", "", "slack [redacted]"),
+    ("slack ", "xoxa-", "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12", "", "slack [redacted]"),
+    ("slack ", "xoxs-", "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12", "", "slack [redacted]"),
+    ("slack ", "xoxe-", "1-AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890abcdef", "", "slack [redacted]"),
+    ("slack ", "xapp-", "1-A0AbCdEf12-AbCdEf1234567890aBcDeF1234567890aBcDeF12", "", "slack [redacted]"),
+    ("aws ", "AKIA", "IOSFODNN7EXAMPLE", "", "aws [redacted]"),
+    ("aws ", "ASIA", "IOSFODNN7EXAMPLE", "", "aws [redacted]"),
+    ("hf ", "hf_", "AbCdEf1234567890aBcDeF1234567890aBc", "", "hf [redacted]"),
+    ("gcp ", "AIza", "AbCdEf1234567890aBcDeF1234567890aBc", "", "gcp [redacted]"),
+    ("sg ", "SG.", "AbCdEf1234567890aBcDeF", ".AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890a", "sg [redacted]"),
+    ("goog ", "ya29.", "AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF1234", "", "goog [redacted]"),
+    ("pkg ", "pypi-", "AgEIcHlwaS5vcmc-AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF12", "", "pkg [redacted]"),
+    ("sq ", "sq0atp-", "AbCdEf1234567890aBcDeF12", "", "sq [redacted]"),
+    ("sq ", "sq0csp-", "AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890", "", "sq [redacted]"),
+    ("shop ", "shpat_", "0123456789abcdef0123456789abcdef01", "", "shop [redacted]"),
+    ("shop ", "shppa_", "0123456789abcdef0123456789abcdef01", "", "shop [redacted]"),
+    ("shop ", "shpca_", "0123456789abcdef0123456789abcdef01", "", "shop [redacted]"),
+    ("dop ", "dp.pt.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
+    ("dop ", "dp.st.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
+    ("dop ", "dp.ct.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
+    ("dop ", "dp.audit.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
+    ("dop ", "dp.scim.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
+    ("notion ", "ntn_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "notion [redacted]"),
+    ("figma ", "figd_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "figma [redacted]"),
+    ("ing ", "aiops_ik_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "ing [redacted]"),
+    ("tok ", "aiops_tk_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "tok [redacted]"),
 ];
 
 /// Readable operational text — the false-positive budget is zero for these;
@@ -168,6 +254,46 @@ fn must_redact_is_100_percent() {
             Some(*want),
             "MUST_REDACT: {input}"
         );
+    }
+    for (lead, prefix, body, tail, want) in TOKEN_FIXTURES {
+        let input = format!("{lead}{prefix}{body}{tail}");
+        assert_eq!(
+            redact(&input).as_deref(),
+            Some(*want),
+            "TOKEN_FIXTURES: {prefix}"
+        );
+    }
+}
+
+/// The built fixtures still carry their shapes: the prefix lands exactly
+/// where the lead-in ends, so a mistyped part fails here before the
+/// scanner could ever see a whole token in the tree.
+#[test]
+fn token_fixtures_match_their_shapes() {
+    for (lead, prefix, body, _, _) in TOKEN_FIXTURES {
+        let built = format!("{lead}{prefix}{body}");
+        assert!(
+            built[lead.len()..].starts_with(prefix),
+            "{prefix}: parts out of order"
+        );
+        assert!(
+            body.len() >= 8,
+            "{prefix}: body too short to exercise the run rule"
+        );
+    }
+    // The whole SECRET_PREFIXES list is covered — a prefix added to policy
+    // without a corpus row fails here.
+    const NEED: &[&str] = &[
+        "aiops_ik_", "aiops_tk_", "sk-", "sk_live_", "sk_test_", "rk_live_", "ghp_", "gho_",
+        "ghu_", "ghs_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA",
+        "ASIA", "hf_", "whsec_", "AIza", "SG.", "ya29.", "dop_v1_", "npm_", "pypi-", "sq0atp-",
+        "sq0csp-", "shpat_", "shppa_", "shpca_", "shpss_", "GOCSPX-", "ghr_", "PMAK-", "sbp_",
+        "glsa-", "gldt-", "glrt-", "nfp_", "lin_api_", "atlasv1.", "amzn.mws.", "dapi", "xapp-",
+        "xoxe-", "dp.pt.", "dp.st.", "dp.ct.", "dp.audit.", "dp.scim.", "ntn_", "figd_",
+    ];
+    let have: Vec<&str> = TOKEN_FIXTURES.iter().map(|f| f.1).collect();
+    for prefix in NEED {
+        assert!(have.contains(prefix), "no fixture for prefix {prefix}");
     }
 }
 

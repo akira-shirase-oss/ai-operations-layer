@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 8ecb5109667094fe185ce76cdea2984c4fbe6c3c6a1ae92deea4886aecd87658 # shrinks to token = "aA/00Aa/aA+aA+AA+A+aAaa0aAaaAa0aAA+A0a=="
 cc 8789411b3dd5994e187df5cb1ad88fe40dfdfddfb5b650056b067ddccbbf80aa # shrinks to token = "/a0aaaA/A00AA00aa0+a+0a00aa00+AAA"
+cc c9592659e26058dda8a8f1400ce7473af9fa8884d2e77ff239b6385a94926c0f # shrinks to token = "//Aa/+a/Aa+A0aaAAa00AaA0AAaA++a+/="
