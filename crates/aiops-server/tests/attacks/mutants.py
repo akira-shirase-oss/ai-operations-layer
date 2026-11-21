@@ -623,7 +623,7 @@ MUTANTS = {
         && !BARE_HEX_KEPT.contains(&field)
         && bytes
             .iter()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
     {
         return true;
     }""",
@@ -688,7 +688,9 @@ MUTANTS = {
         ["pin_tails_and_new_credential_keys_still_refuse"],
     ),
     # `pin`/`otp`/`passcode`/`mfa`/`pass` are credential key names —
-    # thinning the namespace admits them in identifier and attribute roles.
+    # thinning the namespace admits them in identifier and attribute
+    # roles. BOTH lists must thin: a bare name is a part, and every one of
+    # these is also a suffix (`pin` dies either way).
     "credential-list-thinned": (
         [
             e(
@@ -701,8 +703,22 @@ MUTANTS = {
             e(
                 D / "policy.rs",
                 '''    "password",
-    "pin",''',
-                '''    "password",''',
+    "pin",
+    "pwd",''',
+                '''    "password",
+    "pwd",''',
+            ),
+            e(
+                D / "policy.rs",
+                '''    b"otp",
+    b"pass",''',
+                '''    b"pass",''',
+            ),
+            e(
+                D / "policy.rs",
+                '''    b"passwordhash",
+    b"pin",''',
+                '''    b"passwordhash",''',
             ),
         ],
         ["pin_tails_and_new_credential_keys_still_refuse"],
