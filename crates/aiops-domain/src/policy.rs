@@ -459,22 +459,38 @@ fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
     };
     j += sep;
     let opening = after[j..].iter().take_while(|b| is_quoting(**b)).count();
-    let quote = after[j..j + opening]
-        .iter()
-        .rev()
-        .find(|b| **b == b'"' || **b == b'\'')
-        .copied();
+    let run = &after[j..j + opening];
+    let qpos = run.iter().rposition(|b| *b == b'"' || *b == b'\'');
+    let quote = qpos.map(|p| run[p]);
+    // `\"key\":\"value\"` — an escaped opening quote means the value's own
+    // delimiter is `\"` too, so a backslash inside can only open the close.
+    let quote_escaped = qpos.is_some_and(|p| p > 0 && run[p - 1] == b'\\');
     j += opening;
     let value = &after[j..];
     let last_part = key_parts(key).pop().unwrap_or_default();
     // The normal extent: a quoted value runs to its closing quote; an unquoted
     // one stops only at whitespace, a quote or `&` — `,` and `;` are part of a
-    // credential, not separators (review N7c).
+    // credential, not separators (review N7c). Inside a real quote a `\x`
+    // pair belongs to the value — `Zq8\"kLm` keeps going past the escape;
+    // only an unescaped `q` ends it (review R3).
     let normal = if let Some(q) = quote {
-        value
-            .iter()
-            .take_while(|b| **b != q && **b != b'\\' && !b"\r\n".contains(b))
-            .count()
+        if quote_escaped {
+            value
+                .iter()
+                .take_while(|b| **b != q && **b != b'\\' && !b"\r\n".contains(b))
+                .count()
+        } else {
+            let mut n = 0;
+            while n < value.len() {
+                match value[n] {
+                    b'\\' if n + 1 < value.len() => n += 2,
+                    b'\r' | b'\n' => break,
+                    b if b == q => break,
+                    _ => n += 1,
+                }
+            }
+            n
+        }
     } else {
         // `Bearer <token>`: the value is the scheme and its token.
         let scheme = AUTH_SCHEMES
