@@ -6,7 +6,7 @@
 
 use crate::common::{cli, create_ingest_key, create_project, post_ingest, stack, table_count};
 use crate::shared::{batch, journey};
-use serde_json::{Value, json};
+use serde_json::json;
 use sqlx::PgPool;
 
 /// The stored event bodies as one JSON text — the ledger read-back.
@@ -16,10 +16,6 @@ async fn stored_bodies(pool: &PgPool) -> String {
         .await
         .unwrap();
     rows.join("\n")
-}
-
-fn attributes(map: serde_json::Map<String, Value>) -> Option<serde_json::Map<String, Value>> {
-    Some(map)
 }
 
 #[sqlx::test(migrations = "../aiops-store/migrations")]
@@ -38,12 +34,13 @@ async fn a_credential_key_is_withheld_even_when_opted_in(pool: PgPool) {
     let mut events = journey(0x21, 0);
     // `hunter2` is not credential-shaped: only the key's name may decide.
     // `api_token` was never opted in: a credential key dies regardless.
-    events[0].attributes = attributes(
-        json!({"password": "hunter2", "api_token": "hunter2", "business_key": "bk-1"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
+    events[0].attributes = json!({
+        "password": "hunter2",
+        "api_token": "hunter2",
+        "business_key": "bk-1"
+    })
+    .as_object()
+    .cloned();
     let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
@@ -70,12 +67,9 @@ async fn an_unknown_attribute_key_is_withheld(pool: PgPool) {
     let key = create_ingest_key(&s.url, "pilot", "h");
 
     let mut events = journey(0x22, 0);
-    events[0].attributes = attributes(
-        json!({"zzz_unclassified": "visible-me", "tool.name": "search"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
+    events[0].attributes = json!({"zzz_unclassified": "visible-me", "tool.name": "search"})
+        .as_object()
+        .cloned();
     let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["withheld_attributes"].as_u64().unwrap(), 1, "{body}");

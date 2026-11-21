@@ -839,12 +839,6 @@ fn field_roles_cover_every_wire_field() {
     use aiops_domain::policy::{FIELD_ROLES, FieldRole};
     use aiops_domain::validate::OPTIONAL_WIRE_FIELDS;
 
-    for field in OPTIONAL_WIRE_FIELDS {
-        assert!(
-            FIELD_ROLES.iter().any(|(name, _)| name == field),
-            "{field} has no field role — an unclassified field must not store"
-        );
-    }
     // Required, container, source and subfield names a role may point at —
     // the rest of the "live field" set beyond OPTIONAL_WIRE_FIELDS.
     const LIVE: &[&str] = &[
@@ -864,6 +858,12 @@ fn field_roles_cover_every_wire_field() {
         "cost_estimate.micros",
         "usage",
     ];
+    for field in OPTIONAL_WIRE_FIELDS {
+        assert!(
+            FIELD_ROLES.iter().any(|(name, _)| name == field),
+            "{field} has no field role — an unclassified field must not store"
+        );
+    }
     for (name, _) in FIELD_ROLES {
         assert!(
             OPTIONAL_WIRE_FIELDS.contains(name) || LIVE.contains(name),
