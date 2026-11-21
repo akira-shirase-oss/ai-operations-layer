@@ -1,22 +1,29 @@
-//! The labelled redaction corpus (the review's Ruling, 2026-11-20): every
-//! entry is labelled `MUST_REDACT` — a credential shape that must not
-//! survive — or `MUST_KEEP` — readable operational text that must come
-//! through unchanged. The gate is 100% recall on `MUST_REDACT` and a stated
-//! false-positive budget on `MUST_KEEP` (today: zero — every keep case is a
-//! shape a previous review round asked to keep). Two properties ride with
-//! it: random base64/base64url runs of 32–88 chars never leave ≥8
-//! contiguous bytes outside a strict-name piece in four contexts, and
-//! `redact` never panics over arbitrary Unicode with `%XX` and `\r\n`.
+//! The labelled redaction corpus (the review's Ruling, 2026-11-20), split per
+//! `docs/REDACTION-POLICY.md` into two tiers. `KEYED_REDACT` is the
+//! deterministic tier: a `CREDENTIAL_KEYS` name in `k=v` / `k:v` / `"k":"v"`
+//! (encoded or escaped however deep) decides — the value dies whatever its
+//! shape, and the tier's 100% is constructional: the rule is a closed set,
+//! not a measured heuristic. `BACKSTOP_REDACT` is the measured tier: unkeyed
+//! text where `redact`'s heuristics are the only line — token runs, provider
+//! prefixes, JWTs, userinfo, PEM. Its guarantee is the corpus itself plus the
+//! documented residual below — that residual is the *whole* residual, now
+//! that keyed text answers to the closed rule. `MUST_KEEP` keeps its zero
+//! false-positive budget — every keep case is a shape a review round asked
+//! to keep. Two properties ride with the tiers: random base64/base64url runs
+//! of 32–88 chars never leave ≥8 contiguous bytes outside a strict-name
+//! piece in five contexts, and `redact` never panics over arbitrary Unicode
+//! with `%XX` and `\r\n`.
 //!
-//! Accepted residual (review R2, measured): a `/`-separated piece of a
-//! credential run that is itself a strict name — all-lowercase, every
-//! `-`/`_` piece under 6 chars, or a dotted version — may keep (a random
-//! draw spells `abcdefghij` about as often as `services` does). Everything
-//! else about the token dies; no ≥8-byte window survives outside such a
-//! piece in any of the five contexts. A whole run may keep the same way —
-//! every `/`-segment name-shaped AND some `-`/`_` piece a real word
-//! (≥4 all-lowercase: `mistralai`, `services`) — a path or a model id,
-//! never a credential; a word-less run of name pieces is a token and dies.
+//! Accepted residual (review R2, measured — the backstop tier only): a
+//! `/`-separated piece of a credential run that is itself a strict name —
+//! all-lowercase, every `-`/`_` piece under 6 chars, or a dotted version —
+//! may keep (a random draw spells `abcdefghij` about as often as `services`
+//! does). Everything else about the token dies; no ≥8-byte window survives
+//! outside such a piece in any of the five contexts. A whole run may keep
+//! the same way — every `/`-segment name-shaped AND some `-`/`_` piece a
+//! real word (≥4 all-lowercase: `mistralai`, `services`) — a path or a
+//! model id, never a credential; a word-less run of name pieces is a token
+//! and dies.
 //!
 //! A corpus failure is a red-first bug: fix `redact`, never relax a label —
 //! the labels are the contract three review rounds wrote.
@@ -25,9 +32,12 @@ use aiops_domain::policy::{looks_like_secret, redact};
 use proptest::prelude::*;
 use std::fmt::Write as _;
 
-/// (input, expected output after redaction). 100% recall: every one of these
-/// must produce exactly the expected string.
-const MUST_REDACT: &[(&str, &str)] = &[
+/// The deterministic tier: a `CREDENTIAL_KEYS`-named key in `k=v`, `k:v`,
+/// `"k":"v"` or a header line decides, and the value dies whatever its
+/// shape — quoted, bracketed, container-nested, percent-encoded once or
+/// twice, or JSON-escaped. 100% by construction: the deciding rule is a
+/// closed name set (`credential_key`), not a value-shape heuristic.
+const KEYED_REDACT: &[(&str, &str)] = &[
     // Keyed secrets, quoted and unquoted.
     ("password=hunter2", "password=[redacted]"),
     ("api_key: \"zzz-top\"", "api_key: \"[redacted]\""),
@@ -47,6 +57,86 @@ const MUST_REDACT: &[(&str, &str)] = &[
         "{\"auth\": {\"token\": \"hunter2\"}}",
         "{\"auth\": [redacted]}",
     ),
+    // Minified JSON: an `@` inside an email is not userinfo; the keyed secret
+    // beside it still dies (N1).
+    (
+        "{\"url\":\"https://a.io/token?client_secret=Zq81aa\",\"user\":\"ana@x.io\"}",
+        "{\"url\":\"https://a.io/token?client_secret=[redacted]\",\"user\":\"ana@x.io\"}",
+    ),
+    // Header-keyed secret text: `Authorization` and `Cookie` name credentials
+    // — the whole value dies whatever the scheme (review corpus class).
+    (
+        "Authorization: Bearer abc.def-123456789",
+        "Authorization: [redacted]",
+    ),
+    (
+        concat!("Cookie: session=", "AbCdEf1234567890aBc", "; theme=light"),
+        "Cookie: [redacted]",
+    ),
+    // A fully-encoded `password=hunter2`: the decoded view finds the value
+    // and its span maps back to exactly the value's raw bytes — the encoded
+    // key prefix is a name, not a secret.
+    (
+        "%70%61%73%73%77%6F%72%64%3D%68%75%6E%74%65%72%32",
+        "%70%61%73%73%77%6F%72%64%3D[redacted]",
+    ),
+    // A double-encoded separator hides the `=` from the first decoded view —
+    // a second pass still finds the keyed value (review %253A).
+    ("password%253Dhunter2", "password%253D[redacted]"),
+    // Fully double-encoded `password=hunter2`: the second pass's span unwinds
+    // through both raw maps to exactly the value's raw bytes — the key stays
+    // a name.
+    (
+        "%2570%2561%2573%2573%2577%256F%2572%2564%253D%2568%2575%256E%2574%2565%2572%2532",
+        "%2570%2561%2573%2573%2577%256F%2572%2564%253D[redacted]",
+    ),
+    // Escapes inside a quoted value belong to the value, never end it
+    // (review R3): \" \\ \n and \u00e9 (the json.dumps default) each get a
+    // row — the value's real closing quote is where the secret stops.
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\"kLm;Pw9x\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "nkLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "u00e9kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    // In an escaped-quote context (`\"key\":\"value\"`) a backslash RUN of
+    // two or more is the value's own content — `\\` a literal backslash,
+    // `\\\"` that plus an escaped quote — and only a single-backslash
+    // `\"` closes. Stopping at the first `\` leaked the tail (review N-D):
+    // `\\\"`, `\\u00e9`, `\\n` and PHP's `\\/` each get a row.
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "\\", "\"kLm;Pw9x\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "u00e9kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "nkLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "/kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+];
+
+/// The measured backstop tier: unkeyed text where no schema or key name can
+/// decide — raw token runs, provider prefixes, JWT pieces, URL userinfo,
+/// PEM blocks. The corpus and the run properties measure this tier, and the
+/// documented strict-name/word residual above is its whole residual.
+const BACKSTOP_REDACT: &[(&str, &str)] = &[
     // URL userinfo: the password dies, the user stays — unless the user part
     // itself is a credential (N1 residual: the `x-oauth-basic` pattern).
     (
@@ -64,12 +154,6 @@ const MUST_REDACT: &[(&str, &str)] = &[
             "QRST:x-oauth-basic@github.com"
         ),
         "https://[redacted]:[redacted]@github.com",
-    ),
-    // Minified JSON: an `@` inside an email is not userinfo; the keyed secret
-    // beside it still dies (N1).
-    (
-        "{\"url\":\"https://a.io/token?client_secret=Zq81aa\",\"user\":\"ana@x.io\"}",
-        "{\"url\":\"https://a.io/token?client_secret=[redacted]\",\"user\":\"ana@x.io\"}",
     ),
     // Known-prefix tokens, bearer schemes, JWTs, PEM, AWS keys.
     (
@@ -89,10 +173,6 @@ const MUST_REDACT: &[(&str, &str)] = &[
             " end"
         ),
         "jwt [redacted] end",
-    ),
-    (
-        "Authorization: Bearer abc.def-123456789",
-        "Authorization: [redacted]",
     ),
     ("-----BEGIN OPENSSH PRIVATE KEY----- abc", "[redacted]"),
     // Random-shape credentials: 40+ lowercase hex, long mixed runs, slash
@@ -132,28 +212,11 @@ const MUST_REDACT: &[(&str, &str)] = &[
         "postgres://aaa:%0C$Aa@aaa.aa/db",
         "postgres://aaa:[redacted]@aaa.aa/db",
     ),
-    // A fully-encoded `password=hunter2`: the decoded view finds the value
-    // and its span maps back to exactly the value's raw bytes — the encoded
-    // key prefix is a name, not a secret.
-    (
-        "%70%61%73%73%77%6F%72%64%3D%68%75%6E%74%65%72%32",
-        "%70%61%73%73%77%6F%72%64%3D[redacted]",
-    ),
     // A webhook path dies inside the host — the `.`-evidenced run keeps its
     // name-shaped prefix (`com`) and kills the segments no human would name.
     (
         "https://hooks.example.com/AbCdEf1234567890XYZabcd/x9yzz",
         "https://hooks.example.com[redacted]",
-    ),
-    // A double-encoded separator hides the `=` from the first decoded view —
-    // a second pass still finds the keyed value (review %253A).
-    ("password%253Dhunter2", "password%253D[redacted]"),
-    // Fully double-encoded `password=hunter2`: the second pass's span unwinds
-    // through both raw maps to exactly the value's raw bytes — the key stays
-    // a name.
-    (
-        "%2570%2561%2573%2573%2577%256F%2572%2564%253D%2568%2575%256E%2574%2565%2572%2532",
-        "%2570%2561%2573%2573%2577%256F%2572%2564%253D[redacted]",
     ),
     // The review's `%253A` case: `:` and `@` double-encoded inside userinfo
     // stay `%3A`/`%40` after one pass — a second decode finds `u:ab@`, and a
@@ -200,30 +263,6 @@ const MUST_REDACT: &[(&str, &str)] = &[
         ),
         "GET https://hooks.example.com[redacted]",
     ),
-    // Cookies are keyed secret text like any other (review corpus class).
-    (
-        concat!("Cookie: session=", "AbCdEf1234567890aBc", "; theme=light"),
-        "Cookie: [redacted]",
-    ),
-    // Escapes inside a quoted value belong to the value, never end it
-    // (review R3): \" \\ \n and \u00e9 (the json.dumps default) each get a
-    // row — the value's real closing quote is where the secret stops.
-    (
-        concat!("{\"password\":\"Zq8", "\\", "\"kLm;Pw9x\"}"),
-        "{\"password\":\"[redacted]\"}",
-    ),
-    (
-        concat!("{\"password\":\"Zq8", "\\", "\\", "kLm\"}"),
-        "{\"password\":\"[redacted]\"}",
-    ),
-    (
-        concat!("{\"password\":\"Zq8", "\\", "nkLm\"}"),
-        "{\"password\":\"[redacted]\"}",
-    ),
-    (
-        concat!("{\"password\":\"Zq8", "\\", "u00e9kLm\"}"),
-        "{\"password\":\"[redacted]\"}",
-    ),
     // A JWT fragment — the `eyJ` prefix with its dots split away — is still
     // a credential piece (review corpus class: split JWTs).
     (
@@ -266,27 +305,6 @@ const MUST_REDACT: &[(&str, &str)] = &[
     (
         "run a0_Aaa0Aaa-0-A_aA-a_aaa_AA0_0AaA/Run-1A ok",
         "run [redacted] ok",
-    ),
-    // In an escaped-quote context (`\"key\":\"value\"`) a backslash RUN of
-    // two or more is the value's own content — `\\` a literal backslash,
-    // `\\\"` that plus an escaped quote — and only a single-backslash
-    // `\"` closes. Stopping at the first `\` leaked the tail (review N-D):
-    // `\\\"`, `\\u00e9`, `\\n` and PHP's `\\/` each get a row.
-    (
-        concat!("{\"password\":\"Zq8", "\\", "\\", "\\", "\"kLm;Pw9x\"}"),
-        "{\"password\":\"[redacted]\"}",
-    ),
-    (
-        concat!("{\"password\":\"Zq8", "\\", "\\", "u00e9kLm\"}"),
-        "{\"password\":\"[redacted]\"}",
-    ),
-    (
-        concat!("{\"password\":\"Zq8", "\\", "\\", "nkLm\"}"),
-        "{\"password\":\"[redacted]\"}",
-    ),
-    (
-        concat!("{\"password\":\"Zq8", "\\", "\\", "/kLm\"}"),
-        "{\"password\":\"[redacted]\"}",
     ),
 ];
 
@@ -690,13 +708,29 @@ fn must_keep_sha256_digests() {
     }
 }
 
+/// The keyed tier is 100% *by construction*: every row is a
+/// `CREDENTIAL_KEYS` name deciding — a failure here is a broken closed
+/// rule, never a measured miss.
 #[test]
-fn must_redact_is_100_percent() {
-    for (input, want) in MUST_REDACT {
+fn keyed_redact_is_100_percent() {
+    for (input, want) in KEYED_REDACT {
         assert_eq!(
             redact(input).as_deref(),
             Some(*want),
-            "MUST_REDACT: {input}"
+            "KEYED_REDACT: {input}"
+        );
+    }
+}
+
+/// The backstop tier is measured: exact equality on every corpus row, with
+/// the strict-name/word residual in the header as the whole residual.
+#[test]
+fn backstop_redact_is_100_percent() {
+    for (input, want) in BACKSTOP_REDACT {
+        assert_eq!(
+            redact(input).as_deref(),
+            Some(*want),
+            "BACKSTOP_REDACT: {input}"
         );
     }
     for (lead, prefix, body, tail, want) in TOKEN_FIXTURES {

@@ -1193,4 +1193,36 @@ mod tests {
         assert_eq!(policy.treat("prompt"), KeyTreatment::Withheld);
         assert_eq!(policy.treat("llm.output"), KeyTreatment::Withheld);
     }
+
+    /// REDACTION-POLICY: a credential-named key is withheld whatever the
+    /// caller opts in — the closed rule beats both lists.
+    #[test]
+    fn credential_keys_are_always_withheld() {
+        let policy = Policy {
+            opt_in_keys: vec![
+                "password".into(),
+                "x-api-key".into(),
+                "customer.tier".into(),
+            ],
+        };
+        for key in [
+            "password",
+            "x-api-key",
+            "api_token",
+            "client_secret",
+            "PGPASSWORD",
+            "accessToken",
+            "Cookie",
+            "Authorization",
+        ] {
+            assert_eq!(
+                policy.treat(key),
+                KeyTreatment::Withheld,
+                "{key} names a credential — withheld even opted in"
+            );
+        }
+        // …and a non-credential opt-in still lands.
+        assert_eq!(policy.treat("customer.tier"), KeyTreatment::OptIn);
+        assert_eq!(policy.treat("tool.name"), KeyTreatment::Default);
+    }
 }
