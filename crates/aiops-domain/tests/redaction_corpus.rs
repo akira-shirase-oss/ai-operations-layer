@@ -4,8 +4,16 @@
 //! through unchanged. The gate is 100% recall on `MUST_REDACT` and a stated
 //! false-positive budget on `MUST_KEEP` (today: zero — every keep case is a
 //! shape a previous review round asked to keep). Two properties ride with
-//! it: random base64 of 32–88 chars never leaves ≥8 contiguous bytes, and
+//! it: random base64/base64url runs of 32–88 chars never leave ≥8
+//! contiguous bytes outside a strict-name piece in four contexts, and
 //! `redact` never panics over arbitrary Unicode with `%XX` and `\r\n`.
+//!
+//! Accepted residual (review R2, measured): a `/`-separated piece of a
+//! credential run that is itself a strict name — all-lowercase, every
+//! `-`/`_` piece under 6 chars, or a dotted version — may keep (a random
+//! draw spells `abcdefghij` about as often as `services` does). Everything
+//! else about the token dies; no ≥8-byte window survives outside such a
+//! piece in any of the four contexts.
 //!
 //! A corpus failure is a red-first bug: fix `redact`, never relax a label —
 //! the labels are the contract three review rounds wrote.
@@ -756,26 +764,75 @@ fn identifier_fields() {
     }
 }
 
+/// The four contexts the property runs in (review R2): after a space,
+/// after `host/`, after `//`, and inside a hyphenated path.
+const CONTEXTS: &[&str] = &[
+    "key {T} used",
+    "GET https://h.io/{T} 200",
+    "x //{T} y",
+    "GET https://h.io/prefix-{T}-suffix 200",
+];
+
+/// Mirrors `policy.rs`'s keep rule: when a `/`-joined run dies, only the
+/// FIRST segment may survive it — and only when that segment is itself a
+/// strict name: no uppercase, every `-`/`_` piece under 6 chars, or a
+/// dotted version. (A run that is name-shaped end to end is kept whole and
+/// `redact` returns `None`, so it never reaches the window loop.) The
+/// measured residual this file's header records.
+fn strict_segment(s: &[u8]) -> bool {
+    !s.is_empty()
+        && s.iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && (!s.iter().any(u8::is_ascii_uppercase)
+            || s.split(|b| matches!(b, b'-' | b'_'))
+                .all(|p| !p.is_empty() && p.len() < 6)
+            || (s.contains(&b'.')
+                && s.split(|b| *b == b'.')
+                    .all(|p| !p.is_empty() && p.len() <= 6)))
+}
+
+fn assert_no_secret_bytes(token: &str) -> Result<(), TestCaseError> {
+    for ctx in CONTEXTS {
+        let input = ctx.replace("{T}", token);
+        let Some(out) = redact(&input) else { continue };
+        let pieces: Vec<&[u8]> = token.as_bytes().split(|b| *b == b'/').collect();
+        for win in token.as_bytes().windows(8) {
+            let Ok(w) = std::str::from_utf8(win) else {
+                continue;
+            };
+            if out.contains(w) {
+                // Survival is allowed only fully inside the first
+                // `/`-segment, and only when it is a strict name.
+                let inside = pieces
+                    .first()
+                    .is_some_and(|p| strict_segment(p) && p.windows(8).any(|pw| pw == win));
+                prop_assert!(inside, "{token:?} left {w:?} in {ctx:?} → {out:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
 proptest! {
-    /// The NF1 property: a random standard-base64 run of 32–88 chars —
-    /// the AWS secret-key shape — never leaves ≥8 contiguous bytes in the
-    /// output, wherever `/` and `=` fall inside it.
+    /// A random standard-base64 run of 32–88 chars — the AWS secret-key
+    /// shape — never leaves ≥8 contiguous bytes outside a strict-name
+    /// piece, in all four contexts (review R2).
     #[test]
     fn random_base64_never_leaves_eight_bytes(token in "[A-Za-z0-9+/]{32,88}={0,2}") {
-        // Only credential-shaped draws count (upper + lower + digit — the
-        // same classes the run rule itself requires).
         prop_assume!(token.bytes().any(|b| b.is_ascii_uppercase()));
         prop_assume!(token.bytes().any(|b| b.is_ascii_lowercase()));
         prop_assume!(token.bytes().any(|b| b.is_ascii_digit()));
-        let input = format!("key {token} used");
-        if let Some(out) = redact(&input) {
-            prop_assert!(
-                !token.as_bytes().windows(8).any(|win| {
-                    std::str::from_utf8(win).is_ok_and(|w| out.contains(w))
-                }),
-                "{token:?} left ≥8 contiguous bytes in {out:?}"
-            );
-        }
+        assert_no_secret_bytes(&token)?;
+    }
+
+    /// The same for the base64url alphabet — `-`/`_` runs included
+    /// (Telegram/JWT-shaped tokens).
+    #[test]
+    fn random_base64url_never_leaves_eight_bytes(token in "[A-Za-z0-9_\\-]{32,88}") {
+        prop_assume!(token.bytes().any(|b| b.is_ascii_uppercase()));
+        prop_assume!(token.bytes().any(|b| b.is_ascii_lowercase()));
+        prop_assume!(token.bytes().any(|b| b.is_ascii_digit()));
+        assert_no_secret_bytes(&token)?;
     }
 
     /// Arbitrary Unicode with %XX escapes and CR/LF — the N2 panic class:
