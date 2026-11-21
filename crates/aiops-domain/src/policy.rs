@@ -557,11 +557,57 @@ fn high_confidence(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
 /// [`crate::validate`] runs on identifier fields (model ids, release names,
 /// request ids). A model id is a long mixed run and `auth:login` a key-looking
 /// pair; neither is a credential, so only these shapes refuse (review N3).
+/// A `key:value` pair whose key names a secret refuses too — `password:x` is
+/// not an identifier (review N3 residual) — except the category keys `auth`
+/// and `authorization`, and except a `:` pair whose tail is a plain
+/// lowercase name: `token:expired` is an event, not a field.
 pub fn looks_like_secret(text: &str) -> bool {
     let bytes = text.as_bytes();
     (0..bytes.len()).any(|i| {
-        url_password(bytes, i).is_some()
+        if url_password(bytes, i).is_some()
             || ((i == 0 || !is_word(bytes[i - 1])) && high_confidence(bytes, i).is_some())
+        {
+            return true;
+        }
+        // `name:value` / `name=value` where the name names a credential.
+        if i > 0 && is_key_byte(bytes[i - 1]) {
+            return false;
+        }
+        let rest = &bytes[i..];
+        let key_len = rest
+            .iter()
+            .take(64)
+            .take_while(|b| is_key_byte(**b))
+            .count();
+        if key_len == 0
+            || !rest[key_len..]
+                .first()
+                .is_some_and(|b| matches!(b, b'=' | b':'))
+        {
+            return false;
+        }
+        let key = &rest[..key_len];
+        if !is_secret_key(key)
+            || key.eq_ignore_ascii_case(b"auth")
+            || key.eq_ignore_ascii_case(b"authorization")
+        {
+            return false;
+        }
+        if rest[key_len] == b'=' {
+            return true;
+        }
+        // `:`-namespaced names are identifiers too — `token:expired`,
+        // `session:timeout`, `stripe:charge:failed`, `session-api:8080` —
+        // so a `:` pair refuses only when its tail is not a plain name:
+        // every piece a word or a number, nothing that spells like a
+        // credential (`password:x` is a field, `token:expired` an event).
+        !rest[key_len + 1..]
+            .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
+            .all(|p| {
+                p.len() >= 2
+                    && p.iter().all(u8::is_ascii_alphanumeric)
+                    && !(p.iter().any(u8::is_ascii_uppercase) && p.iter().any(u8::is_ascii_digit))
+            })
     })
 }
 
@@ -854,7 +900,7 @@ mod tests {
         );
         assert_eq!(
             redact("GET https://hooks.example.com/services/T0ABCDEF12/B0CDEF1234/xyZab").as_deref(),
-            Some("GET https://hooks.example.com/services/[redacted]")
+            Some("GET https://hooks.example.com[redacted]")
         );
     }
 
@@ -891,11 +937,9 @@ mod tests {
     #[test]
     fn paths_and_model_ids_in_free_text_are_not_secrets() {
         // N4: a `/`-joined run is not a credential by shape alone — paths,
-        // model ids and URL paths are long mixed runs too. A run that
-        // contains `/` counts only when at least two segments each look
-        // like a key (≥6 chars, an uppercase letter and a digit), and the
-        // redaction starts at the first of them so the readable prefix —
-        // a domain, a directory, a model namespace — survives.
+        // model ids and URL paths are long mixed runs too. A run with path
+        // evidence stays readable only when every segment is name-shaped;
+        // when it dies, at most a strict-name first segment keeps.
         for text in [
             "model mistralai/Mistral-7B-Instruct-v0.3 refused the prompt",
             "model mistralai/Mixtral-8x22B-Instruct-v0p1 refused the prompt",
@@ -906,11 +950,11 @@ mod tests {
             assert_eq!(redact(text), None, "{text:?} is operational text");
         }
         // A webhook path still dies — the `.`-evidenced run keeps its
-        // name-shaped prefix (`com/services`) and kills the segments no
+        // name-shaped first segment (`com`) and kills the segments no
         // human would name.
         assert_eq!(
             redact("GET https://hooks.example.com/services/T0ABCDEF12/B0CDEF1234/xyZab").as_deref(),
-            Some("GET https://hooks.example.com/services/[redacted]")
+            Some("GET https://hooks.example.com[redacted]")
         );
         // Base64 `+`/`/`/`=` still keeps a bare blob one run (S1-2).
         assert_eq!(

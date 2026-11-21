@@ -751,12 +751,15 @@ fn must_keep_is_verbatim() {
 /// not credentials.
 #[test]
 fn identifier_fields() {
-    for input in ["password:x", "auth:Basic dXNlcjpwYXNz"] {
+    for input in ["password:x", "token=a1b2c3d4"] {
         assert!(looks_like_secret(input), "secret: {input}");
     }
     for input in [
         "mistralai/Mistral-7B-Instruct-v0.3",
         "auth:login",
+        "token:expired",
+        "session:timeout",
+        "stripe:charge:failed",
         "run-2026-11-20",
         "collector-01",
     ] {
