@@ -496,3 +496,27 @@ named decision when the relevant milestone starts.
   The credential caches' generation and both maps moved under one
   mutex — a `remove` bumping generation outside the locks let a
   pre-eviction store answer slip back in for up to a TTL (N-F).
+- **D-037 — Typed field policy is the privacy boundary; the scanner is the
+  backstop (2026-11-21, `docs/REDACTION-POLICY.md`).** Four rounds of
+  heuristic redaction each surfaced a new leak shape — a free-text scanner
+  that must recognize every credential shape in any context keeps finding
+  zero-days. The ruling inverted the default: `FIELD_ROLES` classifies
+  every logged or shown field by schema position — `id`/`enum`/`scalar`/
+  `time` parse against closed formats, `identifier` fields keep
+  `opt_ident`'s closed refuse rules (never rewritten — `[redacted]`
+  would corrupt what the caller reads back), `keyed_value` fields live
+  or die by `treat()` on the *key's* name, and `error_message` is the
+  only `free_text` left to the heuristic scanner. A field with no role
+  is `field_not_allowed` at runtime and a red coverage test; an unknown
+  attribute key stays withheld; and a credential-named key is withheld
+  whatever the caller opts in — `credential_key` is the closed
+  `CREDENTIAL_KEYS` namespace shared by `treat()`, the identifier rule,
+  and keyed text inside free text. The corpus splits the same way:
+  `KEYED_REDACT` is 100% by construction (the closed name set decides),
+  `BACKSTOP_REDACT` keeps the strict-name/word residual as its *whole*
+  residual — exotic credential spellings in unlabeled free text is now
+  a bounded miss, not a recurring zero-day class. Six new attack
+  classes and mutants pin each rule: `opt-in-beats-credential`,
+  `credential-key-by-shape`, `unknown-key-default-allowed`,
+  `unclassified-field-admitted`, `keyed-text-kept`,
+  `identifier-credential-stored`.

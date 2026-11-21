@@ -128,7 +128,9 @@ Per type, only the listed fields may appear (anything else is
   (merged). A re-used `event_id` with different content, instance or key is
   refused as `conflicting_duplicate`; the first write wins.
 - `withheld_attributes`: attributes not in the default allowlist or the
-  project's opt-in list — neither key nor value is stored (D-006).
+  project's opt-in list — neither key nor value is stored (D-006). A
+  credential-named key is always withheld: opt-in can never whitelist one
+  (REDACTION-POLICY).
 - `overflowed_names`: names over the project's or the key's budget, stored
   as `_overflow`.
 - Refusal codes (stable): `malformed`, `event_too_large`,
@@ -164,7 +166,9 @@ halving isolates it (the Rust SDK does this down to single events).
 `validation.rule`. `job.runner` and `job.id` (added 2026-11-17, D-027) name the job-runner run
 an operation stands for; the collector checks that link before it asks
 the runner. Anything else needs a per-project opt-in
-(`aiops-server admin set-opt-in`) and is labeled *opt-in* in the console.
+(`aiops-server admin set-opt-in`) and is labeled *opt-in* in the console —
+except credential-named keys, which are withheld even when listed (an opt-in
+can never whitelist a credential; `docs/REDACTION-POLICY.md`).
 
 ## Context propagation
 

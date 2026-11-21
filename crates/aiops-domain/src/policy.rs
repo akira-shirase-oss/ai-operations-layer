@@ -402,6 +402,10 @@ fn secret_spans(view: &[u8]) -> Vec<(usize, usize)> {
 /// Replaces secret-shaped substrings with [`REDACTED`]. Returns `None` when nothing
 /// matched (the common case allocates nothing). Linear in the input for a fixed pattern
 /// set; inputs are already capped (≤ 512 bytes).
+///
+/// This is the free-text backstop — `FieldRole::FreeText` in
+/// `docs/REDACTION-POLICY.md`. It decides nothing under a credential *key*:
+/// `treat()` withholds those by name before a value ever reaches a scanner.
 pub fn redact(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut spans = secret_spans(bytes);
@@ -681,10 +685,12 @@ const STATE_WORDS: &[&[u8]] = &[
     b"refused", b"revoked", b"started", b"timeout",
 ];
 
-/// Whether `text` holds a high-confidence credential shape — the check
-/// [`crate::validate`] runs on identifier fields (model ids, release names,
-/// request ids). A model id is a long mixed run and `auth:login` a key-looking
-/// pair; neither is a credential, so only these shapes refuse (review N3).
+/// Whether `text` holds a high-confidence credential shape — the declared
+/// identifier rule-set, `FieldRole::Identifier` in `docs/REDACTION-POLICY.md`.
+/// [`crate::validate`] runs on identifier fields
+/// (model ids, release names, request ids). A model id is a long mixed run
+/// and `auth:login` a key-looking pair; neither is a credential, so only
+/// these shapes refuse (review N3).
 /// A `key:value` pair whose key names a secret refuses too — `password:x` is
 /// not an identifier (review N3 residual) — except the category keys `auth`
 /// and `authorization`, and except a `:` pair whose whole tail is state
