@@ -98,3 +98,9 @@ architecture check, and the console's type-check and build — before every
 commit, plus the failure-case drills when
 ingest, store or control code changed. Report exactly what ran and what
 passed.
+
+## Landing
+
+Commit on your branch. The coordinator lands on `main` after review —
+never move the `main` ref yourself, not even locally (no merge, rebase or
+`update-ref` against it), and never push.
