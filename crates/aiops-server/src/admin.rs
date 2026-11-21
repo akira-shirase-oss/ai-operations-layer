@@ -108,6 +108,15 @@ pub async fn run(store: &Store, command: Admin, now: Timestamp) -> anyhow::Resul
                 .filter(|k| !k.is_empty())
                 .map(str::to_owned)
                 .collect();
+            // A credential-named key is withheld whatever the caller opts
+            // in (D-037's closed rule) — reporting success on an opt-in
+            // that can never apply is the finding (review round 6, B1).
+            for key in &keys {
+                anyhow::ensure!(
+                    !aiops_domain::policy::credential_key(key.as_bytes()),
+                    "opt-in key `{key}` names a credential — credential keys are always withheld"
+                );
+            }
             store.set_opt_in_keys(&project, &keys).await?;
             println!("{project} opt-in keys: {keys:?}");
         }

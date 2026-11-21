@@ -60,6 +60,10 @@ pub enum StoreError {
     /// A stored row no longer validates (should be impossible; reported, never hidden).
     #[error("a stored event no longer validates")]
     Corrupt,
+    /// A revocation-path trigger is not armed `ALWAYS` — the channel can
+    /// silently miss writes it exists to carry (review round 6, B2).
+    #[error("a revocation trigger is not armed ALWAYS: {0}")]
+    TriggerUnarmed(String),
 }
 
 impl StoreError {
@@ -733,23 +737,38 @@ pub async fn revocation_writer(database_url: &str) -> Result<PgPool, StoreError>
 
 /// The heartbeat write: fire the channel's UPDATE trigger over `pool`
 /// (the watcher's own, never a tenant pool). The trigger emits `heartbeat`
-/// on [`REVOCATION_CHANNEL`]. The beat also proves the WHOLE revoke chain,
-/// not just its own trigger (review round 5, finding 7):
-/// `api_tokens_revoked_notify` disabled (`tgenabled = 'D'`) or armed
-/// replica-only (`'R'`) leaves deletes deaf while this table's trigger
-/// still fires green — `O` (origin) and `A` (always) are the sound states.
+/// on [`REVOCATION_CHANNEL`]. The beat also proves the WHOLE revoke chain
+/// (review rounds 5-6, findings 7/B2): EVERY revocation-path trigger must
+/// be armed `ALWAYS` — `'O'` (origin) fires for ordinary sessions but goes
+/// silent under `session_replication_role = replica`, `'D'`/`'R'`/missing
+/// never fire; each is checked on its own table (`tgrelid`) so a
+/// same-named trigger elsewhere cannot impersonate it, and any unarmed
+/// one is its own named error, not a generic "no rows".
 pub async fn revocation_beat(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::query("UPDATE revocation_heartbeat SET beat = now() WHERE id")
         .execute(pool)
         .await?;
-    let armed: Option<String> = sqlx::query_scalar(
-        "SELECT tgenabled::text FROM pg_trigger
-         WHERE tgname = 'api_tokens_revoked_notify'",
+    let unarmed: Vec<String> = sqlx::query_scalar(
+        "SELECT v.tgname
+         FROM (VALUES
+             ('api_tokens', 'api_tokens_revoked_notify'),
+             ('api_tokens', 'api_tokens_deleted_notify'),
+             ('api_tokens', 'api_tokens_truncated_notify'),
+             ('ingest_keys', 'ingest_keys_revoked_notify'),
+             ('ingest_keys', 'ingest_keys_deleted_notify'),
+             ('ingest_keys', 'ingest_keys_truncated_notify'),
+             ('projects', 'projects_opt_in_notify'),
+             ('revocation_heartbeat', 'revocation_heartbeat_notify')
+         ) AS v(relname, tgname)
+         LEFT JOIN pg_trigger t
+           ON t.tgname = v.tgname
+          AND t.tgrelid = v.relname::regclass
+         WHERE t.tgenabled IS NULL OR t.tgenabled <> 'A'",
     )
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    if !matches!(armed.as_deref(), Some("O" | "A")) {
-        return Err(StoreError::Unavailable(sqlx::Error::RowNotFound));
+    if !unarmed.is_empty() {
+        return Err(StoreError::TriggerUnarmed(unarmed.join(",")));
     }
     Ok(())
 }

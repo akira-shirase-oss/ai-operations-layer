@@ -324,10 +324,13 @@ const BACKSTOP_REDACT: &[(&str, &str)] = &[
     // The token is exactly 32 — the interior run is 31, so only the
     // `/`-opening fix catches it.
     ("x /AbCdEf1234567890aBcDeF123456789 y", "x [redacted] y"),
-    // A `%25`-nested escape deeper than DECODE_PASSES fails closed on its
-    // leftover span — `%41` nested five deep — not the whole field
-    // (review round 5): the text around it survives.
-    ("x %2525252541 y", "x [redacted] y"),
+    // A `%25`-nested escape deeper than DECODE_PASSES fails closed on the
+    // WHOLE field (review round 6, A1): the hidden byte can be the key's
+    // own separator, so the text beside a residual span is where the
+    // credential sits — `password[redacted]hunter2` was the regression.
+    ("x %2525252541 y", "[redacted]"),
+    ("key password%252525253Ahunter2 end", "[redacted]"),
+    ("key passw%25252525256Frd=hunter2 end", "[redacted]"),
 ];
 
 /// Provider-token fixtures as `(lead-in, prefix, body, tail, want)` — built
@@ -856,31 +859,161 @@ fn must_keep_is_verbatim() {
 /// dropped from `FIELD_ROLES` fails here even though `only()` would
 /// still refuse it at runtime; a row naming a field that does not exist
 /// is a stale row.
+#[expect(
+    clippy::too_many_lines,
+    reason = "an exhaustive destructure names every wire field"
+)]
 #[test]
 fn field_roles_cover_every_wire_field() {
     use aiops_domain::policy::{FIELD_ROLES, FieldRole};
     use aiops_domain::validate::OPTIONAL_WIRE_FIELDS;
+    use aiops_domain::wire::{WireCost, WireEvent, WireSource, WireUsage};
 
-    // Required, container, source and subfield names a role may point at —
-    // the rest of the "live field" set beyond OPTIONAL_WIRE_FIELDS.
-    const LIVE: &[&str] = &[
+    // The whole wire surface, destructured field-by-field — `..` is
+    // banned (review round 6, B3): a new field on any of these structs
+    // stops THIS test compiling until it is constructed, bound, named in
+    // `live` and given a role.
+    let wire = WireEvent {
+        event_id: String::new(),
+        event_type: String::new(),
+        operation_id: String::new(),
+        seq: 0,
+        op_seq: 0,
+        event_time: String::new(),
+        name: Some(String::new()),
+        trace_id: Some(String::new()),
+        request_id: Some(String::new()),
+        release: Some(String::new()),
+        deployment: Some(String::new()),
+        step_id: Some(String::new()),
+        parent_step_id: Some(String::new()),
+        kind: Some(String::new()),
+        attempt: Some(1),
+        model: Some(String::new()),
+        prompt_version: Some(String::new()),
+        config_version: Some(String::new()),
+        external_effect: Some(true),
+        outcome: Some(String::new()),
+        failure_class: Some(String::new()),
+        uncertain_reason: Some(String::new()),
+        error_code: Some(String::new()),
+        error_message: Some(String::new()),
+        usage: Some(WireUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+        }),
+        cost_estimate: Some(WireCost {
+            micros: 1,
+            currency: "USD".into(),
+            basis: String::new(),
+        }),
+        events_emitted: Some(1),
+        dropped: Some(1),
+        reason: Some(String::new()),
+        first_dropped_at: Some(String::new()),
+        last_dropped_at: Some(String::new()),
+        attributes: Some(serde_json::Map::new()),
+        truncated: Some(1),
+    };
+    let WireEvent {
+        event_id: _,
+        event_type: _,
+        operation_id: _,
+        seq: _,
+        op_seq: _,
+        event_time: _,
+        name,
+        trace_id,
+        request_id,
+        release,
+        deployment,
+        step_id,
+        parent_step_id,
+        kind,
+        attempt,
+        model,
+        prompt_version,
+        config_version,
+        external_effect,
+        outcome,
+        failure_class,
+        uncertain_reason,
+        error_code,
+        error_message,
+        usage,
+        cost_estimate,
+        events_emitted,
+        dropped,
+        reason,
+        first_dropped_at,
+        last_dropped_at,
+        attributes,
+        truncated,
+    } = wire;
+    let WireSource {
+        instance_id: _,
+        service: _,
+        sdk: _,
+    } = WireSource {
+        instance_id: String::new(),
+        service: String::new(),
+        sdk: String::new(),
+    };
+
+    // The live field set is BUILT from the bindings — `live` can only
+    // name fields the struct really carries.
+    let mut live: Vec<&str> = vec![
         "event_id",
         "operation_id",
         "seq",
         "op_seq",
         "event_type",
         "event_time",
-        "attributes",
-        "truncated",
         "source.instance_id",
         "source.service",
         "source.sdk",
         "cost_estimate.basis",
         "cost_estimate.currency",
         "cost_estimate.micros",
-        "usage",
     ];
+    for (present, field) in [
+        (name.is_some(), "name"),
+        (trace_id.is_some(), "trace_id"),
+        (request_id.is_some(), "request_id"),
+        (release.is_some(), "release"),
+        (deployment.is_some(), "deployment"),
+        (step_id.is_some(), "step_id"),
+        (parent_step_id.is_some(), "parent_step_id"),
+        (kind.is_some(), "kind"),
+        (attempt.is_some(), "attempt"),
+        (model.is_some(), "model"),
+        (prompt_version.is_some(), "prompt_version"),
+        (config_version.is_some(), "config_version"),
+        (external_effect.is_some(), "external_effect"),
+        (outcome.is_some(), "outcome"),
+        (failure_class.is_some(), "failure_class"),
+        (uncertain_reason.is_some(), "uncertain_reason"),
+        (error_code.is_some(), "error_code"),
+        (error_message.is_some(), "error_message"),
+        (usage.is_some(), "usage"),
+        (cost_estimate.is_some(), "cost_estimate"),
+        (events_emitted.is_some(), "events_emitted"),
+        (dropped.is_some(), "dropped"),
+        (reason.is_some(), "reason"),
+        (first_dropped_at.is_some(), "first_dropped_at"),
+        (last_dropped_at.is_some(), "last_dropped_at"),
+        (attributes.is_some(), "attributes"),
+        (truncated.is_some(), "truncated"),
+    ] {
+        if present {
+            live.push(field);
+        }
+    }
     for field in OPTIONAL_WIRE_FIELDS {
+        assert!(
+            live.contains(field),
+            "{field} is an optional wire field but never joined the live set"
+        );
         assert!(
             FIELD_ROLES.iter().any(|(name, _)| name == field),
             "{field} has no field role — an unclassified field must not store"
@@ -888,7 +1021,7 @@ fn field_roles_cover_every_wire_field() {
     }
     for (name, _) in FIELD_ROLES {
         assert!(
-            OPTIONAL_WIRE_FIELDS.contains(name) || LIVE.contains(name),
+            live.contains(name),
             "role {name} names no live field — a stale row"
         );
     }
@@ -915,12 +1048,35 @@ fn field_roles_cover_every_wire_field() {
 
 /// `looks_like_secret` names the fields an emitter should never send: a
 /// key:value pair is not an identifier, and a bare long hex run is a
-/// credential shape (review N3 residual). Model ids and service names are
-/// not credentials.
+/// credential shape in every field but `release`/`request_id` (review
+/// round 6, A4). Model ids and service names are not credentials.
 #[test]
 fn identifier_fields() {
     for input in ["password:x", "token=a1b2c3d4"] {
-        assert!(looks_like_secret(input), "secret: {input}");
+        assert!(looks_like_secret(input, "name"), "secret: {input}");
+    }
+    // A bare ≥32-hex run refuses everywhere except the two fields
+    // declared to carry it (round 6, A4).
+    let hex32 = "0123456789abcdef0123456789abcdef";
+    for field in [
+        "name",
+        "deployment",
+        "model",
+        "error_code",
+        "source.service",
+        "cost_estimate.basis",
+        "trace_id",
+    ] {
+        assert!(
+            looks_like_secret(hex32, field),
+            "{field} kept a bare hex credential"
+        );
+    }
+    for field in ["release", "request_id"] {
+        assert!(
+            !looks_like_secret(hex32, field),
+            "{field} refused its declared hex shape"
+        );
     }
     for input in [
         "mistralai/Mistral-7B-Instruct-v0.3",
@@ -930,8 +1086,37 @@ fn identifier_fields() {
         "stripe:charge:failed",
         "run-2026-11-20",
         "collector-01",
+        "code:ab12cd",
+        "status_code:404",
+        "business_key:bk-1",
+        "cache_key:user:42",
     ] {
-        assert!(!looks_like_secret(input), "keep: {input}");
+        assert!(!looks_like_secret(input, "name"), "keep: {input}");
+    }
+    // …while the new credential names refuse (round 6, B1, A3).
+    for input in [
+        "stripe_key:x",
+        "openai_key:x",
+        "privatekey:x",
+        "secretkey:x",
+        "accesskey:x",
+        "db_pass:x",
+        "pgpass:x",
+        "creds:x",
+        "hmac_key:x",
+        "passwordhash:x",
+        "auth_code:x",
+        "verification.code:x",
+        "otp_code:x",
+        "mfa.code:x",
+        "sms_code:x",
+        "reset.code:x",
+        "recovery_code:x",
+    ] {
+        assert!(
+            looks_like_secret(input, "name"),
+            "credential-named: {input}"
+        );
     }
 }
 
@@ -959,7 +1144,11 @@ fn credential_keyed_identifier_fields_refuse() {
         ("pin:1234", "pin is a credential key name"),
         ("otp:123456", "otp is a credential key name"),
         ("passcode:998877", "passcode is a credential key name"),
-        ("code:ab12cd", "code is a credential key name"),
+        (
+            "auth_code:ab12cd",
+            "qualified code is a credential key name",
+        ),
+        ("verification.code:ab12cd", "qualified code again"),
         ("mfa:totp-x", "mfa is a credential key name"),
         (
             "auth:hunter2",
@@ -968,6 +1157,27 @@ fn credential_keyed_identifier_fields_refuse() {
         (
             concat!("token:", "0123456789abcdef0123456789abcdef"),
             "a 32-hex tail under a credential key",
+        ),
+        // Round 6, B1 — the namespace gaps the opt-in path admitted.
+        ("stripe_key:x", "a *key part names a credential"),
+        ("privatekey:x", "a *key part names a credential"),
+        ("hmac_key:x", "a *key part names a credential"),
+        ("db_pass:x", "pass is a credential part"),
+        ("pgpass:x", "a pass suffix names a credential"),
+        ("creds:x", "a cred* part names a credential"),
+        // Round 6, A4 — a bare ≥32-hex run refuses outside
+        // `release`/`request_id`; `source.service` is not exempt.
+        (
+            concat!("0123456789abcdef", "0123456789abcdef"),
+            "a 32-hex credential shape in service",
+        ),
+        (
+            concat!("0123456789abcdef", "0123456789abcdef01234567"),
+            "a 40-hex credential shape in service",
+        ),
+        (
+            "76fc524aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "a 40-hex credential shape in service",
         ),
     ] {
         let source = WireSource {
@@ -980,17 +1190,18 @@ fn credential_keyed_identifier_fields_refuse() {
             "{why} kept: {service}"
         );
     }
-    // Identifiers keep: a commit SHA is a release, a hex id is a trace —
-    // the hex rule fires only under a credential KEY, never bare
-    // (typed-field policy, review round 5).
+    // Identifiers keep: state tails, a port tail, a bare `code` key, and
+    // the safe-list `*key` names (rounds 5-6).
     for service in [
         "token:expired",
         "session:timeout",
         "session-api:8080",
         "auth:login",
-        concat!("0123456789abcdef", "0123456789abcdef"),
-        concat!("0123456789abcdef", "0123456789abcdef01234567"),
-        "76fc524aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "code:ab12cd",
+        "status_code:404",
+        "zip_code:90210",
+        "business_key:bk-1",
+        "cache_key:user:42",
     ] {
         let source = WireSource {
             instance_id: instance_id.clone(),

@@ -438,7 +438,7 @@ impl Validator<'_> {
         if c.currency.len() != 3 || !c.currency.bytes().all(|b| b.is_ascii_uppercase()) {
             return Err(Refusal::on(RefusalCode::InvalidValue, "cost_estimate"));
         }
-        let basis = opt_ident(Some(&c.basis), "cost_estimate", 64)?.unwrap_or_default();
+        let basis = opt_ident(Some(&c.basis), "cost_estimate.basis", 64)?.unwrap_or_default();
         Ok(Some(CostEstimate {
             micros: c.micros,
             currency: c.currency.clone(),
@@ -609,7 +609,10 @@ fn field_present(w: &WireEvent, name: &str) -> bool {
         "reason" => w.reason.is_some(),
         "first_dropped_at" => w.first_dropped_at.is_some(),
         "last_dropped_at" => w.last_dropped_at.is_some(),
-        _ => false,
+        // Every name in `OPTIONAL_WIRE_FIELDS` must have an arm — the
+        // exhaustive coverage test destructures WireEvent field-by-field
+        // (review round 6, B3); a name with no arm is a bug, not data.
+        _ => unreachable!("OPTIONAL_WIRE_FIELDS names a field with no presence arm"),
     }
 }
 
@@ -658,7 +661,7 @@ fn opt_ident(
     if !text.bytes().all(is_ident_byte) {
         return Err(Refusal::on(RefusalCode::InvalidValue, field));
     }
-    if looks_like_secret(text) {
+    if looks_like_secret(text, field) {
         return Err(Refusal::on(RefusalCode::InvalidValue, field));
     }
     Ok(Some(text.to_owned()))

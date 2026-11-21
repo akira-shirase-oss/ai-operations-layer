@@ -4,7 +4,9 @@
 //! type does not carry is refused; keyed text inside free text still loses
 //! the value; and a credential-shaped identifier is refused, never rewritten.
 
-use crate::common::{cli, create_ingest_key, create_project, post_ingest, stack, table_count};
+use crate::common::{
+    cli_status, create_ingest_key, create_project, post_ingest, stack, table_count,
+};
 use crate::shared::{batch, journey};
 use serde_json::json;
 use sqlx::PgPool;
@@ -23,12 +25,12 @@ async fn a_credential_key_is_withheld_even_when_opted_in(pool: PgPool) {
     let s = stack(&pool, &[]).await;
     create_project(&s.url, "pilot");
     // The caller opted `password` in — the closed credential rule wins, not
-    // the opt-in list.
-    let (out, err) = cli(
-        &s.url,
-        &["admin", "set-opt-in", "--project", "pilot", "password"],
-    );
-    assert!(out.contains("password"), "{out} / {err}");
+    // the opt-in list. (The CLI itself refuses credential-named keys now —
+    // round 6, B1 — so this opt-in is written behind its back.)
+    sqlx::query("UPDATE projects SET opt_in_attribute_keys = '{password}'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let key = create_ingest_key(&s.url, "pilot", "h");
 
     let mut events = journey(0x21, 0);
@@ -152,6 +154,16 @@ async fn a_credential_shaped_identifier_is_refused_not_rewritten(pool: PgPool) {
     )
     .await;
     assert_eq!(status, 400, "{body}");
+    // The refusal must name the code and the field, not just the status
+    // (review round 6, B3).
+    assert_eq!(body["error"]["code"], "invalid_source", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("source.service"),
+        "the refusal must name the field: {body}"
+    );
     assert_eq!(table_count(&pool, "events").await, 0, "{body}");
 }
 
@@ -219,24 +231,300 @@ async fn a_leading_slash_token_dies_in_free_text(pool: PgPool) {
     );
 }
 
-/// Review round 5, finding 6: a `%25`-nest deeper than `DECODE_PASSES` fails
-/// closed on its leftover span — the text around it is not the credential
-/// and must survive.
+/// Review round 6, A1: a `%25`-nest deeper than `DECODE_PASSES` fails
+/// closed on the WHOLE field — the span-level version stored the value
+/// beside a hidden separator (`password[redacted]hunter2` still carries
+/// the credential). Both the bare residue and the keyed shapes die whole.
 #[sqlx::test(migrations = "../aiops-store/migrations")]
-async fn a_nested_escape_redacts_only_its_span(pool: PgPool) {
+async fn a_nested_escape_erases_the_whole_field(pool: PgPool) {
     let s = stack(&pool, &[]).await;
     create_project(&s.url, "pilot");
     let key = create_ingest_key(&s.url, "pilot", "h");
 
-    let mut events = journey(0x34, 0);
-    events[2].error_message = Some("x %2525252541 y".to_owned());
+    for (op, msg, must_die) in [
+        (0x34u8, "x %2525252541 y", "x %2525252541 y"),
+        (0x35, "key password%252525253Ahunter2 end", "hunter2"),
+        (0x36, "key passw%25252525256Frd=hunter2 end", "hunter2"),
+    ] {
+        let mut events = journey(op, 0);
+        events[2].error_message = Some(msg.to_owned());
+        let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+        assert_eq!(status, 200, "{body}");
+        let stored = stored_bodies(&pool).await;
+        assert!(
+            stored.contains("[redacted]"),
+            "no fail-closed marker for {msg:?}: {stored}"
+        );
+        assert!(
+            !stored.contains(must_die),
+            "{must_die:?} survived the residual span — the field did not die whole: {stored}"
+        );
+        // The keyed shapes must not leave the credential's halves joined
+        // around a marker either.
+        assert!(
+            !stored.contains("password"),
+            "the hidden key prefix stored beside the marker: {stored}"
+        );
+    }
+}
+
+/// Review round 6, A4: a bare ≥32-hex value is a credential shape in every
+/// identifier field EXCEPT the two declared to carry hex (`release`,
+/// `request_id`). Twilio auth tokens and Datadog API keys wear exactly this
+/// shape; the refusals must name the code and the field.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_bare_hex_credential_dies_outside_release_and_request_id(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let key = create_ingest_key(&s.url, "pilot", "h");
+    let hex32 = "0123456789abcdef0123456789abcdef";
+
+    // Per-event identifier fields: the refusal lands in `refused[]` with
+    // the code and the field named.
+    for (op, set, field) in [
+        (0x37u8, "deployment", "deployment"),
+        (0x38, "model", "model"),
+        (0x39, "error_code", "error_code"),
+    ] {
+        let mut events = journey(op, 0);
+        match set {
+            "deployment" => events[0].deployment = Some(hex32.to_owned()),
+            "model" => events[1].model = Some(hex32.to_owned()),
+            _ => events[2].error_code = Some(hex32.to_owned()),
+        }
+        let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+        assert_eq!(status, 200, "{field}: {body}");
+        assert!(
+            body["refused"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| { r["code"] == "invalid_value" && r["field"] == field }),
+            "{field} must refuse the bare hex run by name: {body}"
+        );
+    }
+    // `cost_estimate.basis` — an identifier field under a nested object.
+    let mut events = journey(0x3a, 0);
+    events[4].cost_estimate = Some(aiops_domain::wire::WireCost {
+        micros: 1,
+        currency: "USD".into(),
+        basis: hex32.to_owned(),
+    });
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body["refused"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| { r["code"] == "invalid_value" && r["field"] == "cost_estimate.basis" }),
+        "cost_estimate.basis must refuse the bare hex run by name: {body}"
+    );
+
+    // `source.service` — a batch-level identifier: the whole batch is
+    // refused and the envelope names the field.
+    let (status, body, _) = post_ingest(
+        &s.base,
+        Some(&key),
+        crate::shared::batch_from("11111111111111111111111111111111", &journey(0x3b, 0))
+            .replace("reference-host", hex32),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_source", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("source.service"),
+        "the envelope must name the field: {body}"
+    );
+
+    // …while `release` and `request_id` still store the same shape verbatim.
+    let mut events = journey(0x3c, 0);
+    events[0].release = Some(hex32.to_owned());
+    events[0].request_id = Some(hex32.to_owned());
     let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
     assert_eq!(status, 200, "{body}");
     let stored = stored_bodies(&pool).await;
     assert!(
-        stored.contains("x [redacted] y"),
-        "the leftover span alone must be redacted, not the field: {stored}"
+        stored.contains(hex32),
+        "release/request_id must keep bare hex: {stored}"
     );
+}
+
+/// Review round 6, A3: `code` is a credential only after a qualifier —
+/// `http.status_code` is a default attribute, `status_code:404` an
+/// identifier, `status code: 503` ordinary text. Qualified `code` keys
+/// (auth, verification, recovery, otp, mfa, sms, reset) stay credential.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn the_default_attribute_surface_survives_code(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let key = create_ingest_key(&s.url, "pilot", "h");
+
+    // The default attribute stores — `code` inside its name is not a
+    // credential part.
+    let mut events = journey(0x3d, 0);
+    events[0].attributes = json!({"http.status_code": "503", "error.type": "http"})
+        .as_object()
+        .cloned();
+    events[2].error_message = Some("upstream answered status code: 503".to_owned());
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["withheld_attributes"].as_u64().unwrap(),
+        0,
+        "a default attribute must not be withheld: {body}"
+    );
+    let stored = stored_bodies(&pool).await;
+    assert!(
+        stored.contains("503"),
+        "http.status_code dropped its value: {stored}"
+    );
+    assert!(
+        stored.contains("status code: 503"),
+        "ordinary text redacted on a bare `code`: {stored}"
+    );
+
+    // `status_code:404` is an identifier — a port tail under a
+    // non-credential key.
+    let (status, body, _) = post_ingest(
+        &s.base,
+        Some(&key),
+        crate::shared::batch_from("11111111111111111111111111111111", &journey(0x3e, 0))
+            .replace("reference-host", "status_code:404"),
+    )
+    .await;
+    assert_eq!(status, 200, "status_code:404 refused: {body}");
+
+    // …and the qualified `code` keys stay credential: withheld as an
+    // attribute key, refused as an identifier.
+    let mut events = journey(0x3f, 0);
+    events[0].attributes = json!({"auth_code": "123456", "verification.code": "998877"})
+        .as_object()
+        .cloned();
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["withheld_attributes"].as_u64().unwrap(),
+        2,
+        "qualified code keys must be withheld: {body}"
+    );
+    for service in ["auth_code:123456", "otp-code:998877", "reset.code:4421"] {
+        let (status, body, _) = post_ingest(
+            &s.base,
+            Some(&key),
+            crate::shared::batch_from("11111111111111111111111111111111", &journey(0x40, 0))
+                .replace("reference-host", service),
+        )
+        .await;
+        assert_eq!(status, 400, "{service} admitted: {body}");
+        assert_eq!(body["error"]["code"], "invalid_source", "{body}");
+    }
+}
+
+/// Review round 6, B1: `set-opt-in` refuses credential-named keys instead
+/// of reporting success on an opt-in that can never apply; `pass`/`cred*`
+/// parts and any `*key` part (except the safe list) name credentials in
+/// attributes, identifiers and keyed free text.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn credential_named_keys_die_everywhere_opt_in_cannot_reach(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+
+    // The CLI refuses credential-named opt-in keys outright.
+    for keys in ["password", "stripe_key", "db_pass", "creds", "hmac_key"] {
+        let (ok, out, err) =
+            cli_status(&s.url, &["admin", "set-opt-in", "--project", "pilot", keys]);
+        assert!(!ok, "set-opt-in {keys} succeeded: {out}");
+        assert!(
+            err.contains(keys) || out.contains(keys),
+            "the refusal must name the key: {err}"
+        );
+    }
+    // Even an opt-in row written behind the CLI's back withholds them —
+    // the closed rule beats the stored list.
+    sqlx::query("UPDATE projects SET opt_in_attribute_keys = '{stripe_key,db_pass,hmac_key,business_key,cache_key}'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let key = create_ingest_key(&s.url, "pilot", "h");
+    let mut events = journey(0x41, 0);
+    events[0].attributes = json!({
+        "stripe_key": "sk_live_123",
+        "db_pass": "hunter2",
+        "hmac_key": "aabbcc",
+        "business_key": "bk-9",
+        "cache_key": "user:42",
+    })
+    .as_object()
+    .cloned();
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["withheld_attributes"].as_u64().unwrap(),
+        3,
+        "the opted-in credential keys must still be withheld: {body}"
+    );
+    let stored = stored_bodies(&pool).await;
+    for kept in ["bk-9", "user:42"] {
+        assert!(stored.contains(kept), "safe-list value dropped: {stored}");
+    }
+    for died in ["sk_live_123", "hunter2", "aabbcc"] {
+        assert!(!stored.contains(died), "credential value stored: {stored}");
+    }
+
+    // Keyed free text: `stripe_key:` and `db_pass:` name credentials —
+    // their values die; `business_key:`/`cache_key:` keep.
+    let mut events = journey(0x42, 0);
+    events[2].error_message = Some(
+        "cfg stripe_key: sk_live_123 db_pass: hunter2 business_key: bk-9 cache_key: user:42"
+            .to_owned(),
+    );
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+    assert_eq!(status, 200, "{body}");
+    let stored = stored_bodies(&pool).await;
+    assert!(
+        !stored.contains("sk_live_123") && !stored.contains("hunter2"),
+        "credential value kept in free text: {stored}"
+    );
+    assert!(
+        stored.contains("bk-9") && stored.contains("user:42"),
+        "safe-list value redacted: {stored}"
+    );
+
+    // Identifiers: a credential-named key refuses (status + code + field);
+    // a safe-list name keeps — `cache_key:user:42` is `host:port` text, not
+    // a credential pair. Each post draws a fresh seq range so a stored
+    // batch can't alias a later one as a duplicate (review round 6, B3).
+    for (n, (service, want)) in [
+        ("stripe_key:abc", 400u16),
+        ("openai_key:abc", 400),
+        ("accesskey:abc", 400),
+        ("pgpass:x", 400),
+        ("business_key:bk-9", 200),
+        ("cache_key:user:42", 200),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, body, _) = post_ingest(
+            &s.base,
+            Some(&key),
+            crate::shared::batch_from(
+                "11111111111111111111111111111111",
+                &journey(0x43, n as u64 * 100),
+            )
+            .replace("reference-host", service),
+        )
+        .await;
+        assert_eq!(status, *want, "{service}: {body}");
+        if *want == 400 {
+            assert_eq!(body["error"]["code"], "invalid_source", "{service}: {body}");
+        }
+    }
 }
 
 /// Review round 5, finding 4: a commit SHA is a `release`, a hex id is a
@@ -267,8 +555,9 @@ async fn a_commit_sha_and_a_hex_trace_id_are_identifiers(pool: PgPool) {
 
 /// Review round 5, finding 5: the `:`-tail keep is a port/state rule, not
 /// a PIN rule — `password:1234-5678`, `password:4821`, `token:12345` all
-/// refuse; `pin`, `otp`, `passcode`, `code`, `mfa` are credential keys;
-/// `auth:`/`authorization:` carry no exemption.
+/// refuse; `pin`, `otp`, `passcode`, `mfa` are credential keys, `code`
+/// only after a qualifier (round 6, A3); `auth:`/`authorization:` carry
+/// no exemption.
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn pin_tails_and_new_credential_keys_still_refuse(pool: PgPool) {
     let s = stack(&pool, &[]).await;
@@ -282,7 +571,7 @@ async fn pin_tails_and_new_credential_keys_still_refuse(pool: PgPool) {
         ("pin:1234", "pin is a credential key"),
         ("otp:123456", "otp is a credential key"),
         ("passcode:998877", "passcode is a credential key"),
-        ("code:ab12cd", "code is a credential key"),
+        ("auth_code:ab12cd", "qualified code is a credential key"),
         ("mfa:totp-x", "mfa is a credential key"),
         ("auth:hunter2", "auth is not exempt"),
     ] {
@@ -294,10 +583,20 @@ async fn pin_tails_and_new_credential_keys_still_refuse(pool: PgPool) {
         )
         .await;
         assert_eq!(status, 400, "{why} admitted: {body}");
+        assert_eq!(
+            body["error"]["code"], "invalid_source",
+            "{why} — the envelope must carry the code: {body}"
+        );
     }
     assert_eq!(table_count(&pool, "events").await, 0);
-    // …while a real port tail and a state word still keep.
-    for service in ["session-api:8080", "token:expired", "auth:login"] {
+    // …while a real port tail, a state word, and a bare `code` key keep.
+    for service in [
+        "session-api:8080",
+        "token:expired",
+        "auth:login",
+        "code:ab12cd",
+        "status_code:404",
+    ] {
         let (status, body, _) = post_ingest(
             &s.base,
             Some(&key),

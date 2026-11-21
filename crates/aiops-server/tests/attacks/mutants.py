@@ -72,7 +72,7 @@ MUTANTS = {
             e(
                 S / "notify.rs",
                 "    Metrics::add(&state.revocation_notices, 1);",
-                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, cancel, last_resync);\n    return true;",
+                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, last_resync, resync_at);\n    return;",
             ),
         ],
         ["an_in_process_revoke_dies_before_the_next_request"],
@@ -84,7 +84,7 @@ MUTANTS = {
             e(
                 S / "notify.rs",
                 "    Metrics::add(&state.revocation_notices, 1);",
-                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, cancel, last_resync);\n    return true;",
+                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, last_resync, resync_at);\n    return;",
             )
         ],
         ["a_peer_revoke_is_refused_on_the_next_request"],
@@ -117,7 +117,7 @@ MUTANTS = {
             e(
                 S / "notify.rs",
                 "    Metrics::add(&state.revocation_notices, 1);",
-                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, cancel, last_resync);\n    return true;",
+                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, last_resync, resync_at);\n    return;",
             ),
             e(
                 S / "app.rs",
@@ -595,51 +595,52 @@ MUTANTS = {
         ],
         ["a_leading_slash_token_dies_in_free_text"],
     ),
-    # Review round 5, finding 6: the `%25` residual fails closed on its
-    # leftover span — erasing the whole field eats surrounding text.
+    # Review round 6, A1: a capped decode residual can hide the key's own
+    # separator, so the whole field fails closed — span-level work stored
+    # `password[redacted]hunter2`. Drop the early return and the residue
+    # leaks the value beside the span again.
     "residual-erases-field": (
         [
             e(
                 D / "policy.rs",
-                """            let mut j = 0;
-            while j + 3 <= view.len() {
-                if view[j] == b'%'
-                    && view[j + 1].is_ascii_hexdigit()
-                    && view[j + 2].is_ascii_hexdigit()
-                {
-                    let start = map[j].0;
-                    let end = map[j + 2].0 + map[j + 2].1;
-                    spans.push((start, end));
-                    j += 3;
-                } else {
-                    j += 1;
-                }
-            }""",
-                """            return Some(REDACTED.to_string());""",
+                """        if percent_decode(&view).is_some() {
+            return Some(REDACTED.to_owned());
+        }""",
+                """        let _ = percent_decode(&view);""",
             )
         ],
-        ["a_nested_escape_redacts_only_its_span"],
+        ["a_nested_escape_erases_the_whole_field"],
     ),
-    # Review round 5, finding 4: the ≥32-hex credential rule lives under
-    # credential keys — a whole-field refusal drops SHA releases and hex
-    # trace ids.
-    "identifier-hex-still-refused": (
+    # Review round 6, A4: bare ≥32 hex is a credential shape in every
+    # identifier field except `release`/`request_id` — without the check a
+    # Twilio/Datadog-shaped token stores verbatim in deployment, model,
+    # error_code, source.* and cost_estimate.basis.
+    "bare-hex-admitted": (
         [
             e(
                 D / "policy.rs",
-                """pub fn looks_like_secret(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    (0..bytes.len()).any(|i| {""",
-                """pub fn looks_like_secret(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if bytes.len() >= 32
+                """    if bytes.len() >= 32
+        && !BARE_HEX_KEPT.contains(&field)
         && bytes
             .iter()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return true;
-    }
-    (0..bytes.len()).any(|i| {""",
+    }""",
+                """    let _ = (bytes.len(), BARE_HEX_KEPT, field);""",
+            )
+        ],
+        ["a_bare_hex_credential_dies_outside_release_and_request_id"],
+    ),
+    # Review round 6, A4: the exception is `release`/`request_id` ONLY —
+    # ignoring it refuses the commit SHA and the hex trace id the contract
+    # declares.
+    "hex-exceptions-ignored": (
+        [
+            e(
+                D / "policy.rs",
+                """        && !BARE_HEX_KEPT.contains(&field)""",
+                """        && !["__none__"].contains(&field)""",
             )
         ],
         ["a_commit_sha_and_a_hex_trace_id_are_identifiers"],
@@ -686,25 +687,16 @@ MUTANTS = {
         ],
         ["pin_tails_and_new_credential_keys_still_refuse"],
     ),
-    # `pin`/`otp`/`passcode`/`code`/`mfa` are credential key names —
+    # `pin`/`otp`/`passcode`/`mfa`/`pass` are credential key names —
     # thinning the namespace admits them in identifier and attribute roles.
     "credential-list-thinned": (
         [
             e(
                 D / "policy.rs",
-                '''    "bearer",
-    "code",
-    "cookie",''',
-                '''    "bearer",
-    "cookie",''',
-            ),
-            e(
-                D / "policy.rs",
-                '''    "jwt",
-    "mfa",
-    "otp",
+                '''    "otp",
+    "pass",
     "passcode",''',
-                '''    "jwt",''',
+                '''    "passcode",''',
             ),
             e(
                 D / "policy.rs",
@@ -715,27 +707,109 @@ MUTANTS = {
         ],
         ["pin_tails_and_new_credential_keys_still_refuse"],
     ),
-    # Review round 5, finding 2: `clear` hints debounce on the trailing
-    # edge — an early return drops the hint and a withdrawn opt-in keeps
-    # applying from cache until the TTL.
+    # Review round 6, B1: any `*key` part names a credential outside the
+    # safe list — drop the arm and `stripe_key`/`hmac_key`/`accesskey`/
+    # `privatekey`/`OpenAIApiKey` opt in and apply.
+    "key-suffix-not-credential": (
+        [
+            e(
+                D / "policy.rs",
+                """        && parts
+            .iter()
+            .any(|p| p.ends_with(b"key") && (p.len() > 3 || parts.len() > 1))""",
+                """        && parts
+            .iter()
+            .any(|p| p.ends_with(b"key") && p.len() > 3 && parts.len() > 100)""",
+            )
+        ],
+        ["credential_named_keys_die_everywhere_opt_in_cannot_reach"],
+    ),
+    # Review round 6, B1: `set-opt-in` must refuse a credential-named key —
+    # without the check the CLI reports success on an opt-in ingestion can
+    # never apply.
+    "opt-in-trusts-name": (
+        [
+            e(
+                S / "admin.rs",
+                """            for key in &keys {
+                anyhow::ensure!(
+                    !aiops_domain::policy::credential_key(key.as_bytes()),
+                    "opt-in key `{key}` names a credential — credential keys are always withheld"
+                );
+            }""",
+                """            let _ = &keys;""",
+            )
+        ],
+        ["credential_named_keys_die_everywhere_opt_in_cannot_reach"],
+    ),
+    # Review round 6, A3: `code` names a credential only after a qualifier —
+    # unconditionally it withholds the default `http.status_code` attribute
+    # and redacts ordinary "status code: 503" text.
+    "code-names-credential": (
+        [
+            e(
+                D / "policy.rs",
+                """        if part == b"code" && CODE_QUALIFIERS.iter().any(|q| q.as_bytes() == prev) {""",
+                """        if part == b"code" {""",
+            )
+        ],
+        ["the_default_attribute_surface_survives_code"],
+    ),
+    # Review round 6, A3 follow-up: a qualified `code` key makes a digit
+    # tail a PIN — checking only the bare last part lets `reset.code:4421`
+    # ride the port exemption.
+    "qualified-code-tail-a-port": (
+        [
+            e(
+                D / "policy.rs",
+                """        let last_is_credential = parts.last().is_some_and(|p| {
+            credential_key(p)
+                || (p.as_slice() == b"code"
+                    && parts.len() > 1
+                    && CODE_QUALIFIERS
+                        .iter()
+                        .any(|q| q.as_bytes() == parts[parts.len() - 2].as_slice()))
+        });""",
+                """        let last_is_credential = parts.last().is_some_and(|p| credential_key(p));""",
+            )
+        ],
+        ["the_default_attribute_surface_survives_code"],
+    ),
+    # Review round 5, finding 2 + round 6, A2: a `clear` hint must schedule
+    # the debounced resync — never scheduling it leaves a withdrawn opt-in
+    # applying from cache and no flood resyncs at all.
     "clear-hints-dropped": (
         [
             e(
                 S / "notify.rs",
-                """        if !wait.is_zero()
-            && !tokio::select! {
-                () = cancel.cancelled() => false,
-                () = tokio::time::sleep(wait) => true,
-            }
-        {
-            return false;
-        }""",
-                """        if !wait.is_zero() {
-            return true;
-        }""",
+                """            let pending = match last_resync.lock() {
+                // A poisoned debounce lock resyncs at once — cheaper than
+                // a deadlock.
+                Err(_) => Instant::now(),
+                Ok(last) => (*last + RESYNC_DEBOUNCE).max(Instant::now()),
+            };
+            let deadline = tokio::time::Instant::from_std(pending);
+            *resync_at = Some(resync_at.map_or(deadline, |d| d.min(deadline)));""",
+                """            let _ = (last_resync, resync_at);""",
             )
         ],
-        ["two_clears_half_a_second_apart_both_land"],
+        [
+            "two_clears_half_a_second_apart_both_land",
+            "a_clear_flood_coalesces_and_digests_still_evict",
+        ],
+    ),
+    # Review round 6, A2: the trailing-edge debounce is what bounds a clear
+    # flood — scheduling every hint for `now` serialises one resync per
+    # notice, so the resync count blows past the bound.
+    "clear-debounce-removed": (
+        [
+            e(
+                S / "notify.rs",
+                "                Ok(last) => (*last + RESYNC_DEBOUNCE).max(Instant::now()),",
+                "                Ok(_) => Instant::now(),",
+            )
+        ],
+        ["a_clear_flood_coalesces_and_digests_still_evict"],
     ),
     # Review round 5, finding 3: the beat is bounded twice — the writer
     # pool's lock/statement timeouts cover a blocked row, the client's 2 s
@@ -783,27 +857,44 @@ MUTANTS = {
         ],
         ["a_beat_under_a_row_lock_reads_as_a_gap"],
     ),
-    # Review round 5, finding 7: the beat checks the revoke trigger's
-    # arming — without it a disabled `api_tokens_revoked_notify` stays
-    # green while deletes go deaf.
+    # Review round 5, finding 7 + round 6, B2: the beat checks EVERY
+    # revocation trigger's arming by table OID and requires 'A' — without
+    # it a disabled or origin-only trigger stays green while deletes and
+    # replica-session revokes go deaf.
     "api-token-trigger-unproven": (
         [
             e(
                 T / "lib.rs",
-                """    let armed: Option<String> = sqlx::query_scalar(
-        "SELECT tgenabled::text FROM pg_trigger
-         WHERE tgname = 'api_tokens_revoked_notify'",
+                """    let unarmed: Vec<String> = sqlx::query_scalar(
+        "SELECT v.tgname
+         FROM (VALUES
+             ('api_tokens', 'api_tokens_revoked_notify'),
+             ('api_tokens', 'api_tokens_deleted_notify'),
+             ('api_tokens', 'api_tokens_truncated_notify'),
+             ('ingest_keys', 'ingest_keys_revoked_notify'),
+             ('ingest_keys', 'ingest_keys_deleted_notify'),
+             ('ingest_keys', 'ingest_keys_truncated_notify'),
+             ('projects', 'projects_opt_in_notify'),
+             ('revocation_heartbeat', 'revocation_heartbeat_notify')
+         ) AS v(relname, tgname)
+         LEFT JOIN pg_trigger t
+           ON t.tgname = v.tgname
+          AND t.tgrelid = v.relname::regclass
+         WHERE t.tgenabled IS NULL OR t.tgenabled <> 'A'",
     )
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    if !matches!(armed.as_deref(), Some("O" | "A")) {
-        return Err(StoreError::Unavailable(sqlx::Error::RowNotFound));
+    if !unarmed.is_empty() {
+        return Err(StoreError::TriggerUnarmed(unarmed.join(",")));
     }
     Ok(())""",
                 """    Ok(())""",
             )
         ],
-        ["a_disabled_revoke_trigger_reads_as_a_gap"],
+        [
+            "a_disabled_revoke_trigger_reads_as_a_gap",
+            "an_unarmed_revocation_trigger_reads_as_a_gap",
+        ],
     ),
 }
 

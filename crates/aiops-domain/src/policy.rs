@@ -201,13 +201,15 @@ const SECRET_PARTS: &[&str] = &[
     "auth",
     "authorization",
     "bearer",
-    "code",
     "cookie",
+    "cred",
     "credential",
     "credentials",
+    "creds",
     "jwt",
     "mfa",
     "otp",
+    "pass",
     "passcode",
     "passphrase",
     "passwd",
@@ -221,18 +223,35 @@ const SECRET_PARTS: &[&str] = &[
     "token",
 ];
 
-/// A `key` part is a secret only after one of these (`api_key`, `private-key`, …), so a
-/// cache key or a sort key stays readable.
-const KEY_QUALIFIERS: &[&str] = &[
-    "access",
-    "api",
-    "client",
-    "encryption",
-    "master",
-    "private",
-    "secret",
-    "signing",
-    "ssh",
+/// A `code` part names a credential only after one of these qualifiers —
+/// `auth_code`, `verification.code`, `recovery-code`, `otp_code`,
+/// `mfa.code`, `sms_code`, `reset_code`. Bare, or after an ordinary word,
+/// `code` is an identifier: `http.status_code`, `error_code`, `zip_code`,
+/// `status_code:404` (review round 6, A3 — the default attribute surface
+/// must survive `treat()`).
+const CODE_QUALIFIERS: &[&str] = &[
+    "auth",
+    "mfa",
+    "otp",
+    "recovery",
+    "reset",
+    "sms",
+    "verification",
+];
+
+/// Key names that end in `key` without naming a credential — data-model
+/// and transport keys, not secrets (review round 6, B1). The WHOLE name
+/// decides: `stripe_key`/`hmac_key` still die; only these exact names
+/// keep.
+const KEY_NAME_SAFE_LIST: &[&str] = &[
+    "business_key",
+    "cache_key",
+    "foreign_key",
+    "idempotency_key",
+    "partition_key",
+    "primary_key",
+    "public_key",
+    "sort_key",
 ];
 
 /// A key name's parts, lowercased: split on `_`, `-`, `.` and at camelCase humps
@@ -256,14 +275,17 @@ fn key_parts(key: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// A key part ending in a credential word names a secret: `PGPASSWORD`,
-/// `accessToken`, `ASP.NET_SessionId`, `connect.sid`, `laravel_session` (review S1-2).
+/// `PGPASS`, `passwordhash`, `accessToken`, `ASP.NET_SessionId`,
+/// `connect.sid`, `laravel_session` (review S1-2, round 6 B1).
 /// Suffix, not substring: `tokens`, `secretary` and `sessionless` stay readable.
 const SECRET_SUFFIXES: &[&[u8]] = &[
     b"mfa",
     b"otp",
+    b"pass",
     b"passcode",
     b"passwd",
     b"password",
+    b"passwordhash",
     b"pin",
     b"pwd",
     b"secret",
@@ -279,24 +301,34 @@ const SECRET_SUFFIXES: &[&[u8]] = &[
 /// inside free text — names a credential. A credential-named key's value dies
 /// whatever its shape; the name alone decides.
 pub fn credential_key(key: &[u8]) -> bool {
-    let mut prev: Vec<u8> = Vec::new();
-    for part in key_parts(key) {
+    let parts = key_parts(key);
+    let mut prev: &[u8] = b"";
+    for part in &parts {
         let part = part.as_slice();
         if SECRET_PARTS.iter().any(|s| s.as_bytes() == part)
             || SECRET_SUFFIXES.iter().any(|s| part.ends_with(s))
         {
             return true;
         }
-        if part == b"key"
-            && KEY_QUALIFIERS
-                .iter()
-                .any(|q| q.as_bytes() == prev.as_slice())
-        {
+        // `code` is a credential only after a qualifier (review round 6,
+        // A3) — `auth_code` dies, `status_code` keeps.
+        if part == b"code" && CODE_QUALIFIERS.iter().any(|q| q.as_bytes() == prev) {
             return true;
         }
-        prev = part.to_vec();
+        prev = part;
     }
-    false
+    // ANY part ending in `key` names a credential — `stripe_key`,
+    // `hmac_key`, `privatekey`, `OpenAIApiKey`, `X-Api-Key`, `accesskey`
+    // (review round 6, B1) — unless the whole name is a data-model key on
+    // the safe list (`business_key`, `cache_key`, …). A part that is
+    // exactly `key` only counts with siblings: `key=article:42` is
+    // operational text, `x-api-key` is not.
+    !KEY_NAME_SAFE_LIST
+        .iter()
+        .any(|s| key.eq_ignore_ascii_case(s.as_bytes()))
+        && parts
+            .iter()
+            .any(|p| p.ends_with(b"key") && (p.len() > 3 || parts.len() > 1))
 }
 
 fn is_key_byte(b: u8) -> bool {
@@ -460,26 +492,15 @@ pub fn redact(text: &str) -> Option<String> {
             map = composed;
         }
         // The pass cap ran out with decodable text left: a `%25`-nested
-        // escape deeper than DECODE_PASSES still hides its key. Fail
-        // closed on the leftover SPAN — each still-encoded `%XX` window
-        // mapped back through `map` to raw — never the whole field: the
-        // text around the residue is not the credential (review round 5,
-        // finding 6).
+        // escape deeper than DECODE_PASSES still hides its key — and the
+        // hidden byte can be the key's own separator, so the text BESIDE a
+        // residual span is where the credential sits
+        // (`password%252525253Ahunter2` → span-level work stored
+        // `password[redacted]hunter2`; review round 6, A1). Fail closed on
+        // the WHOLE field: KEYED_REDACT is 100% by construction only
+        // because nothing survives an unreadable key.
         if percent_decode(&view).is_some() {
-            let mut j = 0;
-            while j + 3 <= view.len() {
-                if view[j] == b'%'
-                    && view[j + 1].is_ascii_hexdigit()
-                    && view[j + 2].is_ascii_hexdigit()
-                {
-                    let start = map[j].0;
-                    let end = map[j + 2].0 + map[j + 2].1;
-                    spans.push((start, end));
-                    j += 3;
-                } else {
-                    j += 1;
-                }
-            }
+            return Some(REDACTED.to_owned());
         }
         spans.sort_unstable();
         spans.dedup();
@@ -732,12 +753,24 @@ const STATE_WORDS: &[&[u8]] = &[
 /// are PINs, `auth:hunter2` a credential — `auth`/`authorization` carry no
 /// exemption, review round 5). Everything else — `password:hunter2`,
 /// `password:123456`, `token:<32 hex>` — refuses.
-/// A bare ≥32 lowercase-hex field is an IDENTIFIER — a commit SHA is a
-/// release, a hex trace id a `request_id`: the hex credential rule fires
-/// only under a credential KEY, never bare (the typed-field policy,
-/// review round 5).
-pub fn looks_like_secret(text: &str) -> bool {
+/// A bare ≥32 lowercase-hex field is a credential shape in EVERY
+/// identifier field except the two declared to carry hex — `release`
+/// (commit SHA) and `request_id` (hex trace id). A Twilio auth token or a
+/// Datadog API key wears exactly this shape; in `deployment`, `model`,
+/// `error_code`, `source.*`, `cost_estimate.basis` it refuses (review
+/// round 6, A4).
+pub fn looks_like_secret(text: &str, field: &str) -> bool {
+    /// The only fields declared to carry bare hex (round 6, A4).
+    const BARE_HEX_KEPT: &[&str] = &["release", "request_id"];
     let bytes = text.as_bytes();
+    if bytes.len() >= 32
+        && !BARE_HEX_KEPT.contains(&field)
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    {
+        return true;
+    }
     (0..bytes.len()).any(|i| {
         if url_password(bytes, i).is_some()
             || ((i == 0 || !is_word(bytes[i - 1])) && high_confidence(bytes, i).is_some())
@@ -773,12 +806,23 @@ pub fn looks_like_secret(text: &str) -> bool {
         // piece under six digits when the key's LAST part is not itself a
         // credential (`session-api:8080` is a port — `session` is a
         // credential, `api` is not). Anything else refuses: `pin`/`otp`/
-        // `passcode`/`code`/`mfa` keys now, `auth:`-keyed credentials, and
-        // digit runs a credential key makes a PIN — `password:4821`,
-        // `password:1234-5678`, `token:12345` are credentials wearing a
-        // port's shape (review round 5, finding 5).
+        // `passcode`/`mfa` and qualified-`code` keys, `auth:`-keyed
+        // credentials, and digit runs a credential key makes a PIN —
+        // `password:4821`, `password:1234-5678`, `token:12345` are
+        // credentials wearing a port's shape (review round 5, finding 5).
         let tail = &rest[key_len + 1..];
-        let last_is_credential = key_parts(key).last().is_some_and(|p| credential_key(p));
+        let parts = key_parts(key);
+        // `code` is credential-shaped here when its qualifier is the key's
+        // own previous part — `reset.code:4421` is a PIN wearing a port's
+        // shape, not a service name (review round 6, A3 follow-up).
+        let last_is_credential = parts.last().is_some_and(|p| {
+            credential_key(p)
+                || (p.as_slice() == b"code"
+                    && parts.len() > 1
+                    && CODE_QUALIFIERS
+                        .iter()
+                        .any(|q| q.as_bytes() == parts[parts.len() - 2].as_slice()))
+        });
         let state_tail = tail
             .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
             .all(|p| STATE_WORDS.contains(&p));
@@ -1016,6 +1060,22 @@ fn looks_like_uuid(token: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review round 6, A3: every entry in the default allowlist must map
+    /// to `Default` under `treat()` — a credential-namespace change that
+    /// withholds a schema-declared operational key is a regression, not
+    /// a tightening (`http.status_code` was the case).
+    #[test]
+    fn default_attributes_survive_treat() {
+        let policy = Policy::default();
+        for key in DEFAULT_ALLOWED_ATTRIBUTES {
+            assert_eq!(
+                policy.treat(key),
+                KeyTreatment::Default,
+                "default attribute {key} is treated as something else"
+            );
+        }
+    }
 
     #[test]
     fn leaves_ordinary_text_alone_without_allocating() {

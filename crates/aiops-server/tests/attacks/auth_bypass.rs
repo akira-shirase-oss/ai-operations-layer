@@ -587,6 +587,7 @@ async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
     let s = stack(&pool, &[]).await;
     create_project(&s.url, "pilot");
     let key = create_ingest_key(&s.url, "pilot", "h");
+    let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
 
     // Opt in `customer.tier` and prove it applies — the ingest-key cache
     // now holds a positive entry with opt_in = [customer.tier].
@@ -620,13 +621,13 @@ async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
     // Clear #2 lands ~0.3 s inside the window — the opt_in UPDATE itself
     // fires `projects_opt_in_notify`'s `clear`, so the hint is real and
     // timed. Dropped under a leading-edge debounce; deferred under the fix.
-    sqlx::query("UPDATE projects SET opt_in_attribute_keys = '{other.key}'")
+    sqlx::query("UPDATE projects SET opt_in_attribute_keys = '{other.flag}'")
         .execute(&pool)
         .await
         .unwrap();
 
     // The deferred resync must land: `customer.tier` is withdrawn and
-    // `other.key` applies. Each poll uses fresh markers so an early,
+    // `other.flag` applies. Each poll uses fresh markers so an early,
     // still-stale ingest can't alias the check.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
     for n in 0..30u64 {
@@ -635,7 +636,7 @@ async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
         let mut events = journey(0x41, 100 + n * 10);
         events[0].attributes = serde_json::json!({
             "customer.tier": withdrawn,
-            "other.key": applied,
+            "other.flag": applied,
         })
         .as_object()
         .cloned();
@@ -648,13 +649,21 @@ async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
             );
             return;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the deferred clear never landed — `other.key` never applied"
-        );
+        if std::time::Instant::now() >= deadline {
+            let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
+            let opt: Option<Vec<String>> =
+                sqlx::query_scalar("SELECT opt_in_attribute_keys FROM projects")
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            panic!(
+                "the deferred clear never landed; revocation: {} opt_in: {opt:?}",
+                stats["revocation"]
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    panic!("the deferred clear never landed — `other.key` never applied");
+    panic!("the deferred clear never landed — `other.flag` never applied");
 }
 
 async fn stored_body_contains(pool: &PgPool, needle: &str) -> bool {
@@ -663,6 +672,133 @@ async fn stored_body_contains(pool: &PgPool, needle: &str) -> bool {
         .await
         .unwrap();
     rows.join("\n").contains(needle)
+}
+
+/// The resync count the revocation watcher reports — the metric the clear
+/// debounce is bounded by (review round 6, A2).
+async fn resync_count(base: &str, admin: &str) -> u64 {
+    let (_, stats) = get(base, "/v1/collector/stats", Some(admin)).await;
+    stats["revocation"]["resyncs"].as_u64().unwrap_or(0)
+}
+
+/// Review round 6, A2: a `clear` hint's resync waits on the pump's own
+/// deadline arm, never inside the `try_recv` arm — a queued clear must not
+/// cost the socket a second of unread time. 500 `clear` notices (each its
+/// own transaction, the flood the finding describes) coalesce into a
+/// bounded count of resyncs while a real digest notice still evicts inside
+/// 2 s.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_clear_flood_coalesces_and_digests_still_evict(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let (token, token_id) = create_token(&s.url, "reader", &["read"], &["pilot"]);
+    let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
+    // Warm the token cache so the digest eviction is observable.
+    assert_eq!(
+        get(&s.base, "/v1/projects/pilot/operations", Some(&token))
+            .await
+            .0,
+        200
+    );
+    let resyncs0 = resync_count(&s.base, &admin).await;
+
+    // The flood: 500 `clear` notices, one per transaction — the attacker's
+    // shape (a NOTIFY needs a commit; one per tx is how the global queue
+    // backs up). The send's own duration sets the resync bound below: a
+    // coalesced flood costs ~one resync per debounce window the send
+    // spans, never one per notice.
+    let send = std::time::Instant::now();
+    for _ in 0..500 {
+        sqlx::query("SELECT pg_notify('aiops_credential_revoked', 'clear')")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let sent_in = send.elapsed();
+
+    // A real revoke mid-drain — by SQL, so the admin path's in-process
+    // evict cannot fake a pass. The digest notice is the LAST entry in the
+    // queue: `notices` can only reach 501+ once every queued clear was
+    // processed and the digest handled — reaching it within 2 s is the
+    // "the digest still evicts within 2 s" bound (a resync also flushes
+    // the token cache, so a 401 alone cannot tell the two paths apart).
+    sqlx::query("UPDATE api_tokens SET revoked_at = now() WHERE id = $1::uuid")
+        .bind(&token_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut notices = 0u64;
+    while std::time::Instant::now() < deadline {
+        let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
+        notices = stats["revocation"]["notices"].as_u64().unwrap_or(0);
+        if notices >= 501 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        notices >= 501,
+        "the digest notice queued behind the clear flood — {notices} notices in 2 s"
+    );
+    // The eviction it stood for: the cached token is refused.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let (status, _) = get(&s.base, "/v1/projects/pilot/operations", Some(&token)).await;
+        if status == 401 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the digest notice was handled but the token still answers: {status}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // …and the flood coalesced into a bounded resync count: let the last
+    // debounce window close, then count. A resync per message would read
+    // as hundreds.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let resyncs = resync_count(&s.base, &admin).await - resyncs0;
+    assert!(
+        resyncs >= 1,
+        "500 clears produced no resync — the deadline arm never fired"
+    );
+    assert!(
+        resyncs <= sent_in.as_secs() + 2,
+        "500 clears in {sent_in:?} cost {resyncs} resyncs — each is a serial second of socket stall"
+    );
+}
+
+/// Review round 6, B2: 'O' (origin-only) is not armed enough — a writer
+/// with `session_replication_role = replica` silences an 'O' trigger. The
+/// migration arms every revocation trigger ALWAYS, and the beat requires
+/// 'A': a trigger dropped back to 'O' must read as a gap, not green.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn an_unarmed_revocation_trigger_reads_as_a_gap(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
+
+    // 'O' — the pre-round-6 state: fires in an ordinary session, silent
+    // under a replica-role one.
+    sqlx::query("ALTER TABLE api_tokens ENABLE TRIGGER api_tokens_revoked_notify")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(14);
+    loop {
+        let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
+        if stats["revocation"]["gaps"].as_u64().unwrap_or(0) >= 1 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "an origin-only trigger stayed green — 'A' was never required: {stats:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 /// Review round 5, finding 3 + 7: the beat is a bounded write that ALSO

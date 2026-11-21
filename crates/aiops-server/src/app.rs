@@ -73,6 +73,9 @@ pub struct RevocationView {
     pub notices: u64,
     /// Connection gaps recovered from (each cost a catch-up read).
     pub gaps: u64,
+    /// Cache resyncs run — the `clear` debounce is bounded by this
+    /// (review round 6, A2).
+    pub resyncs: u64,
 }
 
 #[derive(Serialize)]
@@ -195,6 +198,7 @@ pub struct AppState {
     /// `/v1/collector/stats` and `/readyz` signal for the channel (V1).
     pub revocation_notices: AtomicU64,
     pub revocation_gaps: AtomicU64,
+    pub revocation_resyncs: AtomicU64,
 }
 
 /// Runner reads in flight at most; past it the console is told "busy".
@@ -274,6 +278,7 @@ impl AppState {
             revocation_healthy: AtomicBool::new(false),
             revocation_notices: AtomicU64::new(0),
             revocation_gaps: AtomicU64::new(0),
+            revocation_resyncs: AtomicU64::new(0),
             limits: Limits::default(),
             store,
             config,
@@ -371,6 +376,7 @@ impl AppState {
                 healthy: self.revocation_healthy.load(Ordering::Relaxed),
                 notices: self.revocation_notices.load(Ordering::Relaxed),
                 gaps: self.revocation_gaps.load(Ordering::Relaxed),
+                resyncs: self.revocation_resyncs.load(Ordering::Relaxed),
             },
         )
     }

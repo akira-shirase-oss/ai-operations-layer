@@ -86,7 +86,7 @@ pub async fn watch(state: Arc<AppState>, cancel: CancellationToken) {
                 };
                 match writer {
                     Ok(writer) => {
-                        if !resync(&state, &cancel, &last_resync, true).await {
+                        if !resync(&state, &cancel, &last_resync).await {
                             return; // cancelled
                         }
                         if !pump(&state, &mut listener, &writer, &cancel, &last_resync).await {
@@ -119,36 +119,19 @@ pub async fn watch(state: Arc<AppState>, cancel: CancellationToken) {
 /// A failed catch-up retried once under V1 left the instance degraded
 /// until the next gap; now it retries with backoff until the read lands
 /// or `cancel` ends it (review N-C). `false` means cancelled mid-retry.
+///
+/// The window is stamped BEFORE the work (review round 6, A2): a `clear`
+/// processed while the catch-up runs schedules the next window, and the
+/// caller — the pump's deadline arm or a channel gap — owns every wait.
 async fn resync(
     state: &AppState,
     cancel: &CancellationToken,
     last_resync: &Mutex<Instant>,
-    forced: bool,
 ) -> bool {
-    if !forced {
-        // Trailing edge (review round 5, finding 2): a `clear` inside the
-        // window is DEFERRED to its end, never dropped — a dropped hint
-        // leaves a withdrawn opt-in applying from cache until the TTL.
-        // A burst of `clear`s coalesces into this one resync.
-        let wait = {
-            // A poisoned debounce lock never blocks a resync.
-            let Ok(last) = last_resync.lock() else {
-                return true;
-            };
-            RESYNC_DEBOUNCE.saturating_sub(last.elapsed())
-        };
-        if !wait.is_zero()
-            && !tokio::select! {
-                () = cancel.cancelled() => false,
-                () = tokio::time::sleep(wait) => true,
-            }
-        {
-            return false;
-        }
-        if let Ok(mut last) = last_resync.lock() {
-            *last = Instant::now();
-        }
+    if let Ok(mut last) = last_resync.lock() {
+        *last = Instant::now();
     }
+    Metrics::add(&state.revocation_resyncs, 1);
     let mut backoff = RESYNC_BACKOFF_MIN;
     loop {
         state.revocation_healthy.store(false, Ordering::Relaxed);
@@ -194,9 +177,32 @@ async fn pump(
     let mut last_seen = Instant::now();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // A queued `clear` waits on THIS arm, never inside the `try_recv` arm
+    // (review round 6, A2): while the deadline sleeps the select keeps
+    // polling the listener socket, so digests still evict and a clear
+    // flood coalesces instead of serialising a resync per message.
+    let mut resync_at: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             () = cancel.cancelled() => return false,
+            () = async {
+                match resync_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                resync_at = None;
+                if !resync(state, cancel, last_resync).await {
+                    return false;
+                }
+                // Notices that queued during the catch-up are already in
+                // the listener's buffer — drain them before the next
+                // select round so their deadlines re-base promptly.
+                while let Some(note) = listener.next_buffered() {
+                    last_seen = Instant::now();
+                    handle(state, note.payload(), last_resync, &mut resync_at);
+                }
+            }
             _ = beat.tick() => {
                 if last_seen.elapsed() > HEARTBEAT_DEADLINE {
                     tracing::warn!("revocation heartbeat missed; reconnecting");
@@ -224,16 +230,14 @@ async fn pump(
             note = listener.try_recv() => match note {
                 Ok(Some(note)) => {
                     last_seen = Instant::now();
-                    if !handle(state, note.payload(), cancel, last_resync).await {
-                        return false; // cancelled mid-resync
-                    }
+                    handle(state, note.payload(), last_resync, &mut resync_at);
                 }
                 // sqlx dropped and re-LISTENed inside `try_recv`: notices in
                 // the gap are lost silently — `Ok(None)` is the only sign.
                 Ok(None) => {
                     tracing::warn!("revocation listener reconnected internally; resyncing");
                     Metrics::add(&state.revocation_gaps, 1);
-                    if !resync(state, cancel, last_resync, true).await {
+                    if !resync(state, cancel, last_resync).await {
                         return false;
                     }
                     last_seen = Instant::now();
@@ -254,19 +258,31 @@ async fn pump(
 /// non-member is a no-op); `clear` (DELETE/TRUNCATE/opt-in writes,
 /// migration 0009) schedules a debounced resync — any database role can
 /// forge a `clear`, so its effect must be a bounded re-derivation from
-/// the store, never a per-message flush. `false` means cancelled mid-resync.
-async fn handle(
+/// the store, never a per-message flush, and never a sleep that leaves
+/// the socket unread (review round 6, A2).
+fn handle(
     state: &AppState,
     payload: &str,
-    cancel: &CancellationToken,
     last_resync: &Mutex<Instant>,
-) -> bool {
+    resync_at: &mut Option<tokio::time::Instant>,
+) {
     Metrics::add(&state.revocation_notices, 1);
     match payload {
         "heartbeat" => {}
         "clear" => {
-            tracing::info!("revocation channel hinted a clear; resyncing");
-            return resync(state, cancel, last_resync, false).await;
+            tracing::info!("revocation channel hinted a clear; resync scheduled");
+            // pending = max(last + 1 s, now): at most one resync per
+            // window, and a clear inside the window waits for its
+            // TRAILING edge (review round 5, finding 2) — the pump's
+            // deadline arm owns the sleep.
+            let pending = match last_resync.lock() {
+                // A poisoned debounce lock resyncs at once — cheaper than
+                // a deadlock.
+                Err(_) => Instant::now(),
+                Ok(last) => (*last + RESYNC_DEBOUNCE).max(Instant::now()),
+            };
+            let deadline = tokio::time::Instant::from_std(pending);
+            *resync_at = Some(resync_at.map_or(deadline, |d| d.min(deadline)));
         }
         _ => {
             let Ok(digest) = <[u8; 32]>::try_from(hex_bytes(payload).as_slice()) else {
@@ -274,14 +290,13 @@ async fn handle(
                     payload_len = payload.len(),
                     "malformed revocation notice ignored"
                 );
-                return true;
+                return;
             };
             state.tokens.remove(&digest);
             state.ingest_keys.remove(&digest);
             tracing::info!("revoked credential evicted from caches");
         }
     }
-    true
 }
 
 fn hex_bytes(s: &str) -> Vec<u8> {
