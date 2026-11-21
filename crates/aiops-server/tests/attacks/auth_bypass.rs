@@ -576,3 +576,136 @@ async fn the_cli_will_not_mint_a_contradictory_admin_or_scopeless_token(pool: Pg
         "the refused mints stored nothing"
     );
 }
+
+/// Review round 5, finding 2: a `clear` hint inside the 1 s debounce must
+/// be DEFERRED (trailing edge), never dropped — a second opt-in change
+/// `projects_opt_in_notify` fires `clear` and a dropped hint leaves the
+/// withdrawn key applying from cache until the 30 s TTL.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let key = create_ingest_key(&s.url, "pilot", "h");
+
+    // Opt in `customer.tier`, let its resync complete, then prove it applies.
+    let (out, err) = crate::common::cli(
+        &s.url,
+        &["admin", "set-opt-in", "--project", "pilot", "customer.tier"],
+    );
+    assert!(out.contains("customer.tier"), "{out} / {err}");
+    let mut e = journey(0x40, 0);
+    e[0].attributes = serde_json::json!({"customer.tier": "v0"})
+        .as_object()
+        .cloned();
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&e)).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        stored_body_contains(&pool, "v0").await,
+        "the opted-in key must store first"
+    );
+
+    // The second opt-in write ~0.5 s later fires a `clear` inside the
+    // debounce window. Dropped under a leading-edge debounce; deferred to
+    // the trailing edge under the fix.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let (out, err) = crate::common::cli(
+        &s.url,
+        &["admin", "set-opt-in", "--project", "pilot", "other.key"],
+    );
+    assert!(out.contains("other.key"), "{out} / {err}");
+
+    // The deferred resync must land: `customer.tier` is withdrawn and
+    // `other.key` applies — poll past the 1 s debounce + resync latency.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let mut events = journey(0x41, 100);
+        events[0].attributes = serde_json::json!({"customer.tier": "v1", "other.key": "v2"})
+            .as_object()
+            .cloned();
+        let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
+        assert_eq!(status, 200, "{body}");
+        if stored_body_contains(&pool, "v2").await {
+            assert!(
+                !stored_body_contains(&pool, "v1").await,
+                "the withdrawn key kept applying — the second clear was dropped"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the deferred clear never landed — `other.key` never applied"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+async fn stored_body_contains(pool: &PgPool, needle: &str) -> bool {
+    let rows: Vec<String> = sqlx::query_scalar("SELECT body::text FROM events")
+        .fetch_all(pool)
+        .await
+        .unwrap();
+    rows.join("\n").contains(needle)
+}
+
+/// Review round 5, finding 3 + 7: the beat is a bounded write that ALSO
+/// proves the `api_tokens` trigger is armed — a lock on the heartbeat row or
+/// a disabled trigger reads as a channel gap, never a frozen-green watcher.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_beat_under_a_row_lock_reads_as_a_gap(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
+
+    // Hold a lock the beat's UPDATE cannot pass: `revocation_heartbeat` is
+    // one row, written every 5 s. The writer pool's lock/statement timeout
+    // plus the 2 s client timeout must turn this into Err → gap, never a
+    // watcher stuck inside the select arm.
+    let mut locker = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *locker).await.unwrap();
+    sqlx::query("LOCK TABLE revocation_heartbeat IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(14);
+    loop {
+        let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
+        if stats["revocation"]["gaps"].as_u64().unwrap_or(0) >= 1 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a locked heartbeat row froze the watcher green — no gap: {stats:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Review round 5, finding 7: the heartbeat proves only its own trigger —
+/// `api_tokens_revoked_notify` disabled (or a replica-role revoker) leaves
+/// the channel deaf while the beat stays green. The beat must check the
+/// revoke trigger's arming, not just its own.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_disabled_revoke_trigger_reads_as_a_gap(pool: PgPool) {
+    let s = stack(&pool, &[]).await;
+    create_project(&s.url, "pilot");
+    let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
+
+    sqlx::query("ALTER TABLE api_tokens DISABLE TRIGGER api_tokens_revoked_notify")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(14);
+    loop {
+        let (_, stats) = get(&s.base, "/v1/collector/stats", Some(&admin)).await;
+        if stats["revocation"]["gaps"].as_u64().unwrap_or(0) >= 1 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a disabled revoke trigger stayed green — the beat proved only itself: {stats:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}

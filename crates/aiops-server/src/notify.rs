@@ -42,6 +42,11 @@ use crate::app::{AppState, Metrics};
 const RECONNECT_AFTER: Duration = Duration::from_secs(1);
 /// The heartbeat cadence over the watcher's own pool.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
+/// A beat must answer within this — a blocked UPDATE on the heartbeat row
+/// or a half-open writer connection is a gap, never a hang (review round
+/// 5, finding 3). Longer than the writer pool's server-side timeouts so
+/// the server's error lands first when it can.
+const BEAT_TIMEOUT: Duration = Duration::from_secs(2);
 /// No observed notice (heartbeat or real) for this long means the channel
 /// is dead — half-open connections surface no error otherwise.
 const HEARTBEAT_DEADLINE: Duration = Duration::from_secs(10);
@@ -121,14 +126,28 @@ async fn resync(
     forced: bool,
 ) -> bool {
     if !forced {
-        // A poisoned debounce lock never blocks a resync.
-        let Ok(mut last) = last_resync.lock() else {
-            return true;
+        // Trailing edge (review round 5, finding 2): a `clear` inside the
+        // window is DEFERRED to its end, never dropped — a dropped hint
+        // leaves a withdrawn opt-in applying from cache until the TTL.
+        // A burst of `clear`s coalesces into this one resync.
+        let wait = {
+            // A poisoned debounce lock never blocks a resync.
+            let Ok(last) = last_resync.lock() else {
+                return true;
+            };
+            RESYNC_DEBOUNCE.saturating_sub(last.elapsed())
         };
-        if last.elapsed() < RESYNC_DEBOUNCE {
-            return true;
+        if !wait.is_zero()
+            && !tokio::select! {
+                () = cancel.cancelled() => false,
+                () = tokio::time::sleep(wait) => true,
+            }
+        {
+            return false;
         }
-        *last = Instant::now();
+        if let Ok(mut last) = last_resync.lock() {
+            *last = Instant::now();
+        }
     }
     let mut backoff = RESYNC_BACKOFF_MIN;
     loop {
@@ -184,10 +203,22 @@ async fn pump(
                     Metrics::add(&state.revocation_gaps, 1);
                     return true;
                 }
-                if let Err(e) = revocation_beat(writer).await {
-                    tracing::warn!(error = %e, "revocation heartbeat failed; reconnecting");
-                    Metrics::add(&state.revocation_gaps, 1);
-                    return true;
+                match tokio::time::timeout(BEAT_TIMEOUT, revocation_beat(writer)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "revocation heartbeat failed; reconnecting");
+                        Metrics::add(&state.revocation_gaps, 1);
+                        return true;
+                    }
+                    // A half-open writer connection or a lock on the
+                    // heartbeat row must not freeze the watcher inside
+                    // this select arm (review round 5, finding 3): the
+                    // timeout turns it into a gap + reconnect.
+                    Err(_) => {
+                        tracing::warn!("revocation heartbeat timed out; reconnecting");
+                        Metrics::add(&state.revocation_gaps, 1);
+                        return true;
+                    }
                 }
             }
             note = listener.try_recv() => match note {

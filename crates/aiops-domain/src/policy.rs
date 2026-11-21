@@ -201,13 +201,18 @@ const SECRET_PARTS: &[&str] = &[
     "auth",
     "authorization",
     "bearer",
+    "code",
     "cookie",
     "credential",
     "credentials",
     "jwt",
+    "mfa",
+    "otp",
+    "passcode",
     "passphrase",
     "passwd",
     "password",
+    "pin",
     "pwd",
     "secret",
     "sessid",
@@ -254,8 +259,12 @@ fn key_parts(key: &[u8]) -> Vec<Vec<u8>> {
 /// `accessToken`, `ASP.NET_SessionId`, `connect.sid`, `laravel_session` (review S1-2).
 /// Suffix, not substring: `tokens`, `secretary` and `sessionless` stay readable.
 const SECRET_SUFFIXES: &[&[u8]] = &[
+    b"mfa",
+    b"otp",
+    b"passcode",
     b"passwd",
     b"password",
+    b"pin",
     b"pwd",
     b"secret",
     b"session",
@@ -385,10 +394,19 @@ fn secret_spans(view: &[u8]) -> Vec<(usize, usize)> {
         // requires its own boundary — so one pass skips them all. Without
         // it, every byte of a long token run re-runs the run analysis and
         // the scan goes quadratic on `aaaa…`-style inputs (review N-J).
-        // Two exceptions still get checked: a `:` (userinfo needs no
-        // boundary — `https` ends in a letter) and positions after
-        // `-`/`+`/`/`/`=` (an interior `ghp_`, a `password:` after `=`).
-        while i < view.len() && is_word(view[i - 1]) && view[i] != b':' {
+        // Three exceptions still get checked: a `:` (userinfo needs no
+        // boundary — `https` ends in a letter), positions after
+        // `-`/`+`/`/`/`=` (an interior `ghp_`, a `password:` after `=`),
+        // and the position after a leading `_` — `match_secret`'s own
+        // boundary rule: `_` opening a token (`_AKIA…_` in Markdown
+        // italics) is a boundary, `_` joining two words is not (review
+        // round 5, finding 1 — the skip must mirror it or that branch
+        // can never run).
+        while i < view.len()
+            && is_word(view[i - 1])
+            && view[i] != b':'
+            && !(view[i - 1] == b'_' && (i < 2 || !is_word(view[i - 2])))
+        {
             i += 1;
         }
     }
@@ -442,11 +460,26 @@ pub fn redact(text: &str) -> Option<String> {
             map = composed;
         }
         // The pass cap ran out with decodable text left: a `%25`-nested
-        // escape deeper than DECODE_PASSES still hides its key — fail
-        // closed, never return the nested text as if it were clean
-        // (review N-J).
+        // escape deeper than DECODE_PASSES still hides its key. Fail
+        // closed on the leftover SPAN — each still-encoded `%XX` window
+        // mapped back through `map` to raw — never the whole field: the
+        // text around the residue is not the credential (review round 5,
+        // finding 6).
         if percent_decode(&view).is_some() {
-            return Some(REDACTED.to_string());
+            let mut j = 0;
+            while j + 3 <= view.len() {
+                if view[j] == b'%'
+                    && view[j + 1].is_ascii_hexdigit()
+                    && view[j + 2].is_ascii_hexdigit()
+                {
+                    let start = map[j].0;
+                    let end = map[j + 2].0 + map[j + 2].1;
+                    spans.push((start, end));
+                    j += 3;
+                } else {
+                    j += 1;
+                }
+            }
         }
         spans.sort_unstable();
         spans.dedup();
@@ -692,23 +725,19 @@ const STATE_WORDS: &[&[u8]] = &[
 /// and `auth:login` a key-looking pair; neither is a credential, so only
 /// these shapes refuse (review N3).
 /// A `key:value` pair whose key names a secret refuses too — `password:x` is
-/// not an identifier (review N3 residual) — except the category keys `auth`
-/// and `authorization`, and except a `:` pair whose whole tail is state
-/// words and port-shaped digits: `token:expired` and `session-api:8080`
-/// are events and deployments; `password:hunter2`, `password:123456` and
-/// `token:<hex>` are credentials wearing a key's name (review N-E). A bare
-/// ≥32 lowercase-hex field refuses outright — the comment that claimed
-/// the run rule covered identifiers was wrong; `looks_like_secret` never
-/// ran it (review N-E).
+/// not an identifier (review N3 residual). The `:`-tail keep is narrow: a
+/// tail of state words (`token:expired` is an event), or ONE port-shaped
+/// digit piece under a key whose last part is not itself a credential
+/// (`session-api:8080` is a port; `password:4821` and `password:1234-5678`
+/// are PINs, `auth:hunter2` a credential — `auth`/`authorization` carry no
+/// exemption, review round 5). Everything else — `password:hunter2`,
+/// `password:123456`, `token:<32 hex>` — refuses.
+/// A bare ≥32 lowercase-hex field is an IDENTIFIER — a commit SHA is a
+/// release, a hex trace id a `request_id`: the hex credential rule fires
+/// only under a credential KEY, never bare (the typed-field policy,
+/// review round 5).
 pub fn looks_like_secret(text: &str) -> bool {
     let bytes = text.as_bytes();
-    if bytes.len() >= 32
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
-    {
-        return true;
-    }
     (0..bytes.len()).any(|i| {
         if url_password(bytes, i).is_some()
             || ((i == 0 || !is_word(bytes[i - 1])) && high_confidence(bytes, i).is_some())
@@ -733,27 +762,31 @@ pub fn looks_like_secret(text: &str) -> bool {
             return false;
         }
         let key = &rest[..key_len];
-        if !credential_key(key)
-            || key.eq_ignore_ascii_case(b"auth")
-            || key.eq_ignore_ascii_case(b"authorization")
-        {
+        if !credential_key(key) {
             return false;
         }
         if rest[key_len] == b'=' {
             return true;
         }
-        // A credential key's `:`-tail keeps ONLY the allowlist: state
-        // words (`token:expired` is an event) and all-digit pieces under
-        // six digits (`session-api:8080` is a port — six or more digits
-        // is already too much entropy to be one). Anything else —
-        // `password:hunter2`, `password:123456`, `token:<32 hex>` — is a
-        // credential in an identifier field, and it refuses (review N-E).
-        !rest[key_len + 1..]
+        // A credential key's `:`-tail keeps ONLY: a tail made entirely of
+        // state words (`token:expired` is an event), or ONE all-digit
+        // piece under six digits when the key's LAST part is not itself a
+        // credential (`session-api:8080` is a port — `session` is a
+        // credential, `api` is not). Anything else refuses: `pin`/`otp`/
+        // `passcode`/`code`/`mfa` keys now, `auth:`-keyed credentials, and
+        // digit runs a credential key makes a PIN — `password:4821`,
+        // `password:1234-5678`, `token:12345` are credentials wearing a
+        // port's shape (review round 5, finding 5).
+        let tail = &rest[key_len + 1..];
+        let last_is_credential = key_parts(key).last().is_some_and(|p| credential_key(p));
+        let state_tail = tail
             .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
-            .all(|p| {
-                STATE_WORDS.contains(&p)
-                    || (p.len() <= 5 && !p.is_empty() && p.iter().all(u8::is_ascii_digit))
-            })
+            .all(|p| STATE_WORDS.contains(&p));
+        let port_tail = !last_is_credential
+            && !tail.is_empty()
+            && tail.len() <= 5
+            && tail.iter().all(u8::is_ascii_digit);
+        !(state_tail || port_tail)
     })
 }
 
@@ -801,9 +834,15 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     // `+` opens a run too — it is a base64 byte, and a token that LEADS
     // with it is only readable once the run counts it (corpus property:
     // `++++…` is a 32-char token, not four joiners and a 28-char tail).
+    // `/` opens for the same reason: a std-base64 token may lead with it
+    // (1 in 64 unpadded 24-byte draws) and the 31-char tail otherwise
+    // survives whole (review round 5, finding 8 — the flaky N-B seed was
+    // a real leak). A bare `/`-led run still answers to the path checks:
+    // `slash_run_dead_offset` demands path evidence, and a credential's
+    // own leading slash after whitespace is none.
     if rest
         .first()
-        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'+'))
+        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'+' | b'/'))
     {
         let run = token_run(rest, b"+/=_-");
         let token = &rest[..run];
@@ -833,7 +872,15 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             .take_while(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(*b))
             .count();
         let said_sha256 = i >= 7 && bytes[i - 7..i].eq_ignore_ascii_case(b"sha256:");
-        if hex_run >= 32 && !said_sha256 && !rest.get(hex_run).is_some_and(|b| is_word(*b)) {
+        // A letter or digit after the run continues a longer identifier
+        // (`0123abcZ`); a `_` does not — `_<32hex>_` is Markdown-italics
+        // decoration around a complete hex credential, not a word join
+        // (review round 5). `_` followed by word text still continues it.
+        let continues = rest[hex_run..]
+            .iter()
+            .find(|b| **b != b'_')
+            .is_some_and(|b| is_word(*b));
+        if hex_run >= 32 && !said_sha256 && !continues {
             return Some((0, i + hex_run));
         }
     }

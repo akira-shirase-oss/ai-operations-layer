@@ -542,23 +542,246 @@ MUTANTS = {
         ],
         ["keyed_text_inside_free_text_loses_the_value"],
     ),
-    # An identifier field refuses credential-keyed `name:value` — its tail
-    # admits only state words and short digit pieces. Re-admitting plain
-    # alphanumeric tails stores `password:hunter2` as a service name.
+    # An identifier field refuses credential-keyed `name:value` — the tail
+    # check deciding that is narrowed to state words and ONE port piece
+    # under a non-credential last part. Admitting every tail stores
+    # `password:hunter2` as a service name.
     "identifier-credential-stored": (
         [
             e(
                 D / "policy.rs",
-                """            .all(|p| {
-                STATE_WORDS.contains(&p)
-                    || (p.len() <= 5 && !p.is_empty() && p.iter().all(u8::is_ascii_digit))
-            })""",
-                """            .all(|p| {
-                STATE_WORDS.contains(&p) || p.iter().all(u8::is_ascii_alphanumeric)
-            })""",
+                """        !(state_tail || port_tail)""",
+                """        false""",
             )
         ],
         ["a_credential_shaped_identifier_is_refused_not_rewritten"],
+    ),
+    # Review round 5, finding 1: the N-J skip must exempt the position after
+    # a leading `_` — without it every `_`-wrapped credential survives.
+    "underscore-boundary-skipped": (
+        [
+            e(
+                D / "policy.rs",
+                """            && !(view[i - 1] == b'_' && (i < 2 || !is_word(view[i - 2])))""",
+                """            && true""",
+            )
+        ],
+        ["an_underscore_wrapped_token_dies_in_free_text"],
+    ),
+    # The hex run's word-continuation check must skip `_` joiners —
+    # `_<32hex>_` is italics decoration, not a word continuation.
+    "hex-decoration-continues-word": (
+        [
+            e(
+                D / "policy.rs",
+                """        let continues = rest[hex_run..]
+            .iter()
+            .find(|b| **b != b'_')
+            .is_some_and(|b| is_word(*b));""",
+                """        let continues = rest.get(hex_run).is_some_and(|b| is_word(*b));""",
+            )
+        ],
+        ["an_underscore_wrapped_token_dies_in_free_text"],
+    ),
+    # Review round 5, finding 8: `/` must open a run — a std-base64 token
+    # may lead with it, and the 31-char tail otherwise survives.
+    "slash-cant-open-run": (
+        [
+            e(
+                D / "policy.rs",
+                """        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'+' | b'/'))""",
+                """        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'+'))""",
+            )
+        ],
+        ["a_leading_slash_token_dies_in_free_text"],
+    ),
+    # Review round 5, finding 6: the `%25` residual fails closed on its
+    # leftover span — erasing the whole field eats surrounding text.
+    "residual-erases-field": (
+        [
+            e(
+                D / "policy.rs",
+                """            let mut j = 0;
+            while j + 3 <= view.len() {
+                if view[j] == b'%'
+                    && view[j + 1].is_ascii_hexdigit()
+                    && view[j + 2].is_ascii_hexdigit()
+                {
+                    let start = map[j].0;
+                    let end = map[j + 2].0 + map[j + 2].1;
+                    spans.push((start, end));
+                    j += 3;
+                } else {
+                    j += 1;
+                }
+            }""",
+                """            return Some(REDACTED.to_string());""",
+            )
+        ],
+        ["a_nested_escape_redacts_only_its_span"],
+    ),
+    # Review round 5, finding 4: the ≥32-hex credential rule lives under
+    # credential keys — a whole-field refusal drops SHA releases and hex
+    # trace ids.
+    "identifier-hex-still-refused": (
+        [
+            e(
+                D / "policy.rs",
+                """pub fn looks_like_secret(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (0..bytes.len()).any(|i| {""",
+                """pub fn looks_like_secret(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 32
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    {
+        return true;
+    }
+    (0..bytes.len()).any(|i| {""",
+            )
+        ],
+        ["a_commit_sha_and_a_hex_trace_id_are_identifiers"],
+    ),
+    # Review round 5, finding 5: the `:`-tail keep is ONE digit piece under
+    # a non-credential last part — an uncapped per-piece count admits PINs.
+    "digit-tail-uncapped": (
+        [
+            e(
+                D / "policy.rs",
+                """        let port_tail = !last_is_credential
+            && !tail.is_empty()
+            && tail.len() <= 5
+            && tail.iter().all(u8::is_ascii_digit);
+        !(state_tail || port_tail)""",
+                """        !(tail
+            .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
+            .all(|p| STATE_WORDS.contains(&p)
+                || (p.len() <= 5 && !p.is_empty() && p.iter().all(u8::is_ascii_digit))))""",
+            )
+        ],
+        ["pin_tails_and_new_credential_keys_still_refuse"],
+    ),
+    # `auth:`/`authorization:` carry no exemption — a non-state tail under
+    # them is a credential, never a category.
+    "auth-exempt-again": (
+        [
+            e(
+                D / "policy.rs",
+                """        let key = &rest[..key_len];
+        if !credential_key(key) {
+            return false;
+        }
+        if rest[key_len] == b'=' {""",
+                """        let key = &rest[..key_len];
+        if !credential_key(key)
+            || key.eq_ignore_ascii_case(b"auth")
+            || key.eq_ignore_ascii_case(b"authorization")
+        {
+            return false;
+        }
+        if rest[key_len] == b'=' {""",
+            )
+        ],
+        ["pin_tails_and_new_credential_keys_still_refuse"],
+    ),
+    # `pin`/`otp`/`passcode`/`code`/`mfa` are credential key names —
+    # thinning the namespace admits them in identifier and attribute roles.
+    "credential-list-thinned": (
+        [
+            e(
+                D / "policy.rs",
+                '''    "bearer",
+    "code",
+    "cookie",''',
+                '''    "bearer",
+    "cookie",''',
+            ),
+            e(
+                D / "policy.rs",
+                '''    "jwt",
+    "mfa",
+    "otp",
+    "passcode",''',
+                '''    "jwt",''',
+            ),
+            e(
+                D / "policy.rs",
+                '''    "password",
+    "pin",''',
+                '''    "password",''',
+            ),
+        ],
+        ["pin_tails_and_new_credential_keys_still_refuse"],
+    ),
+    # Review round 5, finding 2: `clear` hints debounce on the trailing
+    # edge — an early return drops the hint and a withdrawn opt-in keeps
+    # applying from cache until the TTL.
+    "clear-hints-dropped": (
+        [
+            e(
+                S / "notify.rs",
+                """        if !wait.is_zero()
+            && !tokio::select! {
+                () = cancel.cancelled() => false,
+                () = tokio::time::sleep(wait) => true,
+            }
+        {
+            return false;
+        }""",
+                """        if !wait.is_zero() {
+            return true;
+        }""",
+            )
+        ],
+        ["two_clears_half_a_second_apart_both_land"],
+    ),
+    # Review round 5, finding 3: the beat is bounded — an unbounded await
+    # freezes the watcher inside the select arm under a row lock.
+    "beat-never-times-out": (
+        [
+            e(
+                S / "notify.rs",
+                """                match tokio::time::timeout(BEAT_TIMEOUT, revocation_beat(writer)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "revocation heartbeat failed; reconnecting");
+                        Metrics::add(&state.revocation_gaps, 1);
+                        return true;
+                    }""",
+                """                match revocation_beat(writer).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "revocation heartbeat failed; reconnecting");
+                        Metrics::add(&state.revocation_gaps, 1);
+                        return true;
+                    }""",
+            )
+        ],
+        ["a_beat_under_a_row_lock_reads_as_a_gap"],
+    ),
+    # Review round 5, finding 7: the beat checks the revoke trigger's
+    # arming — without it a disabled `api_tokens_revoked_notify` stays
+    # green while deletes go deaf.
+    "api-token-trigger-unproven": (
+        [
+            e(
+                T / "lib.rs",
+                """    let armed: Option<String> = sqlx::query_scalar(
+        "SELECT tgenabled::text FROM pg_trigger
+         WHERE tgname = 'api_tokens_revoked_notify'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if !matches!(armed.as_deref(), Some("O") | Some("A")) {
+        return Err(StoreError::Unavailable(sqlx::Error::RowNotFound));
+    }
+    Ok(())""",
+                """    Ok(())""",
+            )
+        ],
+        ["a_disabled_revoke_trigger_reads_as_a_gap"],
     ),
 }
 

@@ -306,6 +306,26 @@ const BACKSTOP_REDACT: &[(&str, &str)] = &[
         "run a0_Aaa0Aaa-0-A_aA-a_aaa_AA0_0AaA/Run-1A ok",
         "run [redacted] ok",
     ),
+    // `_`-wrapping is how secrets travel in Markdown italics: a leading `_`
+    // is a boundary when it opens the token (`_AKIA…_`, `_glpat-…_`,
+    // `_<32hex>_`), never when it joins two words (`api_key`). The N-J skip
+    // must not swallow the position after a leading `_` (review round 5).
+    ("key _AKIAIOSFODNN7EXAMPLE_ used", "key _[redacted] used"),
+    ("x _glpat-AbCdEfGhIjKlMnOpQrSt_ y", "x _[redacted] y"),
+    ("x _0123456789abcdef0123456789abcdef_ y", "x _[redacted]_ y"),
+    // …and inside an escaped-quote context, where the `_` follows `\"`.
+    (
+        concat!("{\"msg\":\"x _", "AKIA", "IOSFODNN7EXAMPLE_ y\"}"),
+        "{\"msg\":\"x _[redacted] y\"}",
+    ),
+    // A std-base64 token may LEAD with `/` — 1 in 64 unpadded 24-byte draws:
+    // `/` must open a run the way `+` does, or the 31-char tail survives
+    // (review round 5, the flaky N-B seed was a real leak).
+    ("x /AbCdEf1234567890aBcDeF1234567890a y", "x [redacted] y"),
+    // A `%25`-nested escape deeper than DECODE_PASSES fails closed on its
+    // leftover span — `%41` nested five deep — not the whole field
+    // (review round 5): the text around it survives.
+    ("x %2525252541 y", "x [redacted] y"),
 ];
 
 /// Provider-token fixtures as `(lead-in, prefix, body, tail, want)` — built
@@ -927,17 +947,25 @@ fn credential_keyed_identifier_fields_refuse() {
     for (service, why) in [
         ("password:hunter2", "a credential wearing a key's name"),
         ("password:123456", "the same, digits"),
+        // A PIN-shaped tail is not a port: digit pieces keep only under a key
+        // whose last part is not itself a credential (`session-api:8080`),
+        // never `password:4821` or a multi-piece `1234-5678` (review N-E
+        // round 5).
+        ("password:1234-5678", "a two-piece PIN tail"),
+        ("password:4821", "a four-digit PIN tail"),
+        ("token:12345", "a five-digit PIN tail"),
+        ("pin:1234", "pin is a credential key name"),
+        ("otp:123456", "otp is a credential key name"),
+        ("passcode:998877", "passcode is a credential key name"),
+        ("code:ab12cd", "code is a credential key name"),
+        ("mfa:totp-x", "mfa is a credential key name"),
+        (
+            "auth:hunter2",
+            "auth is no longer exempt for non-state tails",
+        ),
         (
             concat!("token:", "0123456789abcdef0123456789abcdef"),
             "a 32-hex tail under a credential key",
-        ),
-        (
-            concat!("0123456789abcdef", "0123456789abcdef"),
-            "a bare 32-hex field",
-        ),
-        (
-            concat!("0123456789abcdef", "0123456789abcdef01234567"),
-            "a bare 40-hex field",
         ),
     ] {
         let source = WireSource {
@@ -950,8 +978,18 @@ fn credential_keyed_identifier_fields_refuse() {
             "{why} kept: {service}"
         );
     }
-    // The namespace keeps: state words, not credentials.
-    for service in ["token:expired", "session:timeout", "session-api:8080"] {
+    // Identifiers keep: a commit SHA is a release, a hex id is a trace —
+    // the hex rule fires only under a credential KEY, never bare
+    // (typed-field policy, review round 5).
+    for service in [
+        "token:expired",
+        "session:timeout",
+        "session-api:8080",
+        "auth:login",
+        concat!("0123456789abcdef", "0123456789abcdef"),
+        concat!("0123456789abcdef", "0123456789abcdef01234567"),
+        "76fc524aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
         let source = WireSource {
             instance_id: instance_id.clone(),
             service: service.to_string(),
@@ -959,7 +997,7 @@ fn credential_keyed_identifier_fields_refuse() {
         };
         assert!(
             validate_source(&source, &Limits::default()).is_ok(),
-            "namespaced event name refused: {service}"
+            "namespaced identifier refused: {service}"
         );
     }
 }
@@ -1026,12 +1064,13 @@ fn mirror_name_segment(s: &[u8]) -> bool {
 }
 
 /// The maximal `[alnum+/=_-]` span holding `pos`, trimmed of leading
-/// non-openers (`/` and `=` join but cannot open a run) — the run
-/// `match_secret` would analyze at the token's position.
+/// non-openers (`=` joins but cannot open a run; `/` can — a std-base64
+/// token may lead with it, review round 5) — the run `match_secret`
+/// would analyze at the token's position.
 fn mirror_run(input: &str, pos: usize) -> &[u8] {
     let b = input.as_bytes();
     let is_run = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'_' | b'-');
-    let is_open = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'+');
+    let is_open = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'+' | b'/');
     let mut lo = pos;
     while lo > 0 && is_run(b[lo - 1]) {
         lo -= 1;

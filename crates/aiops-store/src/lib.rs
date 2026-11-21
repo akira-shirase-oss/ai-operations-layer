@@ -708,6 +708,22 @@ pub async fn revocation_writer(database_url: &str) -> Result<PgPool, StoreError>
         std::time::Duration::from_secs(10),
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    // Server-side deadlines under the client's 2 s beat
+                    // timeout (review round 5, finding 3): a lock on the
+                    // heartbeat row fails at 1 s, a slow statement at 2 s —
+                    // either way the beat returns, never freezes the
+                    // watcher.
+                    sqlx::query("SET lock_timeout = '1s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("SET statement_timeout = '2s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect_with(options),
     )
     .await
@@ -717,11 +733,24 @@ pub async fn revocation_writer(database_url: &str) -> Result<PgPool, StoreError>
 
 /// The heartbeat write: fire the channel's UPDATE trigger over `pool`
 /// (the watcher's own, never a tenant pool). The trigger emits `heartbeat`
-/// on [`REVOCATION_CHANNEL`].
+/// on [`REVOCATION_CHANNEL`]. The beat also proves the WHOLE revoke chain,
+/// not just its own trigger (review round 5, finding 7):
+/// `api_tokens_revoked_notify` disabled (`tgenabled = 'D'`) or armed
+/// replica-only (`'R'`) leaves deletes deaf while this table's trigger
+/// still fires green — `O` (origin) and `A` (always) are the sound states.
 pub async fn revocation_beat(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::query("UPDATE revocation_heartbeat SET beat = now() WHERE id")
         .execute(pool)
         .await?;
+    let armed: Option<String> = sqlx::query_scalar(
+        "SELECT tgenabled::text FROM pg_trigger
+         WHERE tgname = 'api_tokens_revoked_notify'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if !matches!(armed.as_deref(), Some("O" | "A")) {
+        return Err(StoreError::Unavailable(sqlx::Error::RowNotFound));
+    }
     Ok(())
 }
 
