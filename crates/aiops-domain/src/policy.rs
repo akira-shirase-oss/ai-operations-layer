@@ -93,6 +93,19 @@ const SECRET_PREFIXES: &[&str] = &[
     "shpat_",
     "shppa_",
     "shpca_",
+    "shpss_",
+    "GOCSPX-",
+    "ghr_",
+    "PMAK-",
+    "sbp_",
+    "glsa-",
+    "gldt-",
+    "glrt-",
+    "nfp_",
+    "lin_api_",
+    "atlasv1.",
+    "amzn.mws.",
+    "dapi",
     "xapp-",
     "xoxe-",
     "dp.pt.",
@@ -205,6 +218,9 @@ fn is_key_byte(b: u8) -> bool {
 const AUTH_SCHEMES: &[&str] = &["bearer ", "basic "];
 
 const MIN_SECRET_RUN: usize = 8;
+/// Percent-decoding passes at most — `%25` nests an escape inside an escape,
+/// and each pass only shrinks the text.
+const DECODE_PASSES: usize = 4;
 
 fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -303,10 +319,33 @@ pub fn redact(text: &str) -> Option<String> {
     // (review N7): `%63%6C…` is `client…`, `%3A` the `:`. An escape can also
     // FAKE a byte — `%0C` reads as a form feed but is three plain bytes — so
     // the decoded view is scanned in ADDITION and its matches mapped back
-    // onto raw spans; it never replaces the raw scan.
-    if let Some((decoded, raw)) = percent_decode(bytes) {
-        for (start, end) in secret_spans(&decoded) {
-            spans.push((raw[start].0, raw[end - 1].0 + raw[end - 1].1));
+    // onto raw spans; it never replaces the raw scan. `%25` decodes to `%`,
+    // so one pass leaves `%3A` literal — the scan repeats until the view is
+    // stable, bounded by DECODE_PASSES (review residual; each pass only
+    // shrinks the text).
+    if bytes.contains(&b'%') {
+        // `view` is the current decoding; `map` tracks each view byte's
+        // (offset, len) in the RAW text — the identity to start.
+        let mut view = bytes.to_vec();
+        let mut map: Vec<(usize, usize)> = (0..view.len()).map(|i| (i, 1)).collect();
+        for _ in 0..DECODE_PASSES {
+            let Some((decoded, m)) = percent_decode(&view) else {
+                break;
+            };
+            // Compose the maps: decoded byte j spans view bytes o..o+len —
+            // unwind through `map` to the raw extent covering them all.
+            let composed: Vec<(usize, usize)> = m
+                .iter()
+                .map(|&(o, len)| {
+                    let start = map[o].0;
+                    (start, map[o + len - 1].0 + map[o + len - 1].1 - start)
+                })
+                .collect();
+            for (start, end) in secret_spans(&decoded) {
+                spans.push((composed[start].0, composed[end - 1].0 + composed[end - 1].1));
+            }
+            view = decoded;
+            map = composed;
         }
         spans.sort_unstable();
         spans.dedup();
