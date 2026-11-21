@@ -10,7 +10,7 @@
 //! A corpus failure is a red-first bug: fix `redact`, never relax a label —
 //! the labels are the contract three review rounds wrote.
 
-use aiops_domain::policy::redact;
+use aiops_domain::policy::{looks_like_secret, redact};
 use proptest::prelude::*;
 use std::fmt::Write as _;
 
@@ -149,6 +149,87 @@ const MUST_REDACT: &[(&str, &str)] = &[
     // two-char password is too short for any run rule, so only the second
     // pass can kill it.
     ("x://u%253A%2561%2562%2540h", "x://u%253A[redacted]%2540h"),
+    // Base64url secrets in URL paths (review R1): `-`/`_` bytes are run
+    // members, never path evidence, and a segment is pathy only when every
+    // `-`/`_`-split piece is name-shaped. Telegram bot token, a bare
+    // /v1/<43>/, a Discord webhook, and the Slack-webhook regression.
+    (
+        concat!(
+            "POST https://api.telegram.org/",
+            "bot110201543:AAHdqTcvCH1vGWJx_",
+            "SeofSAs0K5PALDsaw",
+            "/sendMessage 429"
+        ),
+        "POST https://api.telegram.org/[redacted]/sendMessage 429",
+    ),
+    (
+        concat!(
+            "x https://h.io/v1/",
+            "AbCdEf1234567890aBcDeF1234567890aBcDeF123",
+            "/status 200"
+        ),
+        "x https://h.io/v1/[redacted]/status 200",
+    ),
+    (
+        concat!(
+            "GET https://d.co/api/webhooks/138574923/",
+            "AbCdEf1234567890aBcDeF1234567890aBcDeF1234",
+            "567890aBcDeF1234567890aBcD",
+            "/github"
+        ),
+        "GET https://d.co/api/webhooks/[redacted]/[redacted]/github",
+    ),
+    (
+        concat!(
+            "GET https://hooks.example.com/services/",
+            "T0AB_",
+            "CDEF12/B0CD-",
+            "EF1234",
+            "/xyZab"
+        ),
+        "GET https://hooks.example.com/services/[redacted]/[redacted]/xyZab",
+    ),
+    // Cookies are keyed secret text like any other (review corpus class).
+    (
+        concat!("Cookie: session=", "AbCdEf1234567890aBc", "; theme=light"),
+        "Cookie: [redacted]",
+    ),
+    // Escapes inside a quoted value belong to the value, never end it
+    // (review R3): \" \\ \n and \u00e9 (the json.dumps default) each get a
+    // row — the value's real closing quote is where the secret stops.
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\"kLm;Pw9x\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "nkLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "u00e9kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    // A JWT fragment — the `eyJ` prefix with its dots split away — is still
+    // a credential piece (review corpus class: split JWTs).
+    (
+        concat!(
+            "part ",
+            "eyJ",
+            "AbCdEf1234567890aBcDeF1234567890aBcDeF",
+            " more"
+        ),
+        "part [redacted] more",
+    ),
+    // A bare 32-hex run is a credential shape like its 40-hex sibling —
+    // GitLab runner tokens and API keys wear it (review corpus class).
+    (
+        concat!("tok ", "a1b2c3d4e5f6a1b2", "c3d4e5f6a1b2c3d4", " ok"),
+        "tok [redacted] ok",
+    ),
 ];
 
 /// Provider-token fixtures as `(lead-in, prefix, body, tail, want)` — built
@@ -157,59 +238,359 @@ const MUST_REDACT: &[(&str, &str)] = &[
 /// GitHub refused the push on `sbp_…`). Every prefix in `SECRET_PREFIXES`
 /// appears once: the corpus's recall covers the whole list, not a sample.
 const TOKEN_FIXTURES: &[(&str, &str, &str, &str, &str)] = &[
-    ("secret ", "GOCSPX-", "Hk3jD9fG2mN8pQrS4tUvW7xYz", " used", "secret [redacted] used"),
-    ("value ", "ghr_", "AbCdEf1234567890aBcDeF1234567890aBcD", " end", "value [redacted] end"),
-    ("key ", "PMAK-", "6123456789abcdef01234567-9f", " ok", "key [redacted] ok"),
-    ("sb ", "sbp_", "0123456789abcdef0123456789abcdef01234567", " here", "sb [redacted] here"),
-    ("shared ", "shpss_", "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d", " inside", "shared [redacted] inside"),
-    ("deploy ", "glsa-", "dR3sT8uV9wX1yZ2aB3c4", " token", "deploy [redacted] token"),
-    ("trigger ", "gldt-", "kL4mN6pQ8rS2tU5vW7x", "", "trigger [redacted]"),
-    ("runner ", "glrt-", "zX1cV4bN7mK2jH5gF9dQ8sA3", "", "runner [redacted]"),
-    ("site ", "nfp_", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCd", "", "site [redacted]"),
-    ("org ", "lin_api_", "0123456789abcdef0123456789abcdef01234567", "", "org [redacted]"),
-    ("tf ", "atlasv1.", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCdEfGhIjKlMnOpQrStUvWxYz", "", "tf [redacted]"),
-    ("aws ", "amzn.mws.", "0123456789abcdef0123456789abcdef0123", " id", "aws [redacted] id"),
-    ("dbx ", "dapi", "0123456789abcdef0123456789abcdef", "", "dbx [redacted]"),
-    ("cloud ", "dop_v1_", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCdEfGhIjKlMnOpQrStUvWxY", "", "cloud [redacted]"),
-    ("pkg ", "npm_", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789", "", "pkg [redacted]"),
-    ("gh ", "ghp_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
-    ("gh ", "gho_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
-    ("gh ", "ghu_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
-    ("gh ", "ghs_", "AbCdEf1234567890aBcDeF1234567890aBcDeF", "", "gh [redacted]"),
-    ("gh ", "github_pat_", "AbCdEf1234567890aBcDeF1234567890aBcDeF123456", "", "gh [redacted]"),
+    (
+        "secret ",
+        "GOCSPX-",
+        "Hk3jD9fG2mN8pQrS4tUvW7xYz",
+        " used",
+        "secret [redacted] used",
+    ),
+    (
+        "value ",
+        "ghr_",
+        "AbCdEf1234567890aBcDeF1234567890aBcD",
+        " end",
+        "value [redacted] end",
+    ),
+    (
+        "key ",
+        "PMAK-",
+        "6123456789abcdef01234567-9f",
+        " ok",
+        "key [redacted] ok",
+    ),
+    (
+        "sb ",
+        "sbp_",
+        "0123456789abcdef0123456789abcdef01234567",
+        " here",
+        "sb [redacted] here",
+    ),
+    (
+        "shared ",
+        "shpss_",
+        "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+        " inside",
+        "shared [redacted] inside",
+    ),
+    (
+        "deploy ",
+        "glsa-",
+        "dR3sT8uV9wX1yZ2aB3c4",
+        " token",
+        "deploy [redacted] token",
+    ),
+    (
+        "trigger ",
+        "gldt-",
+        "kL4mN6pQ8rS2tU5vW7x",
+        "",
+        "trigger [redacted]",
+    ),
+    (
+        "runner ",
+        "glrt-",
+        "zX1cV4bN7mK2jH5gF9dQ8sA3",
+        "",
+        "runner [redacted]",
+    ),
+    (
+        "site ",
+        "nfp_",
+        "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCd",
+        "",
+        "site [redacted]",
+    ),
+    (
+        "org ",
+        "lin_api_",
+        "0123456789abcdef0123456789abcdef01234567",
+        "",
+        "org [redacted]",
+    ),
+    (
+        "tf ",
+        "atlasv1.",
+        "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCdEfGhIjKlMnOpQrStUvWxYz",
+        "",
+        "tf [redacted]",
+    ),
+    (
+        "aws ",
+        "amzn.mws.",
+        "0123456789abcdef0123456789abcdef0123",
+        " id",
+        "aws [redacted] id",
+    ),
+    (
+        "dbx ",
+        "dapi",
+        "0123456789abcdef0123456789abcdef",
+        "",
+        "dbx [redacted]",
+    ),
+    (
+        "cloud ",
+        "dop_v1_",
+        "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789AbCdEfGhIjKlMnOpQrStUvWxY",
+        "",
+        "cloud [redacted]",
+    ),
+    (
+        "pkg ",
+        "npm_",
+        "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+        "",
+        "pkg [redacted]",
+    ),
+    (
+        "gh ",
+        "ghp_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF",
+        "",
+        "gh [redacted]",
+    ),
+    (
+        "gh ",
+        "gho_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF",
+        "",
+        "gh [redacted]",
+    ),
+    (
+        "gh ",
+        "ghu_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF",
+        "",
+        "gh [redacted]",
+    ),
+    (
+        "gh ",
+        "ghs_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF",
+        "",
+        "gh [redacted]",
+    ),
+    (
+        "gh ",
+        "github_pat_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF123456",
+        "",
+        "gh [redacted]",
+    ),
     ("gl ", "glpat-", "AbCdEf1234567890aBcD", "", "gl [redacted]"),
-    ("stripe ", "sk_live_", "AbCdEf1234567890aBcDeF12", "", "stripe [redacted]"),
-    ("stripe ", "sk_test_", "AbCdEf1234567890aBcDeF12", "", "stripe [redacted]"),
-    ("stripe ", "rk_live_", "AbCdEf1234567890aBcDeF12", "", "stripe [redacted]"),
-    ("stripe ", "whsec_", "AbCdEf1234567890aBcDeF1234567890", "", "stripe [redacted]"),
-    ("openai ", "sk-", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "openai [redacted]"),
-    ("slack ", "xoxb-", "123456789012-1234567890123-AbCdEf1234567890aBcDeF12", "", "slack [redacted]"),
-    ("slack ", "xoxp-", "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12", "", "slack [redacted]"),
-    ("slack ", "xoxa-", "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12", "", "slack [redacted]"),
-    ("slack ", "xoxs-", "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12", "", "slack [redacted]"),
-    ("slack ", "xoxe-", "1-AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890abcdef", "", "slack [redacted]"),
-    ("slack ", "xapp-", "1-A0AbCdEf12-AbCdEf1234567890aBcDeF1234567890aBcDeF12", "", "slack [redacted]"),
+    (
+        "stripe ",
+        "sk_live_",
+        "AbCdEf1234567890aBcDeF12",
+        "",
+        "stripe [redacted]",
+    ),
+    (
+        "stripe ",
+        "sk_test_",
+        "AbCdEf1234567890aBcDeF12",
+        "",
+        "stripe [redacted]",
+    ),
+    (
+        "stripe ",
+        "rk_live_",
+        "AbCdEf1234567890aBcDeF12",
+        "",
+        "stripe [redacted]",
+    ),
+    (
+        "stripe ",
+        "whsec_",
+        "AbCdEf1234567890aBcDeF1234567890",
+        "",
+        "stripe [redacted]",
+    ),
+    (
+        "openai ",
+        "sk-",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "openai [redacted]",
+    ),
+    (
+        "slack ",
+        "xoxb-",
+        "123456789012-1234567890123-AbCdEf1234567890aBcDeF12",
+        "",
+        "slack [redacted]",
+    ),
+    (
+        "slack ",
+        "xoxp-",
+        "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12",
+        "",
+        "slack [redacted]",
+    ),
+    (
+        "slack ",
+        "xoxa-",
+        "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12",
+        "",
+        "slack [redacted]",
+    ),
+    (
+        "slack ",
+        "xoxs-",
+        "123456789012-123456789012-1234567890123-abcdef1234567890abcdef1234567890abcdef12",
+        "",
+        "slack [redacted]",
+    ),
+    (
+        "slack ",
+        "xoxe-",
+        "1-AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890abcdef",
+        "",
+        "slack [redacted]",
+    ),
+    (
+        "slack ",
+        "xapp-",
+        "1-A0AbCdEf12-AbCdEf1234567890aBcDeF1234567890aBcDeF12",
+        "",
+        "slack [redacted]",
+    ),
     ("aws ", "AKIA", "IOSFODNN7EXAMPLE", "", "aws [redacted]"),
     ("aws ", "ASIA", "IOSFODNN7EXAMPLE", "", "aws [redacted]"),
-    ("hf ", "hf_", "AbCdEf1234567890aBcDeF1234567890aBc", "", "hf [redacted]"),
-    ("gcp ", "AIza", "AbCdEf1234567890aBcDeF1234567890aBc", "", "gcp [redacted]"),
-    ("sg ", "SG.", "AbCdEf1234567890aBcDeF", ".AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890a", "sg [redacted]"),
-    ("goog ", "ya29.", "AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF1234", "", "goog [redacted]"),
-    ("pkg ", "pypi-", "AgEIcHlwaS5vcmc-AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF12", "", "pkg [redacted]"),
-    ("sq ", "sq0atp-", "AbCdEf1234567890aBcDeF12", "", "sq [redacted]"),
-    ("sq ", "sq0csp-", "AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890", "", "sq [redacted]"),
-    ("shop ", "shpat_", "0123456789abcdef0123456789abcdef01", "", "shop [redacted]"),
-    ("shop ", "shppa_", "0123456789abcdef0123456789abcdef01", "", "shop [redacted]"),
-    ("shop ", "shpca_", "0123456789abcdef0123456789abcdef01", "", "shop [redacted]"),
-    ("dop ", "dp.pt.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
-    ("dop ", "dp.st.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
-    ("dop ", "dp.ct.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
-    ("dop ", "dp.audit.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
-    ("dop ", "dp.scim.", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "dop [redacted]"),
-    ("notion ", "ntn_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "notion [redacted]"),
-    ("figma ", "figd_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "figma [redacted]"),
-    ("ing ", "aiops_ik_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "ing [redacted]"),
-    ("tok ", "aiops_tk_", "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678", "", "tok [redacted]"),
+    (
+        "hf ",
+        "hf_",
+        "AbCdEf1234567890aBcDeF1234567890aBc",
+        "",
+        "hf [redacted]",
+    ),
+    (
+        "gcp ",
+        "AIza",
+        "AbCdEf1234567890aBcDeF1234567890aBc",
+        "",
+        "gcp [redacted]",
+    ),
+    (
+        "sg ",
+        "SG.",
+        "AbCdEf1234567890aBcDeF",
+        ".AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890a",
+        "sg [redacted]",
+    ),
+    (
+        "goog ",
+        "ya29.",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF1234",
+        "",
+        "goog [redacted]",
+    ),
+    (
+        "pkg ",
+        "pypi-",
+        "AgEIcHlwaS5vcmc-AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890aBcDeF12",
+        "",
+        "pkg [redacted]",
+    ),
+    (
+        "sq ",
+        "sq0atp-",
+        "AbCdEf1234567890aBcDeF12",
+        "",
+        "sq [redacted]",
+    ),
+    (
+        "sq ",
+        "sq0csp-",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF1234567890",
+        "",
+        "sq [redacted]",
+    ),
+    (
+        "shop ",
+        "shpat_",
+        "0123456789abcdef0123456789abcdef01",
+        "",
+        "shop [redacted]",
+    ),
+    (
+        "shop ",
+        "shppa_",
+        "0123456789abcdef0123456789abcdef01",
+        "",
+        "shop [redacted]",
+    ),
+    (
+        "shop ",
+        "shpca_",
+        "0123456789abcdef0123456789abcdef01",
+        "",
+        "shop [redacted]",
+    ),
+    (
+        "dop ",
+        "dp.pt.",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "dop [redacted]",
+    ),
+    (
+        "dop ",
+        "dp.st.",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "dop [redacted]",
+    ),
+    (
+        "dop ",
+        "dp.ct.",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "dop [redacted]",
+    ),
+    (
+        "dop ",
+        "dp.audit.",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "dop [redacted]",
+    ),
+    (
+        "dop ",
+        "dp.scim.",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "dop [redacted]",
+    ),
+    (
+        "notion ",
+        "ntn_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "notion [redacted]",
+    ),
+    (
+        "figma ",
+        "figd_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "figma [redacted]",
+    ),
+    (
+        "ing ",
+        "aiops_ik_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "ing [redacted]",
+    ),
+    (
+        "tok ",
+        "aiops_tk_",
+        "AbCdEf1234567890aBcDeF1234567890aBcDeF12345678",
+        "",
+        "tok [redacted]",
+    ),
 ];
 
 /// Readable operational text — the false-positive budget is zero for these;
@@ -230,6 +611,11 @@ const MUST_KEEP: &[&str] = &[
     "https://hooks.example.[redacted]",
     "run dr-article-worker --job=req-7",
     "the model answered in 240 ms",
+    // Hyphenated path segments are names only when EVERY `-`/`_`-piece is
+    // (R1): these model/run identifiers must survive the tightened rule.
+    "mistralai/Mistral-7B-Instruct-v0",
+    "run RunId42-Error retried",
+    "log collector-2026-11-20 rotated",
 ];
 
 /// sha256 digests are content identifiers, not credentials (NF3): both the
@@ -284,12 +670,59 @@ fn token_fixtures_match_their_shapes() {
     // The whole SECRET_PREFIXES list is covered — a prefix added to policy
     // without a corpus row fails here.
     const NEED: &[&str] = &[
-        "aiops_ik_", "aiops_tk_", "sk-", "sk_live_", "sk_test_", "rk_live_", "ghp_", "gho_",
-        "ghu_", "ghs_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "xoxa-", "xoxs-", "AKIA",
-        "ASIA", "hf_", "whsec_", "AIza", "SG.", "ya29.", "dop_v1_", "npm_", "pypi-", "sq0atp-",
-        "sq0csp-", "shpat_", "shppa_", "shpca_", "shpss_", "GOCSPX-", "ghr_", "PMAK-", "sbp_",
-        "glsa-", "gldt-", "glrt-", "nfp_", "lin_api_", "atlasv1.", "amzn.mws.", "dapi", "xapp-",
-        "xoxe-", "dp.pt.", "dp.st.", "dp.ct.", "dp.audit.", "dp.scim.", "ntn_", "figd_",
+        "aiops_ik_",
+        "aiops_tk_",
+        "sk-",
+        "sk_live_",
+        "sk_test_",
+        "rk_live_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxs-",
+        "AKIA",
+        "ASIA",
+        "hf_",
+        "whsec_",
+        "AIza",
+        "SG.",
+        "ya29.",
+        "dop_v1_",
+        "npm_",
+        "pypi-",
+        "sq0atp-",
+        "sq0csp-",
+        "shpat_",
+        "shppa_",
+        "shpca_",
+        "shpss_",
+        "GOCSPX-",
+        "ghr_",
+        "PMAK-",
+        "sbp_",
+        "glsa-",
+        "gldt-",
+        "glrt-",
+        "nfp_",
+        "lin_api_",
+        "atlasv1.",
+        "amzn.mws.",
+        "dapi",
+        "xapp-",
+        "xoxe-",
+        "dp.pt.",
+        "dp.st.",
+        "dp.ct.",
+        "dp.audit.",
+        "dp.scim.",
+        "ntn_",
+        "figd_",
     ];
     let have: Vec<&str> = TOKEN_FIXTURES.iter().map(|f| f.1).collect();
     for prefix in NEED {
@@ -301,6 +734,25 @@ fn token_fixtures_match_their_shapes() {
 fn must_keep_is_verbatim() {
     for input in MUST_KEEP {
         assert_eq!(redact(input), None, "MUST_KEEP: {input}");
+    }
+}
+
+/// `looks_like_secret` names the fields an emitter should never send: a
+/// key:value pair is not an identifier, and a bare long hex run is a
+/// credential shape (review N3 residual). Model ids and service names are
+/// not credentials.
+#[test]
+fn identifier_fields() {
+    for input in ["password:x", "auth:Basic dXNlcjpwYXNz"] {
+        assert!(looks_like_secret(input), "secret: {input}");
+    }
+    for input in [
+        "mistralai/Mistral-7B-Instruct-v0.3",
+        "auth:login",
+        "run-2026-11-20",
+        "collector-01",
+    ] {
+        assert!(!looks_like_secret(input), "keep: {input}");
     }
 }
 
