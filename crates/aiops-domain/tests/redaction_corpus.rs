@@ -795,6 +795,68 @@ fn must_keep_is_verbatim() {
     }
 }
 
+/// REDACTION-POLICY: every wire field has a declared role — the gate a
+/// new field must pass before it can store or show anything. A name
+/// dropped from `FIELD_ROLES` fails here even though `only()` would
+/// still refuse it at runtime; a row naming a field that does not exist
+/// is a stale row.
+#[test]
+fn field_roles_cover_every_wire_field() {
+    use aiops_domain::policy::{FIELD_ROLES, FieldRole};
+    use aiops_domain::validate::OPTIONAL_WIRE_FIELDS;
+
+    for field in OPTIONAL_WIRE_FIELDS {
+        assert!(
+            FIELD_ROLES.iter().any(|(name, _)| name == field),
+            "{field} has no field role — an unclassified field must not store"
+        );
+    }
+    // Required, container, source and subfield names a role may point at —
+    // the rest of the "live field" set beyond OPTIONAL_WIRE_FIELDS.
+    const LIVE: &[&str] = &[
+        "event_id",
+        "operation_id",
+        "seq",
+        "op_seq",
+        "event_type",
+        "event_time",
+        "attributes",
+        "truncated",
+        "source.instance_id",
+        "source.service",
+        "source.sdk",
+        "cost_estimate.basis",
+        "cost_estimate.currency",
+        "cost_estimate.micros",
+        "usage",
+    ];
+    for (name, _) in FIELD_ROLES {
+        assert!(
+            OPTIONAL_WIRE_FIELDS.contains(name) || LIVE.contains(name),
+            "role {name} names no live field — a stale row"
+        );
+    }
+    // The two heuristic roles stay exactly where the policy promises:
+    // `error_message` is the only free text, `attributes` the only keyed
+    // container — everything else is a closed rule.
+    assert_eq!(
+        FIELD_ROLES
+            .iter()
+            .filter(|(_, r)| *r == FieldRole::FreeText)
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>(),
+        ["error_message"]
+    );
+    assert_eq!(
+        FIELD_ROLES
+            .iter()
+            .filter(|(_, r)| *r == FieldRole::KeyedValue)
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>(),
+        ["attributes"]
+    );
+}
+
 /// `looks_like_secret` names the fields an emitter should never send: a
 /// key:value pair is not an identifier, and a bare long hex run is a
 /// credential shape (review N3 residual). Model ids and service names are

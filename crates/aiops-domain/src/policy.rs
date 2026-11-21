@@ -60,6 +60,77 @@ pub fn is_default_attribute(key: &str) -> bool {
     DEFAULT_ALLOWED_ATTRIBUTES.contains(&key)
 }
 
+/// The treatment a field's text gets (`docs/REDACTION-POLICY.md`): the
+/// role is a closed rule decided by the schema position, never by the
+/// value's shape — the heuristics survive only on `FreeText`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldRole {
+    /// Parsed to a closed format; the text never stores raw.
+    Id,
+    /// Parsed against a closed vocabulary.
+    Enum,
+    /// Numeric/bool — type-checked, never text.
+    Scalar,
+    /// RFC 3339 into `Timestamp`.
+    Time,
+    /// `opt_ident`'s closed refuse rules; stored verbatim otherwise —
+    /// identifiers are never rewritten (`[redacted]` would corrupt what
+    /// the caller reads back).
+    Identifier,
+    /// An attribute map: keys classified by `Policy::treat` (a
+    /// credential-named key is always `Withheld`); stored string values
+    /// then get the free-text backstop as defense in depth.
+    KeyedValue,
+    /// `redact()` — the heuristic backstop, the only heuristic role.
+    FreeText,
+}
+
+/// Every logged or shown field → its role. Coverage is test-enforced:
+/// a wire field with no row here is `field_not_allowed` at runtime AND
+/// a red corpus test — a role is not optional paperwork
+/// (`docs/REDACTION-POLICY.md`).
+pub const FIELD_ROLES: &[(&str, FieldRole)] = &[
+    ("event_id", FieldRole::Id),
+    ("operation_id", FieldRole::Id),
+    ("trace_id", FieldRole::Id),
+    ("step_id", FieldRole::Id),
+    ("parent_step_id", FieldRole::Id),
+    ("source.instance_id", FieldRole::Id),
+    ("seq", FieldRole::Scalar),
+    ("op_seq", FieldRole::Scalar),
+    ("attempt", FieldRole::Scalar),
+    ("external_effect", FieldRole::Scalar),
+    ("events_emitted", FieldRole::Scalar),
+    ("dropped", FieldRole::Scalar),
+    ("truncated", FieldRole::Scalar),
+    ("usage", FieldRole::Scalar),
+    ("cost_estimate", FieldRole::Scalar),
+    ("cost_estimate.micros", FieldRole::Scalar),
+    ("event_time", FieldRole::Time),
+    ("first_dropped_at", FieldRole::Time),
+    ("last_dropped_at", FieldRole::Time),
+    ("event_type", FieldRole::Enum),
+    ("kind", FieldRole::Enum),
+    ("outcome", FieldRole::Enum),
+    ("failure_class", FieldRole::Enum),
+    ("uncertain_reason", FieldRole::Enum),
+    ("reason", FieldRole::Enum),
+    ("cost_estimate.currency", FieldRole::Enum),
+    ("name", FieldRole::Identifier),
+    ("release", FieldRole::Identifier),
+    ("deployment", FieldRole::Identifier),
+    ("request_id", FieldRole::Identifier),
+    ("error_code", FieldRole::Identifier),
+    ("model", FieldRole::Identifier),
+    ("prompt_version", FieldRole::Identifier),
+    ("config_version", FieldRole::Identifier),
+    ("source.service", FieldRole::Identifier),
+    ("source.sdk", FieldRole::Identifier),
+    ("cost_estimate.basis", FieldRole::Identifier),
+    ("attributes", FieldRole::KeyedValue),
+    ("error_message", FieldRole::FreeText),
+];
+
 /// Prefixes of well-known credential formats; a token run after one is redacted.
 const SECRET_PREFIXES: &[&str] = &[
     "aiops_ik_",

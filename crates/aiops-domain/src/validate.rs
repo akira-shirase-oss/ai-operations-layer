@@ -551,37 +551,75 @@ fn outcome(w: &WireEvent) -> Result<Outcome, Refusal> {
     }
 }
 
+/// Every optional wire field `only()` can refuse — the coverage surface
+/// `FIELD_ROLES` is enumerated against (REDACTION-POLICY: a field with no
+/// declared role is `field_not_allowed` here and a red coverage test).
+pub const OPTIONAL_WIRE_FIELDS: &[&str] = &[
+    "name",
+    "trace_id",
+    "request_id",
+    "release",
+    "deployment",
+    "step_id",
+    "parent_step_id",
+    "kind",
+    "attempt",
+    "model",
+    "prompt_version",
+    "config_version",
+    "external_effect",
+    "outcome",
+    "failure_class",
+    "uncertain_reason",
+    "error_code",
+    "error_message",
+    "usage",
+    "cost_estimate",
+    "events_emitted",
+    "dropped",
+    "reason",
+    "first_dropped_at",
+    "last_dropped_at",
+];
+
+fn field_present(w: &WireEvent, name: &str) -> bool {
+    match name {
+        "name" => w.name.is_some(),
+        "trace_id" => w.trace_id.is_some(),
+        "request_id" => w.request_id.is_some(),
+        "release" => w.release.is_some(),
+        "deployment" => w.deployment.is_some(),
+        "step_id" => w.step_id.is_some(),
+        "parent_step_id" => w.parent_step_id.is_some(),
+        "kind" => w.kind.is_some(),
+        "attempt" => w.attempt.is_some(),
+        "model" => w.model.is_some(),
+        "prompt_version" => w.prompt_version.is_some(),
+        "config_version" => w.config_version.is_some(),
+        "external_effect" => w.external_effect.is_some(),
+        "outcome" => w.outcome.is_some(),
+        "failure_class" => w.failure_class.is_some(),
+        "uncertain_reason" => w.uncertain_reason.is_some(),
+        "error_code" => w.error_code.is_some(),
+        "error_message" => w.error_message.is_some(),
+        "usage" => w.usage.is_some(),
+        "cost_estimate" => w.cost_estimate.is_some(),
+        "events_emitted" => w.events_emitted.is_some(),
+        "dropped" => w.dropped.is_some(),
+        "reason" => w.reason.is_some(),
+        "first_dropped_at" => w.first_dropped_at.is_some(),
+        "last_dropped_at" => w.last_dropped_at.is_some(),
+        _ => false,
+    }
+}
+
 /// Refuses any optional field the event type does not carry.
 fn only(w: &WireEvent, allowed: &[&str]) -> Result<(), Refusal> {
-    let present: [(&'static str, bool); 25] = [
-        ("name", w.name.is_some()),
-        ("trace_id", w.trace_id.is_some()),
-        ("request_id", w.request_id.is_some()),
-        ("release", w.release.is_some()),
-        ("deployment", w.deployment.is_some()),
-        ("step_id", w.step_id.is_some()),
-        ("parent_step_id", w.parent_step_id.is_some()),
-        ("kind", w.kind.is_some()),
-        ("attempt", w.attempt.is_some()),
-        ("model", w.model.is_some()),
-        ("prompt_version", w.prompt_version.is_some()),
-        ("config_version", w.config_version.is_some()),
-        ("external_effect", w.external_effect.is_some()),
-        ("outcome", w.outcome.is_some()),
-        ("failure_class", w.failure_class.is_some()),
-        ("uncertain_reason", w.uncertain_reason.is_some()),
-        ("error_code", w.error_code.is_some()),
-        ("error_message", w.error_message.is_some()),
-        ("usage", w.usage.is_some()),
-        ("cost_estimate", w.cost_estimate.is_some()),
-        ("events_emitted", w.events_emitted.is_some()),
-        ("dropped", w.dropped.is_some()),
-        ("reason", w.reason.is_some()),
-        ("first_dropped_at", w.first_dropped_at.is_some()),
-        ("last_dropped_at", w.last_dropped_at.is_some()),
-    ];
-    match present.iter().find(|(f, set)| *set && !allowed.contains(f)) {
-        Some((field, _)) => Err(Refusal::on(RefusalCode::FieldNotAllowed, field)),
+    match OPTIONAL_WIRE_FIELDS
+        .iter()
+        .find(|f| field_present(w, f) && !allowed.contains(f))
+    {
+        Some(field) => Err(Refusal::on(RefusalCode::FieldNotAllowed, field)),
         None => Ok(()),
     }
 }
