@@ -45,6 +45,12 @@ pub struct Policy {
 
 impl Policy {
     pub fn treat(&self, key: &str) -> KeyTreatment {
+        // A credential-named key is withheld whatever its value's shape and
+        // whatever the caller opted in — opt-in can never whitelist a
+        // credential (REDACTION-POLICY: the closed rule beats both lists).
+        if credential_key(key.as_bytes()) {
+            return KeyTreatment::Withheld;
+        }
         if DEFAULT_ALLOWED_ATTRIBUTES.contains(&key) {
             KeyTreatment::Default
         } else if self.opt_in_keys.iter().any(|k| k == key) {
@@ -259,8 +265,11 @@ const SECRET_SUFFIXES: &[&[u8]] = &[
     b"token",
 ];
 
-/// Whether a key name (as written in text) names a secret.
-fn is_secret_key(key: &[u8]) -> bool {
+/// The `CREDENTIAL_KEYS` namespace (`docs/REDACTION-POLICY.md`): whether a key
+/// name — in a wire attribute map, an identifier's `name:value`, or keyed text
+/// inside free text — names a credential. A credential-named key's value dies
+/// whatever its shape; the name alone decides.
+pub fn credential_key(key: &[u8]) -> bool {
     let mut prev: Vec<u8> = Vec::new();
     for part in key_parts(key) {
         let part = part.as_slice();
@@ -718,7 +727,7 @@ pub fn looks_like_secret(text: &str) -> bool {
             return false;
         }
         let key = &rest[..key_len];
-        if !is_secret_key(key)
+        if !credential_key(key)
             || key.eq_ignore_ascii_case(b"auth")
             || key.eq_ignore_ascii_case(b"authorization")
         {
@@ -770,7 +779,7 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             .take_while(|b| is_key_byte(**b))
             .count();
         if key_len > 0
-            && is_secret_key(&rest[..key_len])
+            && credential_key(&rest[..key_len])
             && let Some((keep, len)) = secret_value(&rest[..key_len], &rest[key_len..])
         {
             return Some((key_len + keep, i + key_len + len));

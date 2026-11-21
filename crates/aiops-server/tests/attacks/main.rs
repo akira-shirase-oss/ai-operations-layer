@@ -42,5 +42,6 @@ mod cross_tenant;
 mod headers_spoof;
 mod inject;
 mod rate_limit;
+mod redaction;
 mod replay;
 mod ssrf_keys;
