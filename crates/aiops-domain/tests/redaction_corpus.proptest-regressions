@@ -7,3 +7,7 @@
 cc 8ecb5109667094fe185ce76cdea2984c4fbe6c3c6a1ae92deea4886aecd87658 # shrinks to token = "aA/00Aa/aA+aA+AA+A+aAaa0aAaaAa0aAA+A0a=="
 cc 8789411b3dd5994e187df5cb1ad88fe40dfdfddfb5b650056b067ddccbbf80aa # shrinks to token = "/a0aaaA/A00AA00aa0+a+0a00aa00+AAA"
 cc c9592659e26058dda8a8f1400ce7473af9fa8884d2e77ff239b6385a94926c0f # shrinks to token = "//Aa/+a/Aa+A0aaAAa00AaA0AAaA++a+/="
+cc 4ea95f64914a44e23fbcef05a8dfd074e08c8e85a24e95c1794acef4e96b9d0e # shrinks to token = "____Aaa-0A--0aAA_AAAA0AA-a0_Aa-00-a0aAa0"
+cc e25a12340ad1cd2f06f11e7bfd7ca4d2a5da00902b0c15932f9f679913302cca # shrinks to token = "aA/0AA0/a000Aaa0AaaaaAAAaa/aA0aa"
+cc a2b9296d1e28291e00210991c3453ff671095d5e477a7497005f84c79ff40461 # shrinks to token = "aa0a0a0/A0AAaa+a0++A0AaAA+aaA00A"
+cc d0c24cfb05747498930153c87bc5b10bf170f2d1856622759d4eb27b73bf5546 # shrinks to token = "/aa00a0a/A0A0+Aaa0a00++aa/a0A0a00"

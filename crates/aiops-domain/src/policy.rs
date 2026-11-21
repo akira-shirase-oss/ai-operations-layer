@@ -556,9 +556,14 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     if let Some(found) = url_password(bytes, i) {
         return Some(found);
     }
-    // Every other shape starts a word.
+    // Every other shape starts a word — except after a leading `_`: a
+    // base64url token may open with one (`_AaA…`), and `_` joining two
+    // words is still no boundary (`api_key`).
     if i > 0 && is_word(bytes[i - 1]) {
-        return None;
+        let leading_underscore = bytes[i - 1] == b'_' && (i < 2 || !is_word(bytes[i - 2]));
+        if !leading_underscore {
+            return None;
+        }
     }
     if let Some(found) = high_confidence(bytes, i) {
         return Some(found);
@@ -582,7 +587,13 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     // keys; one digit suffices — a JWT piece may carry few, review N7); UUIDs are
     // not. Base64's `/ + =` join the run — otherwise they split it into pieces
     // under the limit (review S1-2) — which is also how a webhook path stays one.
-    if rest.first().is_some_and(u8::is_ascii_alphanumeric) {
+    // A run may open on `_` or `-` too: `_` is a word byte, so a base64url token
+    // that leads with underscores (`____Aaa-…`) is invisible to any interior
+    // scan position unless the run itself starts there (corpus property).
+    if rest
+        .first()
+        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-'))
+    {
         let run = token_run(rest, b"+/=_-");
         let token = &rest[..run];
         if run >= 32
@@ -594,66 +605,121 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
             if !token.contains(&b'/') {
                 return Some((0, i + run));
             }
-            // A `/`-joined run stays readable only with path evidence —
-            // a name-byte segment (`-`/`_`/`.`), or the run sitting inside
-            // host or path text: behind a supported `/` (`h.io/…`, one with
-            // bytes before it) or a `.` (`example.com/…`). A bare `/` after
-            // whitespace is the credential's own leading slash, not a path
-            // (review NF1). Never by counting key-like segments: random
-            // base64 splits on `/` into segments that qualify by accident.
-            // With evidence, the name-shaped prefix keeps and the tail —
-            // the first segment onward that no human would name a path
-            // part — dies. Without it the whole run dies: a credential in
-            // a URL path does not keep its first chunk.
-            let segments: Vec<&[u8]> = token.split(|b| *b == b'/').collect();
-            let name_byte = |b: &u8| matches!(b, b'-' | b'_' | b'.');
-            let supported_slash = i >= 2
-                && bytes[i - 1] == b'/'
-                && (is_word(bytes[i - 2]) || matches!(bytes[i - 2], b'.' | b':' | b'/'));
-            let evidence = segments.iter().any(|s| s.iter().any(name_byte))
-                || supported_slash
-                || (i > 0 && bytes[i - 1] == b'.');
-            if !evidence {
-                return Some((0, i + run));
-            }
-            // Named like a path part: short, punctuated, lowercase+digits,
-            // or a word (a leading capital is fine; interleaved caps and
-            // digit runs are how a generated token spells, not a person).
-            let pathy = |s: &[u8]| {
-                s.len() < 6
-                    || s.iter().any(name_byte)
-                    || s.iter()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-                    || (s.len() <= 16
-                        && s.iter().filter(|b| b.is_ascii_uppercase()).count() <= 2
-                        && s.iter().filter(|b| b.is_ascii_digit()).count() <= 2)
-            };
-            let mut off = 0;
-            for seg in &segments {
-                if !pathy(seg) {
-                    return Some((off, i + run));
-                }
-                off += seg.len() + 1;
+            if let Some(dead) = slash_run_dead_offset(bytes, i, token) {
+                return Some((dead, i + run));
             }
             // Every segment is name-shaped: a path, a model id, a route —
             // not a credential.
         }
-        // A bare lowercase-hex run is a hash or a hex credential — at
-        // commit length and beyond the review calls the miss a leak (N7).
-        // A run that continues as a word is a longer identifier, not a hex
-        // string; a commit SHA is the accepted cost of the coverage. A
-        // digest that SAYS it is one — `sha256:<64hex>` — is a content
-        // identifier, not a credential (NF3).
+        // A bare lowercase-hex run is a hash or a hex credential — at 32
+        // (md5 length) and beyond the review calls the miss a leak (N7,
+        // corpus rebalance). A run that continues as a word is a longer
+        // identifier, not a hex string; a commit SHA is the accepted cost
+        // of the coverage. A digest that SAYS it is one — `sha256:<64hex>`
+        // — is a content identifier, not a credential (NF3).
         let hex_run = rest
             .iter()
             .take_while(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(*b))
             .count();
         let said_sha256 = i >= 7 && bytes[i - 7..i].eq_ignore_ascii_case(b"sha256:");
-        if hex_run >= 40 && !said_sha256 && !rest.get(hex_run).is_some_and(|b| is_word(*b)) {
+        if hex_run >= 32 && !said_sha256 && !rest.get(hex_run).is_some_and(|b| is_word(*b)) {
             return Some((0, i + hex_run));
         }
     }
     None
+}
+
+/// A `/`-joined credential run at `i` with token text `token`: `Some(off)`
+/// when the run dies — `off` bytes of it may keep — `None` when the run is
+/// name-shaped end to end (a path, a model id, a route). A run stays
+/// readable only with path evidence — a name-byte segment (`-`/`_`/`.`), or
+/// the run sitting inside host or path text: behind a supported `/`
+/// (`h.io/…`, one with bytes before it) or a `.` (`example.com/…`). A bare
+/// `/` after whitespace is the credential's own leading slash, not a path
+/// (review NF1).
+fn slash_run_dead_offset(bytes: &[u8], i: usize, token: &[u8]) -> Option<usize> {
+    let segments: Vec<&[u8]> = token.split(|b| *b == b'/').collect();
+    let name_byte = |b: &u8| matches!(b, b'-' | b'_' | b'.');
+    let supported_slash = i >= 2
+        && bytes[i - 1] == b'/'
+        && (is_word(bytes[i - 2]) || matches!(bytes[i - 2], b'.' | b':' | b'/'));
+    let evidence = segments.iter().any(|s| s.iter().any(name_byte))
+        || supported_slash
+        || (i > 0 && bytes[i - 1] == b'.');
+    if !evidence {
+        return Some(0);
+    }
+    // Named like a path part: every `-`/`_`-split piece is name text —
+    // alnum/dot bytes only (`+a` and `=x` are credential soup, never a
+    // name), and then short, a word, a date/id, or a dotted version (a
+    // leading capital is fine; interleaved caps and digit runs are how a
+    // generated token spells, not a person). `-`/`_` are run members,
+    // never name-proof — `Mistral-7B-Instruct-v0` and
+    // `collector-2026-11-20` pass; `T0AB_CDEF12` and `B0CD-EF1234` do not
+    // (review R1).
+    if segments.iter().all(|s| name_segment(s)) {
+        return None;
+    }
+    // The run dies: at most the FIRST segment may keep — and only when it
+    // is itself a strict name, and only its own bytes: the `/` after it is
+    // a content byte, so `aa0a0a0/` kept whole is already an 8-byte window
+    // (the corpus property caught it). Two adjacent keeps would compose a
+    // window across the `/` the same way (`aA/0AA0/`), and a mixed-case
+    // keep beside a credential is never a name (review R2's measured
+    // residual). The byte before the run matters the same way: a run byte
+    // there is the token's own text, and `/aa00a0a` read whole is 8
+    // bytes — so a keep is only readable behind a non-run boundary
+    // (`h.io`'s `.`), never behind `/`, `+`, `=`, `_` or `-`.
+    if segments.len() > 1
+        && strict_name(segments[0])
+        && (i == 0 || !matches!(bytes[i - 1], b'+' | b'/' | b'=' | b'_' | b'-'))
+    {
+        return Some(segments[0].len());
+    }
+    Some(0)
+}
+
+/// One `-`/`_`-split piece of a name-shaped segment: alnum/dot text that
+/// is short, a word, a date/id, or a dotted version.
+fn name_piece(p: &[u8]) -> bool {
+    if !p.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'.') {
+        return false;
+    }
+    if p.len() < 6 || p.iter().all(u8::is_ascii_lowercase) {
+        return true;
+    }
+    if p.iter().all(u8::is_ascii_digit) {
+        return p.len() <= 13;
+    }
+    (p.iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && p.len() <= 13)
+        || (p.contains(&b'.') && p.iter().filter(|b| b.is_ascii_uppercase()).count() <= 2)
+        || (p.len() <= 16
+            && p.iter().filter(|b| b.is_ascii_uppercase()).count() <= 2
+            && p.iter().filter(|b| b.is_ascii_digit()).count() <= 2)
+}
+
+/// A `/`-segment is name-shaped when every `-`/`_`-split piece is a
+/// [`name_piece`].
+fn name_segment(s: &[u8]) -> bool {
+    s.len() < 6 && s.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'.')
+        || s.split(|b| matches!(b, b'-' | b'_'))
+            .all(|p| !p.is_empty() && name_piece(p))
+}
+
+/// The keep beside a dying run: no uppercase, every `-`/`_` piece under 6
+/// chars, or a dotted version.
+fn strict_name(s: &[u8]) -> bool {
+    !s.is_empty()
+        && s.iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && (!s.iter().any(u8::is_ascii_uppercase)
+            || s.split(|b| matches!(b, b'-' | b'_'))
+                .all(|p| !p.is_empty() && p.len() < 6)
+            || (s.contains(&b'.')
+                && s.split(|b| *b == b'.')
+                    .all(|p| !p.is_empty() && p.len() <= 6)))
 }
 
 /// `8-4-4-4-12` hex with dashes is a UUID — an identifier, never a credential —

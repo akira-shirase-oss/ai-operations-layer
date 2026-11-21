@@ -114,7 +114,7 @@ const MUST_REDACT: &[(&str, &str)] = &[
             "/bPxRfiCYEXAMPLEKE",
             "9"
         ),
-        "https://h.io/[redacted]",
+        "https://h.io[redacted]",
     ),
     // Encoded input only ADDS redaction: %0C may not split a userinfo shape.
     (
@@ -132,7 +132,7 @@ const MUST_REDACT: &[(&str, &str)] = &[
     // name-shaped prefix (`com`) and kills the segments no human would name.
     (
         "https://hooks.example.com/AbCdEf1234567890XYZabcd/x9yzz",
-        "https://hooks.example.com/[redacted]",
+        "https://hooks.example.com[redacted]",
     ),
     // A double-encoded separator hides the `=` from the first decoded view —
     // a second pass still finds the keyed value (review %253A).
@@ -160,7 +160,7 @@ const MUST_REDACT: &[(&str, &str)] = &[
             "SeofSAs0K5PALDsaw",
             "/sendMessage 429"
         ),
-        "POST https://api.telegram.org/[redacted]/sendMessage 429",
+        "POST https://api.telegram.org/bot110201543:[redacted] 429",
     ),
     (
         concat!(
@@ -168,7 +168,7 @@ const MUST_REDACT: &[(&str, &str)] = &[
             "AbCdEf1234567890aBcDeF1234567890aBcDeF123",
             "/status 200"
         ),
-        "x https://h.io/v1/[redacted]/status 200",
+        "x https://h.io[redacted] 200",
     ),
     (
         concat!(
@@ -177,7 +177,7 @@ const MUST_REDACT: &[(&str, &str)] = &[
             "567890aBcDeF1234567890aBcD",
             "/github"
         ),
-        "GET https://d.co/api/webhooks/[redacted]/[redacted]/github",
+        "GET https://d.co[redacted]",
     ),
     (
         concat!(
@@ -187,7 +187,7 @@ const MUST_REDACT: &[(&str, &str)] = &[
             "EF1234",
             "/xyZab"
         ),
-        "GET https://hooks.example.com/services/[redacted]/[redacted]/xyZab",
+        "GET https://hooks.example.com[redacted]",
     ),
     // Cookies are keyed secret text like any other (review corpus class).
     (
@@ -656,17 +656,6 @@ fn must_redact_is_100_percent() {
 /// scanner could ever see a whole token in the tree.
 #[test]
 fn token_fixtures_match_their_shapes() {
-    for (lead, prefix, body, _, _) in TOKEN_FIXTURES {
-        let built = format!("{lead}{prefix}{body}");
-        assert!(
-            built[lead.len()..].starts_with(prefix),
-            "{prefix}: parts out of order"
-        );
-        assert!(
-            body.len() >= 8,
-            "{prefix}: body too short to exercise the run rule"
-        );
-    }
     // The whole SECRET_PREFIXES list is covered — a prefix added to policy
     // without a corpus row fails here.
     const NEED: &[&str] = &[
@@ -724,6 +713,17 @@ fn token_fixtures_match_their_shapes() {
         "ntn_",
         "figd_",
     ];
+    for (lead, prefix, body, _, _) in TOKEN_FIXTURES {
+        let built = format!("{lead}{prefix}{body}");
+        assert!(
+            built[lead.len()..].starts_with(prefix),
+            "{prefix}: parts out of order"
+        );
+        assert!(
+            body.len() >= 8,
+            "{prefix}: body too short to exercise the run rule"
+        );
+    }
     let have: Vec<&str> = TOKEN_FIXTURES.iter().map(|f| f.1).collect();
     for prefix in NEED {
         assert!(have.contains(prefix), "no fixture for prefix {prefix}");
