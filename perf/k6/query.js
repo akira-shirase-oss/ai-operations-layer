@@ -2,6 +2,9 @@
 // list pages, over whatever the database holds (≥ 1,000,000 events for a full run).
 //
 //   k6 run -e BASE_URL=… -e TOKEN=… -e RUN_ID=<same as ingest> -e OPERATIONS=<ingested> perf/k6/query.js
+//
+// STRICT=1 (the dedicated query-latency job, claim: p50/p95/p99 per shape over
+// ≥1,000,000 stored events) adds p50 and p99 gates to every shape.
 import http from 'k6/http';
 import { check } from 'k6';
 
@@ -10,6 +13,24 @@ const TOKEN = __ENV.TOKEN;
 const PROJECT = __ENV.PROJECT || 'perf';
 const RUN_ID = (__ENV.RUN_ID || '0000beef').padStart(8, '0').slice(0, 8);
 const OPERATIONS = Number(__ENV.OPERATIONS || 1);
+const STRICT = __ENV.STRICT === '1';
+
+const thresholds = {
+	'http_req_duration{name:timeline}': ['p(95)<150'],
+	'http_req_duration{name:list}': ['p(95)<150'],
+	// A2: the list filtered by status and release, and the release comparison (an aggregate
+	// over the last 24 h of summaries, so a tenth of iterations ask for it).
+	'http_req_duration{name:list_filtered}': ['p(95)<150'],
+	'http_req_duration{name:compare}': ['p(95)<500'],
+	http_req_failed: ['rate==0'],
+	checks: ['rate==1'],
+};
+if (STRICT) {
+	thresholds['http_req_duration{name:timeline}'].push('p(50)<60', 'p(99)<400');
+	thresholds['http_req_duration{name:list}'].push('p(50)<60', 'p(99)<400');
+	thresholds['http_req_duration{name:list_filtered}'].push('p(50)<60', 'p(99)<400');
+	thresholds['http_req_duration{name:compare}'].push('p(50)<200', 'p(99)<1500');
+}
 
 export const options = {
 	// A VU's connection must not idle past the collector's 10 s header
@@ -26,16 +47,7 @@ export const options = {
 			maxVUs: 100,
 		},
 	},
-	thresholds: {
-		'http_req_duration{name:timeline}': ['p(95)<150'],
-		'http_req_duration{name:list}': ['p(95)<150'],
-		// A2: the list filtered by status and release, and the release comparison (an aggregate
-		// over the last 24 h of summaries, so a tenth of iterations ask for it).
-		'http_req_duration{name:list_filtered}': ['p(95)<150'],
-		'http_req_duration{name:compare}': ['p(95)<500'],
-		http_req_failed: ['rate==0'],
-		checks: ['rate==1'],
-	},
+	thresholds,
 	summaryTrendStats: ['min', 'med', 'avg', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 

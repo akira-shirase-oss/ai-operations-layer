@@ -10,7 +10,7 @@ on:
       scenario:
         description: "Which million-scale job(s) to run"
         type: choice
-        options: [all, ingest, control, adapter]
+        options: [all, ingest, control, adapter, overhead, query, storage, burst, cardinality, loss]
         required: true
         default: "all"
       name:
@@ -200,5 +200,299 @@ jobs:
         with:
           name: perf-adapter-${{ inputs.name }}-${{ github.run_id }}
           path: perf/results/*adapter-${{ inputs.name }}.*
+          retention-days: 30
+          if-no-files-found: error
+
+  # The five measurement jobs below answer END_GOAL claims 2, 4, 5, 6 and 7
+  # (PLAN-next's unproven list): instrumentation overhead, query latency over
+  # ≥1M events, storage per day, burst + high-cardinality, collector loss.
+  # Each writes perf/results/<run id>/ — result.md, the k6 summary JSON and the
+  # logs — and gates on the thresholds stated in its scenario.
+
+  overhead:
+    if: inputs.scenario == 'all' || inputs.scenario == 'overhead'
+    name: "overhead run: ${{ inputs.name }} (instrumented vs disabled host, same workload)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install psql and k6 (version- and sha256-pinned)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          curl -fsSLo /tmp/k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo '39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1  /tmp/k6.tgz' | sha256sum -c -
+          sudo tar -xzf /tmp/k6.tgz -C /usr/local/bin --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          k6 version
+      - name: "perf/run-overhead.sh ${{ inputs.name }} 20 300s"
+        env:
+          AIOPS_PG_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+          AIOPS_RUN_NAME: ci-${{ github.run_id }}-overhead-${{ inputs.name }}
+        run: perf/run-overhead.sh "${{ inputs.name }}" 20 300s
+      - name: Upload the result files (a reviewer commits them under perf/results/)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-overhead-${{ inputs.name }}-${{ github.run_id }}
+          path: perf/results/ci-${{ github.run_id }}-overhead-${{ inputs.name }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  query:
+    if: inputs.scenario == 'all' || inputs.scenario == 'query'
+    name: "query run: ${{ inputs.name }} (p50/p95/p99 per shape over ≥1M stored events)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install psql and k6 (version- and sha256-pinned)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          curl -fsSLo /tmp/k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo '39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1  /tmp/k6.tgz' | sha256sum -c -
+          sudo tar -xzf /tmp/k6.tgz -C /usr/local/bin --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          k6 version
+      - name: "perf/run-query.sh ${{ inputs.name }} 500 200s 50 300s"
+        env:
+          AIOPS_PG_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+          AIOPS_RUN_NAME: ci-${{ github.run_id }}-query-${{ inputs.name }}
+        run: perf/run-query.sh "${{ inputs.name }}" 500 200s 50 300s
+      - name: Upload the result files (a reviewer commits them under perf/results/)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-query-${{ inputs.name }}-${{ github.run_id }}
+          path: perf/results/ci-${{ github.run_id }}-query-${{ inputs.name }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  storage:
+    if: inputs.scenario == 'all' || inputs.scenario == 'storage'
+    name: "storage run: ${{ inputs.name }} (bytes/event, table and index sizes after the run)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install psql and k6 (version- and sha256-pinned)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          curl -fsSLo /tmp/k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo '39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1  /tmp/k6.tgz' | sha256sum -c -
+          sudo tar -xzf /tmp/k6.tgz -C /usr/local/bin --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          k6 version
+      - name: "perf/run-storage.sh ${{ inputs.name }} 500 200s"
+        env:
+          AIOPS_PG_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+          AIOPS_RUN_NAME: ci-${{ github.run_id }}-storage-${{ inputs.name }}
+        run: perf/run-storage.sh "${{ inputs.name }}" 500 200s
+      - name: Upload the result files (a reviewer commits them under perf/results/)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-storage-${{ inputs.name }}-${{ github.run_id }}
+          path: perf/results/ci-${{ github.run_id }}-storage-${{ inputs.name }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  burst:
+    if: inputs.scenario == 'all' || inputs.scenario == 'burst'
+    name: "burst run: ${{ inputs.name }} (10x spike, exact accounting, recovery)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install psql and k6 (version- and sha256-pinned)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          curl -fsSLo /tmp/k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo '39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1  /tmp/k6.tgz' | sha256sum -c -
+          sudo tar -xzf /tmp/k6.tgz -C /usr/local/bin --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          k6 version
+      - name: "perf/run-burst.sh ${{ inputs.name }}"
+        env:
+          AIOPS_PG_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+          AIOPS_RUN_NAME: ci-${{ github.run_id }}-burst-${{ inputs.name }}
+        run: perf/run-burst.sh "${{ inputs.name }}"
+      - name: Upload the result files (a reviewer commits them under perf/results/)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-burst-${{ inputs.name }}-${{ github.run_id }}
+          path: perf/results/ci-${{ github.run_id }}-burst-${{ inputs.name }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  cardinality:
+    if: inputs.scenario == 'all' || inputs.scenario == 'cardinality'
+    name: "cardinality run: ${{ inputs.name }} (unique-name flood, registry bound asserted)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install psql and k6 (version- and sha256-pinned)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          curl -fsSLo /tmp/k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo '39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1  /tmp/k6.tgz' | sha256sum -c -
+          sudo tar -xzf /tmp/k6.tgz -C /usr/local/bin --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          k6 version
+      - name: "perf/run-cardinality.sh ${{ inputs.name }} 100 300s"
+        env:
+          AIOPS_PG_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+          AIOPS_RUN_NAME: ci-${{ github.run_id }}-cardinality-${{ inputs.name }}
+        run: perf/run-cardinality.sh "${{ inputs.name }}" 100 300s
+      - name: Upload the result files (a reviewer commits them under perf/results/)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-cardinality-${{ inputs.name }}-${{ github.run_id }}
+          path: perf/results/ci-${{ github.run_id }}-cardinality-${{ inputs.name }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  loss:
+    if: inputs.scenario == 'all' || inputs.scenario == 'loss'
+    name: "collector-loss run: ${{ inputs.name }} (SIGKILL mid-run, exact accounting)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops-dev
+          POSTGRES_DB: aiops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=aiops --dbname=aiops"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install psql and k6 (version- and sha256-pinned)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          curl -fsSLo /tmp/k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo '39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1  /tmp/k6.tgz' | sha256sum -c -
+          sudo tar -xzf /tmp/k6.tgz -C /usr/local/bin --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          k6 version
+      - name: "perf/run-loss.sh ${{ inputs.name }} 500 200s"
+        env:
+          AIOPS_PG_URL: postgres://aiops:aiops-dev@127.0.0.1:5432/aiops
+          AIOPS_RUN_NAME: ci-${{ github.run_id }}-loss-${{ inputs.name }}
+        run: perf/run-loss.sh "${{ inputs.name }}" 500 200s
+      - name: Upload the result files (a reviewer commits them under perf/results/)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-loss-${{ inputs.name }}-${{ github.run_id }}
+          path: perf/results/ci-${{ github.run_id }}-loss-${{ inputs.name }}/
           retention-days: 30
           if-no-files-found: error

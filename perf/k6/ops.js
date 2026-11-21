@@ -37,8 +37,9 @@ function iso(ms) {
 
 // One operation = ten events: operation.started, four steps started+finished,
 // operation.finished. `op` is deterministic in (runId, n): control reads can name
-// the same operation ingest creates.
-export function operation(n, now, runId) {
+// the same operation ingest creates. `name` overrides the operation name for
+// scenarios that drive cardinality on purpose.
+export function operation(n, now, runId, name = 'publish_article') {
 	const op = runId + hex(n, 24);
 	const step = (k) => hex(n * 8 + k + 1, 16);
 	const base = (k, type) => {
@@ -60,7 +61,7 @@ export function operation(n, now, runId) {
 	];
 	const events = [
 		Object.assign(base(0, 'operation.started'), {
-			name: 'publish_article',
+			name,
 			request_id: `load-${runId}-${n}`,
 			release: 'load-r1',
 		}),
