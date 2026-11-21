@@ -156,8 +156,19 @@ async fn stub_job_submit(
         .unwrap_or(Value::Null);
     let key = input["business_key"].as_str().unwrap_or("").to_owned();
     h.submits.fetch_add(1, Ordering::SeqCst);
+    // The runner's own idempotence is the `op_key` (D-031): a re-POST under a
+    // key it already accepted is acknowledged, not run again — no second job.
+    let fresh = !h.jobs.lock().unwrap().iter().any(|(k, _)| k == &op_key);
     h.jobs.lock().unwrap().push((op_key, key.clone()));
+    if !fresh {
+        return (
+            axum::http::StatusCode::OK,
+            Json(json!({"run_id": "run-dup"})),
+        )
+            .into_response();
+    }
     let slow = key == "article/slowjob";
+    let hang = key == "article/hangwrite";
     if !key.is_empty() {
         h.publications
             .lock()
@@ -167,6 +178,13 @@ async fn stub_job_submit(
             .or_insert(1);
     }
     let n = h.submits.load(Ordering::SeqCst);
+    // The job was recorded above, then nothing: the write landed and the
+    // answer never comes — the caller can only classify this Transient
+    // (white-hat N5: the next drive must reuse the persisted `op_key`, not
+    // mint a second job).
+    if hang {
+        std::future::pending::<()>().await;
+    }
     // The runner accepted and recorded the job — its 201 headers land at once
     // but the body trickles and never finishes (white-hat N5: a slow 2xx is a
     // submit, not a transient).
@@ -1073,8 +1091,9 @@ async fn a_dr_retry_resubmitted_is_still_one_effect(pool: PgPool) {
     let id = Uuid::parse_str(r.body["control_id"].as_str().unwrap()).unwrap();
 
     // Drive, then strand the record at `submitted` (a crash between the submit and
-    // the observe) and drive again: a second job lands — two RUNS, but the effect
-    // authority dedups the business key. Exactly one effect (D-031's test).
+    // the observe) and drive again: the re-drive carries the SAME persisted
+    // `op_key`, so the runner's own idempotence — not only the effect
+    // authority's business-key dedup — keeps it one job (white-hat N5).
     drive_resumable(&e.state).await;
     let patch = aiops_store::ControlPatch {
         status: Some("submitted"),
@@ -1088,10 +1107,59 @@ async fn a_dr_retry_resubmitted_is_still_one_effect(pool: PgPool) {
     );
     drive_resumable(&e.state).await;
     let jobs = host.job_submits();
-    assert_eq!(jobs.len(), 2, "each re-drive is a fresh job/op_key");
-    assert_ne!(jobs[0].0, jobs[1].0, "distinct op_keys");
-    assert_eq!(host.attempts("article/lost"), 2);
+    assert_eq!(jobs.len(), 2, "the stranded record re-drives one submit");
+    assert_eq!(
+        jobs[0].0, jobs[1].0,
+        "the persisted op_key is reused, not re-minted"
+    );
+    assert_eq!(
+        host.attempts("article/lost"),
+        1,
+        "the runner ran it once — the op_key deduped"
+    );
     assert_eq!(host.effects(), 1, "the authority saw one effect");
+    let rec = e.store.control_get(id).await.unwrap().unwrap();
+    assert_eq!(rec.status, "confirmed");
+}
+
+/// White-hat N5 residual: the write lands and the answer never comes — the
+/// only honest verdict is Transient. The `op_key` was persisted BEFORE the
+/// first POST, so the next drive resubmits under the SAME key and the runner
+/// still sees one job, not a second mint.
+#[sqlx::test(migrations = "../aiops-store/migrations")]
+async fn a_dr_retry_reuses_its_op_key_after_a_transient(pool: PgPool) {
+    let (url, host) = stub_host().await;
+    let e = env_with_runner(pool, &url, &url).await;
+    let path = op_path(&e, "retry").await;
+    let r = send(
+        &e.app,
+        post_json(
+            &path,
+            &e.no_read,
+            &body("article/hangwrite", &json!({"published": false})),
+        ),
+    )
+    .await;
+    assert_eq!(r.body["status"], "authorized", "{:?}", r.body);
+
+    // First drive: the POST lands, the answer never comes — Transient.
+    drive_resumable(&e.state).await;
+    // Second drive: resubmits under the persisted op_key — acknowledged, and
+    // the observe then confirms the effect the first write caused.
+    drive_resumable(&e.state).await;
+    let jobs = host.job_submits();
+    assert_eq!(jobs.len(), 2, "two POSTs — the transient lost the answer");
+    assert_eq!(
+        jobs[0].0, jobs[1].0,
+        "the persisted op_key is reused, not re-minted"
+    );
+    assert_eq!(
+        host.attempts("article/hangwrite"),
+        1,
+        "the runner ran it once — the op_key deduped"
+    );
+    assert_eq!(host.effects(), 1);
+    let id = Uuid::parse_str(r.body["control_id"].as_str().unwrap()).unwrap();
     let rec = e.store.control_get(id).await.unwrap().unwrap();
     assert_eq!(rec.status, "confirmed");
 }
