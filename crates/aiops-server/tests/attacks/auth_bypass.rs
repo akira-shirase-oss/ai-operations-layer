@@ -423,7 +423,7 @@ async fn a_revoke_inside_the_gap_only_the_catch_up_can_see(pool: PgPool) {
         "the CLI revoke landed in the ledger"
     );
     let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
-    sqlx::query("ALTER TABLE api_tokens ENABLE TRIGGER api_tokens_revoked_notify")
+    sqlx::query("ALTER TABLE api_tokens ENABLE ALWAYS TRIGGER api_tokens_revoked_notify")
         .execute(&pool)
         .await
         .unwrap();
@@ -472,7 +472,7 @@ async fn a_beat_that_skips_the_trigger_reads_as_a_gap(pool: PgPool) {
     }
     sqlx::query(
         "ALTER TABLE revocation_heartbeat
-         ENABLE TRIGGER revocation_heartbeat_notify",
+         ENABLE ALWAYS TRIGGER revocation_heartbeat_notify",
     )
     .execute(&pool)
     .await
@@ -499,18 +499,23 @@ async fn a_delete_invisible_to_the_channel_is_caught_by_the_resync(pool: PgPool)
             "the token must be positively cached before the invisible delete"
         );
     }
-    // Delete with triggers off: no delete NOTIFY exists anywhere.
-    let mut deaf = pool.acquire().await.unwrap();
-    sqlx::query("SET session_replication_role = replica")
-        .execute(&mut *deaf)
+    // Delete with the trigger DISABLED: no delete NOTIFY exists anywhere.
+    // (`session_replication_role = replica` no longer silences it —
+    // migration 0011 arms every revocation trigger ALWAYS, which is the
+    // round-6 B2 point; a disabled trigger is the invisible write now.)
+    sqlx::query("ALTER TABLE api_tokens DISABLE TRIGGER api_tokens_deleted_notify")
+        .execute(&pool)
         .await
         .unwrap();
     sqlx::query("DELETE FROM api_tokens WHERE id = $1::uuid")
         .bind(&token_id)
-        .execute(&mut *deaf)
+        .execute(&pool)
         .await
         .unwrap();
-    drop(deaf);
+    sqlx::query("ALTER TABLE api_tokens ENABLE ALWAYS TRIGGER api_tokens_deleted_notify")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let (admin, _) = create_token(&s.url, "ops", &["admin"], &[]);
     kill_revocation_listener(&pool, &s.base, &admin).await;

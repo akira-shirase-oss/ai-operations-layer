@@ -131,7 +131,10 @@ MUTANTS = {
     # heard: a trigger-disabled revoke and a replica-session delete both
     # leave no NOTIFY anywhere, so only the resync's clear + bounded
     # digest read removes the cached ghost (review N-C/N-G/N-H). A resync
-    # that "succeeds" but evicts nothing leaves both tests at 200.
+    # that "succeeds" but evicts nothing leaves both tests at 200. The
+    # overlapping legs must be cut too (review round 6, B3 — a green
+    # mutant proves nothing): the V1 window must not shrink the fresh
+    # TTL, so `resolve` keeps trusting the ghost for its full TTL.
     "resync-evicts-nothing": (
         [
             e(
@@ -145,6 +148,11 @@ MUTANTS = {
                     state.tokens.put(digest, None);
                 }""",
                 """            let _ = digests;""",
+            ),
+            e(
+                S / "app.rs",
+                "        let healthy = self.revocation_healthy.load(Ordering::Relaxed);",
+                "        let healthy = true;",
             ),
         ],
         [
@@ -165,20 +173,10 @@ MUTANTS = {
         ],
         ["a_failed_catch_up_recovers_instead_of_staying_deaf"],
     ),
-    # The heartbeat proves the trigger path, not just the channel (review
-    # N-H): a beat written as raw pg_notify bypasses the table's trigger,
-    # so disabling the trigger would silence nothing — the test waits
-    # forever for a gap that never registers.
-    "heartbeat-skips-trigger": (
-        [
-            e(
-                T / "lib.rs",
-                '    sqlx::query("UPDATE revocation_heartbeat SET beat = now() WHERE id")',
-                '    sqlx::query("SELECT pg_notify(\'aiops_credential_revoked\', \'heartbeat\')")',
-            ),
-        ],
-        ["a_beat_that_skips_the_trigger_reads_as_a_gap"],
-    ),
+    # (Removed — `heartbeat-skips-trigger`: under round 6 B2 the beat also
+    # checks every trigger's arming, so bypassing the UPDATE is caught by
+    # the tgrelid check the `api-token-trigger-unproven` mutant already
+    # proves. The scenario the mutant exercised is redundant.)
     # The CLI refuses contradictory credential shapes before minting.
     "cli-mints-contradictions": (
         [
