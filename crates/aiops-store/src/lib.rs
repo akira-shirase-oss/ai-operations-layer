@@ -16,6 +16,7 @@ use aiops_domain::{
     Event, EventId, InstanceId, Limits, Mode, OperationId, Outcome, PolicyMarks, Timestamp,
     Validator,
 };
+pub use sqlx::PgPool as RevocationPool;
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 pub use sqlx::postgres::{PgConnectOptions, PgListener};
@@ -234,6 +235,11 @@ pub struct Store {
     /// must then refuse, which is what their tests assert.
     #[cfg(debug_assertions)]
     fail_audit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Same, for the revocation catch-up read: the watcher's resync must
+    /// retry through a failed read and recover, which its test proves by
+    /// failing reads then clearing the hook.
+    #[cfg(debug_assertions)]
+    fail_revocation: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One validated event ready to store: the event, what policy changed, its stored JSON.
@@ -683,6 +689,42 @@ pub async fn revocation_listener(database_url: &str) -> Result<PgListener, Store
     Ok(listener)
 }
 
+/// The `application_name` the revocation heartbeat writer connects under.
+pub const REVOCATION_WRITER_NAME: &str = "aiops-revocation-writer";
+
+/// A dedicated write pool for the revocation heartbeat, off every tenant
+/// pool (review N-I: a beat sent on the serving pool turns a saturated
+/// pool into a fake channel gap). Its UPDATE goes through the
+/// `revocation_heartbeat` trigger (migration 0010), so an observed beat
+/// proves the triggers are live, not just the connection — a backend
+/// running `session_replication_role = replica` stays silent and reads
+/// as a gap (review N-H).
+pub async fn revocation_writer(database_url: &str) -> Result<PgPool, StoreError> {
+    let options = database_url
+        .parse::<PgConnectOptions>()
+        .map_err(StoreError::Unavailable)?
+        .application_name(REVOCATION_WRITER_NAME);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options),
+    )
+    .await
+    .map_err(|_| StoreError::Unavailable(sqlx::Error::PoolTimedOut))?
+    .map_err(StoreError::Unavailable)
+}
+
+/// The heartbeat write: fire the channel's UPDATE trigger over `pool`
+/// (the watcher's own, never a tenant pool). The trigger emits `heartbeat`
+/// on [`REVOCATION_CHANNEL`].
+pub async fn revocation_beat(pool: &PgPool) -> Result<(), StoreError> {
+    sqlx::query("UPDATE revocation_heartbeat SET beat = now() WHERE id")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 impl Store {
     pub async fn connect(cfg: &StoreConfig) -> Result<Self, StoreError> {
         let base: PgConnectOptions = cfg.url.parse().map_err(StoreError::Unavailable)?;
@@ -734,6 +776,8 @@ impl Store {
             .await?,
             #[cfg(debug_assertions)]
             fail_audit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            fail_revocation: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -748,6 +792,8 @@ impl Store {
             control: pool,
             #[cfg(debug_assertions)]
             fail_audit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(debug_assertions)]
+            fail_revocation: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -759,9 +805,23 @@ impl Store {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Debug-build fault hook: while set, the revocation catch-up read
+    /// fails — the watcher must retry through it (review N-C).
+    #[cfg(debug_assertions)]
+    pub fn fail_revocation_reads(&self, on: bool) {
+        self.fail_revocation
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     #[cfg(debug_assertions)]
     fn audit_failing(&self) -> bool {
         self.fail_audit.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(debug_assertions)]
+    fn revocation_failing(&self) -> bool {
+        self.fail_revocation
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn migrate(&self) -> Result<(), StoreError> {
@@ -895,24 +955,28 @@ impl Store {
         }))
     }
 
-    /// A self-NOTIFY on the revocation channel through the serving pool: the
-    /// listener proves the whole path — pool, channel, listener connection —
-    /// is live by observing it (review V1). The payload is `heartbeat`.
-    pub async fn revocation_heartbeat(&self) -> Result<(), StoreError> {
-        sqlx::query("SELECT pg_notify($1, 'heartbeat')")
-            .bind(REVOCATION_CHANNEL)
-            .execute(&self.query)
-            .await?;
-        Ok(())
-    }
-
-    /// Every revoked token digest — the revocation listener's catch-up read
-    /// after a missed-notification gap (review V1): evict exactly these and
-    /// keep everything else, instead of clear-all.
-    pub async fn revoked_token_digests(&self) -> Result<Vec<[u8; 32]>, StoreError> {
-        let rows = sqlx::query("SELECT token_hash FROM api_tokens WHERE revoked_at IS NOT NULL")
-            .fetch_all(&self.auth)
-            .await?;
+    /// Token digests revoked within `max_age` — the revocation listener's
+    /// catch-up read after a missed-notification gap (review V1). The
+    /// window is the credential cache's max entry age: a row revoked
+    /// longer ago cannot still be cached, so reading further back only
+    /// makes the blip bigger as revoked rows accumulate (review N-C);
+    /// migration 0010's partial index keeps the read at window size.
+    pub async fn revoked_token_digests(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<Vec<[u8; 32]>, StoreError> {
+        #[cfg(debug_assertions)]
+        if self.revocation_failing() {
+            return Err(StoreError::Unavailable(sqlx::Error::PoolClosed));
+        }
+        let rows = sqlx::query(
+            "SELECT token_hash FROM api_tokens
+             WHERE revoked_at IS NOT NULL
+               AND revoked_at > now() - make_interval(secs => $1)",
+        )
+        .bind(max_age.as_secs_f64())
+        .fetch_all(&self.auth)
+        .await?;
         Ok(rows
             .iter()
             .filter_map(|r| <[u8; 32]>::try_from(r.get::<Vec<u8>, _>(0).as_slice()).ok())

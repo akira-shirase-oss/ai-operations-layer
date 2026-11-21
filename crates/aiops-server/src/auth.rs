@@ -4,7 +4,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
@@ -99,6 +98,20 @@ impl<V> Fifo<V> {
     }
 }
 
+/// The cache's mutable state — both maps and the generation under ONE
+/// mutex (review N-F): a `remove` that bumped the generation outside the
+/// locks let a `put_if_same` check a stale generation and then put, so a
+/// revoked row came back for up to a TTL. Check-then-act is only honest
+/// when the check and the act share the lock.
+struct Inner<V> {
+    /// Bumped by every `remove`/`clear`: a lookup whose store read started
+    /// before an eviction may not write its (pre-eviction) answer back
+    /// (review S3's re-insert race).
+    generation: u64,
+    positive: Fifo<V>,
+    negative: Fifo<()>,
+}
+
 /// A bounded, time-limited cache of credential lookups. Valid and invalid credentials are
 /// kept apart, so unknown keys (which an attacker can mint at will) can only evict other
 /// unknown keys, never a valid one.
@@ -106,12 +119,7 @@ pub struct CredentialCache<V> {
     ttl: Duration,
     negative_ttl: Duration,
     stale_for: Duration,
-    positive: Mutex<Fifo<V>>,
-    negative: Mutex<Fifo<()>>,
-    /// Bumped by every `remove`/`clear`: a lookup whose store read started
-    /// before an eviction may not write its (pre-eviction) answer back
-    /// (review S3's re-insert race).
-    generation: AtomicU64,
+    inner: Mutex<Inner<V>>,
     /// Both maps' wait and hold times (D-026).
     pub lock_stats: LockStats,
 }
@@ -122,15 +130,22 @@ impl<V: Clone> CredentialCache<V> {
             ttl,
             negative_ttl,
             stale_for: Duration::from_secs(300),
-            positive: Mutex::new(Fifo::new(capacity)),
-            negative: Mutex::new(Fifo::new(capacity)),
-            generation: AtomicU64::new(0),
+            inner: Mutex::new(Inner {
+                generation: 0,
+                positive: Fifo::new(capacity),
+                negative: Fifo::new(capacity),
+            }),
             lock_stats: LockStats::default(),
         }
     }
 
+    /// The generation a caller snapshots before its store read — a mirror
+    /// read under the lock; a poisoned lock answers MAX so `put_if_same`
+    /// can never match it.
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+        self.lock_stats
+            .lock(&self.inner)
+            .map_or(u64::MAX, |i| i.generation)
     }
 
     /// The configured fresh window — `resolve` shortens it while the
@@ -139,31 +154,35 @@ impl<V: Clone> CredentialCache<V> {
         self.ttl
     }
 
+    /// The longest an entry can answer for — fresh plus the stale window;
+    /// the revocation catch-up reads revocations no older than this
+    /// (review N-C: older ones could not still be cached anyway).
+    pub fn max_entry_age(&self) -> Duration {
+        self.ttl + self.stale_for
+    }
+
     /// Drop any cached answer for a digest — the revocation path: a revoked
     /// credential must stop working now, not when its TTL runs out (D-034).
     pub fn remove(&self, key: &[u8; 32]) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
-            pos.remove(key);
-        }
-        if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
-            neg.remove(key);
+        if let Some(mut inner) = self.lock_stats.lock(&self.inner) {
+            inner.generation += 1;
+            inner.positive.remove(key);
+            inner.negative.remove(key);
         }
     }
 
     /// Drop every cached answer — the revocation listener's reconnect
     /// recovery: notifications missed while the channel was down are
     /// indistinguishable from none, so the only safe resume is empty
-    /// (D-034).
+    /// (D-034, N-G: a gap can hide a DELETE too, and the digest set the
+    /// catch-up re-reads holds only revocations).
     pub fn clear(&self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
-            pos.map.clear();
-            pos.order.clear();
-        }
-        if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
-            neg.map.clear();
-            neg.order.clear();
+        if let Some(mut inner) = self.lock_stats.lock(&self.inner) {
+            inner.generation += 1;
+            inner.positive.map.clear();
+            inner.positive.order.clear();
+            inner.negative.map.clear();
+            inner.negative.order.clear();
         }
     }
 
@@ -171,9 +190,10 @@ impl<V: Clone> CredentialCache<V> {
     /// health shrinks it (an unhealthy channel means entries may already
     /// hold a revoked answer; review V1).
     pub fn get(&self, key: &[u8; 32], fresh_ttl: Duration) -> Cached<V> {
-        if let Some(pos) = self.lock_stats.lock(&self.positive)
-            && let Some((v, at)) = pos.map.get(key)
-        {
+        let Some(inner) = self.lock_stats.lock(&self.inner) else {
+            return Cached::Miss;
+        };
+        if let Some((v, at)) = inner.positive.map.get(key) {
             let age = at.elapsed();
             if age < fresh_ttl {
                 return Cached::Fresh(Some(v.clone()));
@@ -182,8 +202,7 @@ impl<V: Clone> CredentialCache<V> {
                 return Cached::Stale(v.clone());
             }
         }
-        if let Some(neg) = self.lock_stats.lock(&self.negative)
-            && let Some(((), at)) = neg.map.get(key)
+        if let Some(((), at)) = inner.negative.map.get(key)
             && at.elapsed() < self.negative_ttl.min(fresh_ttl)
         {
             return Cached::Fresh(None);
@@ -193,29 +212,30 @@ impl<V: Clone> CredentialCache<V> {
 
     /// Write the answer a lookup returned — but only if nothing evicted or
     /// cleared since `seen_gen` was read: a snapshot taken before a
-    /// revocation must not put the row back (review S3).
+    /// revocation must not put the row back (review S3). The generation
+    /// check and the put happen under the one lock, so an eviction can
+    /// never slip between them (review N-F).
     pub fn put_if_same(&self, key: [u8; 32], value: Option<V>, seen_gen: u64) {
-        if self.generation() != seen_gen {
-            return;
+        if let Some(mut inner) = self.lock_stats.lock(&self.inner)
+            && inner.generation == seen_gen
+        {
+            Self::put_locked(&mut inner, key, value);
         }
-        self.put(key, value);
     }
 
     pub fn put(&self, key: [u8; 32], value: Option<V>) {
+        if let Some(mut inner) = self.lock_stats.lock(&self.inner) {
+            Self::put_locked(&mut inner, key, value);
+        }
+    }
+
+    fn put_locked(inner: &mut Inner<V>, key: [u8; 32], value: Option<V>) {
         if let Some(v) = value {
-            if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
-                neg.remove(&key);
-            }
-            if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
-                pos.insert(key, v);
-            }
+            inner.negative.remove(&key);
+            inner.positive.insert(key, v);
         } else {
-            if let Some(mut pos) = self.lock_stats.lock(&self.positive) {
-                pos.remove(&key);
-            }
-            if let Some(mut neg) = self.lock_stats.lock(&self.negative) {
-                neg.insert(key, ());
-            }
+            inner.positive.remove(&key);
+            inner.negative.insert(key, ());
         }
     }
 }

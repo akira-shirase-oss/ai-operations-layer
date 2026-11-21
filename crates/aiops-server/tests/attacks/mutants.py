@@ -70,8 +70,8 @@ MUTANTS = {
             ),
             e(
                 S / "notify.rs",
-                "fn handle(state: &AppState, payload: &str) {",
-                "fn handle(state: &AppState, payload: &str) {\n    let _ = (state, payload);\n    return;",
+                "    Metrics::add(&state.revocation_notices, 1);",
+                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, cancel, last_resync);\n    return true;",
             ),
         ],
         ["an_in_process_revoke_dies_before_the_next_request"],
@@ -82,8 +82,8 @@ MUTANTS = {
         [
             e(
                 S / "notify.rs",
-                "fn handle(state: &AppState, payload: &str) {",
-                "fn handle(state: &AppState, payload: &str) {\n    let _ = (state, payload);\n    return;",
+                "    Metrics::add(&state.revocation_notices, 1);",
+                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, cancel, last_resync);\n    return true;",
             )
         ],
         ["a_peer_revoke_is_refused_on_the_next_request"],
@@ -94,8 +94,8 @@ MUTANTS = {
     # produce the 401 this test asserts, so a mutant that cuts only one
     # stays green (measured: three did). Weaken exactly the tested
     # protection — "a dead backend must not strand a revocation" — by
-    # cutting every eviction path at once: the catch-up digests are
-    # fetched but dropped, handle() is deaf to the re-LISTENed conn's
+    # cutting every eviction path at once: the resync clears nothing and
+    # re-arms nothing, handle() is deaf to the re-LISTENed conn's
     # notices, and resolve trusts the entry for its full TTL as if the
     # channel were healthy. Detection still runs (the gap counter proves
     # the test reached its scenario); eviction is what's gone.
@@ -103,15 +103,20 @@ MUTANTS = {
         [
             e(
                 S / "notify.rs",
-                """            for digest in &digests {
-                state.tokens.remove(digest);
-            }""",
-                """            let _ = &digests;""",
+                "        state.tokens.clear();\n        state.ingest_keys.clear();",
+                "        let _ = &state.tokens;",
             ),
             e(
                 S / "notify.rs",
-                "fn handle(state: &AppState, payload: &str) {",
-                "fn handle(state: &AppState, payload: &str) {\n    let _ = (state, payload);\n    return;",
+                """                for digest in digests {
+                    state.tokens.put(digest, None);
+                }""",
+                """            let _ = digests;""",
+            ),
+            e(
+                S / "notify.rs",
+                "    Metrics::add(&state.revocation_notices, 1);",
+                "    Metrics::add(&state.revocation_notices, 1);\n    let _ = (payload, cancel, last_resync);\n    return true;",
             ),
             e(
                 S / "app.rs",
@@ -120,6 +125,58 @@ MUTANTS = {
             ),
         ],
         ["a_revocation_survives_the_listener_dying"],
+    ),
+    # The resync is the only enforcement for a write the channel never
+    # heard: a trigger-disabled revoke and a replica-session delete both
+    # leave no NOTIFY anywhere, so only the resync's clear + bounded
+    # digest read removes the cached ghost (review N-C/N-G/N-H). A resync
+    # that "succeeds" but evicts nothing leaves both tests at 200.
+    "resync-evicts-nothing": (
+        [
+            e(
+                S / "notify.rs",
+                "        state.tokens.clear();\n        state.ingest_keys.clear();",
+                "        let _ = &state.tokens;",
+            ),
+            e(
+                S / "notify.rs",
+                """                for digest in digests {
+                    state.tokens.put(digest, None);
+                }""",
+                """            let _ = digests;""",
+            ),
+        ],
+        [
+            "a_revoke_inside_the_gap_only_the_catch_up_can_see",
+            "a_delete_invisible_to_the_channel_is_caught_by_the_resync",
+        ],
+    ),
+    # A failed catch-up must retry until it lands (review N-C); answering
+    # the Err arm with `true` leaves the channel deaf and /readyz down
+    # after the lock clears — the test's recovery never comes.
+    "resync-never-retries": (
+        [
+            e(
+                S / "notify.rs",
+                '                tracing::warn!(error = %e, "revocation resync failed; caches cleared, retrying");',
+                '                tracing::warn!(error = %e, "revocation resync failed; caches cleared, retrying");\n                return true;',
+            ),
+        ],
+        ["a_failed_catch_up_recovers_instead_of_staying_deaf"],
+    ),
+    # The heartbeat proves the trigger path, not just the channel (review
+    # N-H): a beat written as raw pg_notify bypasses the table's trigger,
+    # so disabling the trigger would silence nothing — the test waits
+    # forever for a gap that never registers.
+    "heartbeat-skips-trigger": (
+        [
+            e(
+                T / "lib.rs",
+                '    sqlx::query("UPDATE revocation_heartbeat SET beat = now() WHERE id")',
+                '    sqlx::query("SELECT pg_notify(\'aiops_credential_revoked\', \'heartbeat\')")',
+            ),
+        ],
+        ["a_beat_that_skips_the_trigger_reads_as_a_gap"],
     ),
     # The CLI refuses contradictory credential shapes before minting.
     "cli-mints-contradictions": (

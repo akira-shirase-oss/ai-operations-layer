@@ -11,3 +11,5 @@ cc 4ea95f64914a44e23fbcef05a8dfd074e08c8e85a24e95c1794acef4e96b9d0e # shrinks to
 cc e25a12340ad1cd2f06f11e7bfd7ca4d2a5da00902b0c15932f9f679913302cca # shrinks to token = "aA/0AA0/a000Aaa0AaaaaAAAaa/aA0aa"
 cc a2b9296d1e28291e00210991c3453ff671095d5e477a7497005f84c79ff40461 # shrinks to token = "aa0a0a0/A0AAaa+a0++A0AaAA+aaA00A"
 cc d0c24cfb05747498930153c87bc5b10bf170f2d1856622759d4eb27b73bf5546 # shrinks to token = "/aa00a0a/A0A0+Aaa0a00++aa/a0A0a00"
+cc ceceab1e9927ee0b3b022956836b286a23978bdb4ad45ec6f45bad8613d0a48d # shrinks to token = "++++aaA+aaa0aA+0aA0aa+a0Aa+0Aa0a"
+cc 0f7f4c65ee68ef0954f4ae1cf3bd61c6dff920e3e4c911c808a24cecc08b92ad # shrinks to token = "a0_Aaa0Aaa-0-A_aA-a_aaa_AA0_0AaA"

@@ -13,7 +13,10 @@
 //! `-`/`_` piece under 6 chars, or a dotted version — may keep (a random
 //! draw spells `abcdefghij` about as often as `services` does). Everything
 //! else about the token dies; no ≥8-byte window survives outside such a
-//! piece in any of the four contexts.
+//! piece in any of the five contexts. A whole run may keep the same way —
+//! every `/`-segment name-shaped AND some `-`/`_` piece a real word
+//! (≥4 all-lowercase: `mistralai`, `services`) — a path or a model id,
+//! never a credential; a word-less run of name pieces is a token and dies.
 //!
 //! A corpus failure is a red-first bug: fix `redact`, never relax a label —
 //! the labels are the contract three review rounds wrote.
@@ -237,6 +240,53 @@ const MUST_REDACT: &[(&str, &str)] = &[
     (
         concat!("tok ", "a1b2c3d4e5f6a1b2", "c3d4e5f6a1b2c3d4", " ok"),
         "tok [redacted] ok",
+    ),
+    // …and it still dies whole as a `/`-run's first segment: the
+    // strict-name keep must never carry a hex run at any length
+    // (review N-A).
+    (
+        concat!(
+            "fetch ",
+            "0123456789abcdef0123456789abcdef",
+            "/Report-V2 failed"
+        ),
+        "fetch [redacted] failed",
+    ),
+    (
+        concat!(
+            "{\"error\":\"",
+            "0123456789abcdef0123456789abcdef01234567",
+            "/Build_1A\"}"
+        ),
+        "{\"error\":\"[redacted]\"}",
+    ),
+    // A ≥32 mixed base64url run is a token even beside a name-shaped
+    // `/`-segment — the strict-name keep is bounded, never this long
+    // (review N-A; proptest seed).
+    (
+        "run a0_Aaa0Aaa-0-A_aA-a_aaa_AA0_0AaA/Run-1A ok",
+        "run [redacted] ok",
+    ),
+    // In an escaped-quote context (`\"key\":\"value\"`) a backslash RUN of
+    // two or more is the value's own content — `\\` a literal backslash,
+    // `\\\"` that plus an escaped quote — and only a single-backslash
+    // `\"` closes. Stopping at the first `\` leaked the tail (review N-D):
+    // `\\\"`, `\\u00e9`, `\\n` and PHP's `\\/` each get a row.
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "\\", "\"kLm;Pw9x\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "u00e9kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "nkLm\"}"),
+        "{\"password\":\"[redacted]\"}",
+    ),
+    (
+        concat!("{\"password\":\"Zq8", "\\", "\\", "/kLm\"}"),
+        "{\"password\":\"[redacted]\"}",
     ),
 ];
 
@@ -767,23 +817,81 @@ fn identifier_fields() {
     }
 }
 
-/// The four contexts the property runs in (review R2): after a space,
-/// after `host/`, after `//`, and inside a hyphenated path.
+/// Review N-E: a credential-keyed value is never the identifier field's
+/// business — `password:hunter2` and a `token:`-prefixed hex run must
+/// refuse the field, not be stored verbatim. `opt_ident` is private; the
+/// test goes through `validate_source`, which runs `service` through it.
+#[test]
+fn credential_keyed_identifier_fields_refuse() {
+    use aiops_domain::limits::Limits;
+    use aiops_domain::validate::validate_source;
+    use aiops_domain::wire::WireSource;
+
+    let instance_id = concat!("0123456789abcdef", "0123456789abcdef").to_string();
+    for (service, why) in [
+        ("password:hunter2", "a credential wearing a key's name"),
+        ("password:123456", "the same, digits"),
+        (
+            concat!("token:", "0123456789abcdef0123456789abcdef"),
+            "a 32-hex tail under a credential key",
+        ),
+        (
+            concat!("0123456789abcdef", "0123456789abcdef"),
+            "a bare 32-hex field",
+        ),
+        (
+            concat!("0123456789abcdef", "0123456789abcdef01234567"),
+            "a bare 40-hex field",
+        ),
+    ] {
+        let source = WireSource {
+            instance_id: instance_id.clone(),
+            service: service.to_string(),
+            sdk: "aiops-sdk-test/0".to_string(),
+        };
+        assert!(
+            validate_source(&source, &Limits::default()).is_err(),
+            "{why} kept: {service}"
+        );
+    }
+    // The namespace keeps: state words, not credentials.
+    for service in ["token:expired", "session:timeout", "session-api:8080"] {
+        let source = WireSource {
+            instance_id: instance_id.clone(),
+            service: service.to_string(),
+            sdk: "aiops-sdk-test/0".to_string(),
+        };
+        assert!(
+            validate_source(&source, &Limits::default()).is_ok(),
+            "namespaced event name refused: {service}"
+        );
+    }
+}
+
+/// The five contexts the property runs in (review R2, N-A): after a
+/// space, after `host/`, after `//`, inside a hyphenated path, and as a
+/// `/`-run's first segment followed by name text.
 const CONTEXTS: &[&str] = &[
     "key {T} used",
     "GET https://h.io/{T} 200",
     "x //{T} y",
     "GET https://h.io/prefix-{T}-suffix 200",
+    "run {T}/Run-1A ok",
 ];
 
 /// Mirrors `policy.rs`'s keep rule: when a `/`-joined run dies, only the
 /// FIRST segment may survive it — and only when that segment is itself a
 /// strict name: no uppercase, every `-`/`_` piece under 6 chars, or a
-/// dotted version. (A run that is name-shaped end to end is kept whole and
+/// dotted version — and bounded: under 16 bytes, never a ≥32 hex run
+/// (review N-A). (A run that is name-shaped end to end is kept whole and
 /// `redact` returns `None`, so it never reaches the window loop.) The
 /// measured residual this file's header records.
 fn strict_segment(s: &[u8]) -> bool {
-    !s.is_empty()
+    !(s.is_empty()
+        || s.len() >= 16
+        || (s.len() >= 32
+            && s.iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))))
         && s.iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
         && (!s.iter().any(u8::is_ascii_uppercase)
@@ -794,10 +902,89 @@ fn strict_segment(s: &[u8]) -> bool {
                     .all(|p| !p.is_empty() && p.len() <= 6)))
 }
 
+/// Mirrors `policy.rs::name_piece` — kept in step so the `None` check
+/// below inspects the keep rather than trusting it.
+fn mirror_name_piece(p: &[u8]) -> bool {
+    if !p.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'.') {
+        return false;
+    }
+    if p.len() < 6 || p.iter().all(u8::is_ascii_lowercase) {
+        return true;
+    }
+    if p.iter().all(u8::is_ascii_digit) {
+        return p.len() <= 13;
+    }
+    (p.iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && p.len() <= 13)
+        || (p.contains(&b'.') && p.iter().filter(|b| b.is_ascii_uppercase()).count() <= 2)
+        || (p.len() <= 16
+            && p.iter().filter(|b| b.is_ascii_uppercase()).count() <= 2
+            && p.iter().filter(|b| b.is_ascii_digit()).count() <= 2)
+}
+
+fn mirror_name_segment(s: &[u8]) -> bool {
+    s.len() < 6 && s.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'.')
+        || s.split(|b| matches!(b, b'-' | b'_'))
+            .all(|p| !p.is_empty() && mirror_name_piece(p))
+}
+
+/// The maximal `[alnum+/=_-]` span holding `pos`, trimmed of leading
+/// non-openers (`/` and `=` join but cannot open a run) — the run
+/// `match_secret` would analyze at the token's position.
+fn mirror_run(input: &str, pos: usize) -> &[u8] {
+    let b = input.as_bytes();
+    let is_run = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'_' | b'-');
+    let is_open = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'+');
+    let mut lo = pos;
+    while lo > 0 && is_run(b[lo - 1]) {
+        lo -= 1;
+    }
+    while lo < pos && !is_open(b[lo]) {
+        lo += 1;
+    }
+    let mut hi = pos;
+    while hi < b.len() && is_run(b[hi]) {
+        hi += 1;
+    }
+    &b[lo..hi]
+}
+
+/// Mirrors the whole-run keep: a ≥32 mixed-case run containing `/` is a
+/// path, model id or route — never a credential — only when every
+/// `/`-segment is name-shaped AND some `-`/`_` piece is a real word
+/// (≥4 all-lowercase chars: `mistralai`, `services`; `a0`/`AA0` are not
+/// words). Anything else returning `None` is the leak review N-B named.
+fn mirror_kept_whole(run: &[u8]) -> bool {
+    let segs: Vec<&[u8]> = run.split(|b| *b == b'/').collect();
+    run.len() >= 32
+        && run.contains(&b'/')
+        && run.iter().any(u8::is_ascii_uppercase)
+        && run.iter().any(u8::is_ascii_lowercase)
+        && run.iter().any(u8::is_ascii_digit)
+        && segs.iter().all(|s| mirror_name_segment(s))
+        && segs.iter().any(|s| {
+            s.split(|b| matches!(b, b'-' | b'_'))
+                .any(|p| p.len() >= 4 && p.iter().all(u8::is_ascii_lowercase))
+        })
+}
+
 fn assert_no_secret_bytes(token: &str) -> Result<(), TestCaseError> {
     for ctx in CONTEXTS {
         let input = ctx.replace("{T}", token);
-        let Some(out) = redact(&input) else { continue };
+        // `None` means nothing was redacted — the token survived WHOLE,
+        // the worst leak there is (review N-B: `continue` hid exactly
+        // this). A whole-keep is allowed ONLY as the documented
+        // name-shaped path residual, which the mirror now inspects.
+        let Some(out) = redact(&input) else {
+            let pos = ctx.find("{T}").unwrap_or(0);
+            let run = mirror_run(&input, pos);
+            prop_assert!(
+                mirror_kept_whole(run),
+                "{token:?} survived whole in {ctx:?} (run {run:?} is no path)"
+            );
+            continue;
+        };
         let pieces: Vec<&[u8]> = token.as_bytes().split(|b| *b == b'/').collect();
         for win in token.as_bytes().windows(8) {
             let Ok(w) = std::str::from_utf8(win) else {
@@ -835,6 +1022,14 @@ proptest! {
         prop_assume!(token.bytes().any(|b| b.is_ascii_uppercase()));
         prop_assume!(token.bytes().any(|b| b.is_ascii_lowercase()));
         prop_assume!(token.bytes().any(|b| b.is_ascii_digit()));
+        assert_no_secret_bytes(&token)?;
+    }
+
+    /// And the lowercase-hex alphabet — md5/SHA/GitLab-runner shaped —
+    /// in the same contexts, `{T}/Run-1A` included: a hex run must never
+    /// ride the strict-name keep out of a dying `/`-run (review N-A).
+    #[test]
+    fn random_hex_never_leaves_eight_bytes(token in "[0-9a-f]{32,88}") {
         assert_no_secret_bytes(&token)?;
     }
 

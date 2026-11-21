@@ -301,6 +301,16 @@ fn secret_spans(view: &[u8]) -> Vec<(usize, usize)> {
             continue;
         }
         i += 1;
+        // A position after a word byte can start no shape — every family
+        // requires its own boundary — so one pass skips them all. Without
+        // it, every byte of a long token run re-runs the run analysis and
+        // the scan goes quadratic on `aaaa…`-style inputs (review N-J).
+        // Two exceptions still get checked: a `:` (userinfo needs no
+        // boundary — `https` ends in a letter) and positions after
+        // `-`/`+`/`/`/`=` (an interior `ghp_`, a `password:` after `=`).
+        while i < view.len() && is_word(view[i - 1]) && view[i] != b':' {
+            i += 1;
+        }
     }
     // The user-part rescan can push a span that starts BEFORE one already
     // pushed — the merge below walks forward only, so an unordered span is
@@ -346,6 +356,13 @@ pub fn redact(text: &str) -> Option<String> {
             }
             view = decoded;
             map = composed;
+        }
+        // The pass cap ran out with decodable text left: a `%25`-nested
+        // escape deeper than DECODE_PASSES still hides its key — fail
+        // closed, never return the nested text as if it were clean
+        // (review N-J).
+        if percent_decode(&view).is_some() {
+            return Some(REDACTED.to_string());
         }
         spans.sort_unstable();
         spans.dedup();
@@ -475,10 +492,34 @@ fn secret_value(key: &[u8], after: &[u8]) -> Option<(usize, usize)> {
     // only an unescaped `q` ends it (review R3).
     let normal = if let Some(q) = quote {
         if quote_escaped {
-            value
-                .iter()
-                .take_while(|b| **b != q && **b != b'\\' && !b"\r\n".contains(b))
-                .count()
+            // The value's own delimiter is `\"`: a single backslash plus
+            // the quote closes it, while a backslash RUN of two or more
+            // is inner content — `\\` a literal backslash, `\\\"` that
+            // plus an escaped quote — and any other `\x` pair is an
+            // escape that belongs to the value. Stopping at the first
+            // `\` leaked everything after it (review N-D).
+            let mut n = 0;
+            while n < value.len() {
+                match value[n] {
+                    b'\r' | b'\n' => break,
+                    b'\\' => {
+                        let run = value[n..].iter().take_while(|b| **b == b'\\').count();
+                        if run >= 2 {
+                            n += run;
+                            if value.get(n) == Some(&q) {
+                                n += 1;
+                            }
+                        } else if value.get(n + 1) == Some(&q) {
+                            break;
+                        } else {
+                            n += (n + 2).min(value.len()) - n;
+                        }
+                    }
+                    b if b == q => break,
+                    _ => n += 1,
+                }
+            }
+            n
         } else {
             let mut n = 0;
             while n < value.len() {
@@ -553,16 +594,35 @@ fn high_confidence(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// `:`-tail pieces under a credential key that ARE identifier text —
+/// event states and ports, never credential values (review N-E).
+const STATE_WORDS: &[&[u8]] = &[
+    b"created", b"denied", b"expired", b"failed", b"login", b"logout", b"ok", b"pending",
+    b"refused", b"revoked", b"started", b"timeout",
+];
+
 /// Whether `text` holds a high-confidence credential shape — the check
 /// [`crate::validate`] runs on identifier fields (model ids, release names,
 /// request ids). A model id is a long mixed run and `auth:login` a key-looking
 /// pair; neither is a credential, so only these shapes refuse (review N3).
 /// A `key:value` pair whose key names a secret refuses too — `password:x` is
 /// not an identifier (review N3 residual) — except the category keys `auth`
-/// and `authorization`, and except a `:` pair whose tail is a plain
-/// lowercase name: `token:expired` is an event, not a field.
+/// and `authorization`, and except a `:` pair whose whole tail is state
+/// words and port-shaped digits: `token:expired` and `session-api:8080`
+/// are events and deployments; `password:hunter2`, `password:123456` and
+/// `token:<hex>` are credentials wearing a key's name (review N-E). A bare
+/// ≥32 lowercase-hex field refuses outright — the comment that claimed
+/// the run rule covered identifiers was wrong; `looks_like_secret` never
+/// ran it (review N-E).
 pub fn looks_like_secret(text: &str) -> bool {
     let bytes = text.as_bytes();
+    if bytes.len() >= 32
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    {
+        return true;
+    }
     (0..bytes.len()).any(|i| {
         if url_password(bytes, i).is_some()
             || ((i == 0 || !is_word(bytes[i - 1])) && high_confidence(bytes, i).is_some())
@@ -596,17 +656,17 @@ pub fn looks_like_secret(text: &str) -> bool {
         if rest[key_len] == b'=' {
             return true;
         }
-        // `:`-namespaced names are identifiers too — `token:expired`,
-        // `session:timeout`, `stripe:charge:failed`, `session-api:8080` —
-        // so a `:` pair refuses only when its tail is not a plain name:
-        // every piece a word or a number, nothing that spells like a
-        // credential (`password:x` is a field, `token:expired` an event).
+        // A credential key's `:`-tail keeps ONLY the allowlist: state
+        // words (`token:expired` is an event) and all-digit pieces under
+        // six digits (`session-api:8080` is a port — six or more digits
+        // is already too much entropy to be one). Anything else —
+        // `password:hunter2`, `password:123456`, `token:<32 hex>` — is a
+        // credential in an identifier field, and it refuses (review N-E).
         !rest[key_len + 1..]
             .split(|b| matches!(b, b':' | b'.' | b'-' | b'_' | b'/'))
             .all(|p| {
-                p.len() >= 2
-                    && p.iter().all(u8::is_ascii_alphanumeric)
-                    && !(p.iter().any(u8::is_ascii_uppercase) && p.iter().any(u8::is_ascii_digit))
+                STATE_WORDS.contains(&p)
+                    || (p.len() <= 5 && !p.is_empty() && p.iter().all(u8::is_ascii_digit))
             })
     })
 }
@@ -652,9 +712,12 @@ fn match_secret(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     // A run may open on `_` or `-` too: `_` is a word byte, so a base64url token
     // that leads with underscores (`____Aaa-…`) is invisible to any interior
     // scan position unless the run itself starts there (corpus property).
+    // `+` opens a run too — it is a base64 byte, and a token that LEADS
+    // with it is only readable once the run counts it (corpus property:
+    // `++++…` is a 32-char token, not four joiners and a 28-char tail).
     if rest
         .first()
-        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-'))
+        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-' | b'+'))
     {
         let run = token_run(rest, b"+/=_-");
         let token = &rest[..run];
@@ -719,7 +782,18 @@ fn slash_run_dead_offset(bytes: &[u8], i: usize, token: &[u8]) -> Option<usize> 
     // never name-proof — `Mistral-7B-Instruct-v0` and
     // `collector-2026-11-20` pass; `T0AB_CDEF12` and `B0CD-EF1234` do not
     // (review R1).
-    if segments.iter().all(|s| name_segment(s)) {
+    // …and the keep is a path/model id only when the run carries a real
+    // word — a ≥4-char all-lowercase piece somewhere (`mistralai`,
+    // `collector`, `services`). A run of name pieces with no word —
+    // `a0_Aaa0Aaa-0-A_aA-…` — is a base64url token wearing `-`/`_`, not a
+    // name: whole-token survival is the leak the property checks for
+    // (review N-A/N-B).
+    if segments.iter().all(|s| name_segment(s))
+        && segments.iter().any(|s| {
+            s.split(|b| matches!(b, b'-' | b'_'))
+                .any(|p| p.len() >= 4 && p.iter().all(u8::is_ascii_lowercase))
+        })
+    {
         return None;
     }
     // The run dies: at most the FIRST segment may keep — and only when it
@@ -733,12 +807,25 @@ fn slash_run_dead_offset(bytes: &[u8], i: usize, token: &[u8]) -> Option<usize> 
     // bytes — so a keep is only readable behind a non-run boundary
     // (`h.io`'s `.`), never behind `/`, `+`, `=`, `_` or `-`.
     if segments.len() > 1
+        && name_run(segments[0])
         && strict_name(segments[0])
         && (i == 0 || !matches!(bytes[i - 1], b'+' | b'/' | b'=' | b'_' | b'-'))
     {
         return Some(segments[0].len());
     }
     Some(0)
+}
+
+/// A long hex/lowercase credential run is never name text, whatever its
+/// shape: `0123…/Report-V2` is a token plus a report name, and the keep
+/// must not carry the credential out of the dying run (review N-A: a
+/// strict name is additionally bounded — a keep is under 16 bytes and
+/// never a ≥32 hex run).
+fn name_run(s: &[u8]) -> bool {
+    s.len() < 16
+        && !(s.len() >= 32
+            && s.iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)))
 }
 
 /// One `-`/`_`-split piece of a name-shaped segment: alnum/dot text that
@@ -771,7 +858,8 @@ fn name_segment(s: &[u8]) -> bool {
 }
 
 /// The keep beside a dying run: no uppercase, every `-`/`_` piece under 6
-/// chars, or a dotted version.
+/// chars, or a dotted version — and the caller's [`name_run`] bound on
+/// top (review N-A).
 fn strict_name(s: &[u8]) -> bool {
     !s.is_empty()
         && s.iter()

@@ -470,3 +470,29 @@ named decision when the relevant milestone starts.
   no longer cross iterations — a slightly heavier connect path per
   iteration, accepted; keep-alive inside an iteration (where the load
   matters) is unchanged.
+- **D-036 — The revocation channel carries hints; the store is the only
+  authority (2026-11-21, review N-round).** D-034's LISTEN/NOTIFY made a
+  peer revoke die on the next request, but round-4 review found the
+  channel had quietly become authoritative in three places: `clear`
+  flushed both caches on a payload any database role can forge; the
+  catch-up read ran once and left a failed instance degraded until the
+  next gap; and its unbounded `revoked_at IS NOT NULL` scan grew with
+  every revoke while missing DELETEs entirely. The redesign: payloads
+  are hints, never commands — a digest still evicts its one entry
+  (a forged digest can only evict a digest), but `clear` schedules a
+  debounced resync, never a per-message flush. The resync is the
+  authority: both caches drop everything (a gap can hide DELETEs and
+  `opt_in` withdrawals the digest set cannot name — N-G), the revoked
+  digest set inside the cache's max entry age is re-read through a new
+  partial index and re-armed as negative entries (bounded — N-C), and a
+  failed read retries with backoff until it lands or `cancel` ends it.
+  The heartbeat moved off the tenant query pool onto the watcher's own
+  one-connection writer (`aiops-revocation-writer` — N-I: a saturated
+  tenant pool used to fabricate a channel gap), and it exercises the
+  trigger path — an UPDATE on a one-row `revocation_heartbeat` table
+  whose trigger emits the beat — so an observed heartbeat now proves
+  triggers live, not merely that the channel can carry bytes; a backend
+  running `session_replication_role = replica` reads as a gap (N-H).
+  The credential caches' generation and both maps moved under one
+  mutex — a `remove` bumping generation outside the locks let a
+  pre-eviction store answer slip back in for up to a TTL (N-F).
