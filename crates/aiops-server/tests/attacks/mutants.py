@@ -737,9 +737,11 @@ MUTANTS = {
         ],
         ["two_clears_half_a_second_apart_both_land"],
     ),
-    # Review round 5, finding 3: the beat is bounded — an unbounded await
-    # freezes the watcher inside the select arm under a row lock.
-    "beat-never-times-out": (
+    # Review round 5, finding 3: the beat is bounded twice — the writer
+    # pool's lock/statement timeouts cover a blocked row, the client's 2 s
+    # timeout covers a half-open connection. Remove BOTH and a lock on the
+    # heartbeat row freezes the watcher inside the select arm, green.
+    "beat-unbounded": (
         [
             e(
                 S / "notify.rs",
@@ -757,7 +759,27 @@ MUTANTS = {
                         Metrics::add(&state.revocation_gaps, 1);
                         return true;
                     }""",
-            )
+            ),
+            e(
+                T / "lib.rs",
+                """            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    // Server-side deadlines under the client's 2 s beat
+                    // timeout (review round 5, finding 3): a lock on the
+                    // heartbeat row fails at 1 s, a slow statement at 2 s —
+                    // either way the beat returns, never freezes the
+                    // watcher.
+                    sqlx::query("SET lock_timeout = '1s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("SET statement_timeout = '2s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })""",
+                """""",
+            ),
         ],
         ["a_beat_under_a_row_lock_reads_as_a_gap"],
     ),
@@ -774,7 +796,7 @@ MUTANTS = {
     )
     .fetch_optional(pool)
     .await?;
-    if !matches!(armed.as_deref(), Some("O") | Some("A")) {
+    if !matches!(armed.as_deref(), Some("O" | "A")) {
         return Err(StoreError::Unavailable(sqlx::Error::RowNotFound));
     }
     Ok(())""",

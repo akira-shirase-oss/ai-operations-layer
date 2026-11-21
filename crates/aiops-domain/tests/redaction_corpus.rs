@@ -321,7 +321,9 @@ const BACKSTOP_REDACT: &[(&str, &str)] = &[
     // A std-base64 token may LEAD with `/` — 1 in 64 unpadded 24-byte draws:
     // `/` must open a run the way `+` does, or the 31-char tail survives
     // (review round 5, the flaky N-B seed was a real leak).
-    ("x /AbCdEf1234567890aBcDeF1234567890a y", "x [redacted] y"),
+    // The token is exactly 32 — the interior run is 31, so only the
+    // `/`-opening fix catches it.
+    ("x /AbCdEf1234567890aBcDeF123456789 y", "x [redacted] y"),
     // A `%25`-nested escape deeper than DECODE_PASSES fails closed on its
     // leftover span — `%41` nested five deep — not the whole field
     // (review round 5): the text around it survives.

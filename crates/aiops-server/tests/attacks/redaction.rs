@@ -207,12 +207,14 @@ async fn a_leading_slash_token_dies_in_free_text(pool: PgPool) {
     let key = create_ingest_key(&s.url, "pilot", "h");
 
     let mut events = journey(0x33, 0);
-    events[2].error_message = Some("x /AbCdEf1234567890aBcDeF1234567890a y".to_owned());
+    // Exactly 32 bytes including the `/` — the interior run is 31, so only
+    // the `/`-opening fix catches it.
+    events[2].error_message = Some("x /AbCdEf1234567890aBcDeF123456789 y".to_owned());
     let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
     assert_eq!(status, 200, "{body}");
     let stored = stored_bodies(&pool).await;
     assert!(
-        !stored.contains("AbCdEf1234567890aBcDeF1234567890a"),
+        !stored.contains("AbCdEf1234567890aBcDeF123456789"),
         "a leading-`/` token survived: {stored}"
     );
 }

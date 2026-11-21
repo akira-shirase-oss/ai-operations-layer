@@ -578,16 +578,18 @@ async fn the_cli_will_not_mint_a_contradictory_admin_or_scopeless_token(pool: Pg
 }
 
 /// Review round 5, finding 2: a `clear` hint inside the 1 s debounce must
-/// be DEFERRED (trailing edge), never dropped — a second opt-in change
-/// `projects_opt_in_notify` fires `clear` and a dropped hint leaves the
-/// withdrawn key applying from cache until the 30 s TTL.
+/// be DEFERRED (trailing edge), never dropped — a dropped hint leaves the
+/// withdrawn opt-in applying from cache until the 30 s TTL. Deterministic:
+/// the first `clear` is sent by hand so the second is provably inside the
+/// window whatever the CLI's timing is.
 #[sqlx::test(migrations = "../aiops-store/migrations")]
 async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
     let s = stack(&pool, &[]).await;
     create_project(&s.url, "pilot");
     let key = create_ingest_key(&s.url, "pilot", "h");
 
-    // Opt in `customer.tier`, let its resync complete, then prove it applies.
+    // Opt in `customer.tier` and prove it applies — the ingest-key cache
+    // now holds a positive entry with opt_in = [customer.tier].
     let (out, err) = crate::common::cli(
         &s.url,
         &["admin", "set-opt-in", "--project", "pilot", "customer.tier"],
@@ -604,29 +606,44 @@ async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
         "the opted-in key must store first"
     );
 
-    // The second opt-in write ~0.5 s later fires a `clear` inside the
-    // debounce window. Dropped under a leading-edge debounce; deferred to
-    // the trailing edge under the fix.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let (out, err) = crate::common::cli(
-        &s.url,
-        &["admin", "set-opt-in", "--project", "pilot", "other.key"],
-    );
-    assert!(out.contains("other.key"), "{out} / {err}");
+    // Clear #1 by hand — the resync lands now and stamps the debounce
+    // window. Then re-warm the cache so a *stale* positive entry is what a
+    // dropped hint would leave behind.
+    sqlx::query("SELECT pg_notify('aiops_credential_revoked', 'clear')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&e)).await;
+    assert_eq!(status, 200, "{body}");
+
+    // Clear #2 lands ~0.3 s inside the window — the opt_in UPDATE itself
+    // fires `projects_opt_in_notify`'s `clear`, so the hint is real and
+    // timed. Dropped under a leading-edge debounce; deferred under the fix.
+    sqlx::query("UPDATE projects SET opt_in_attribute_keys = '{other.key}'")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // The deferred resync must land: `customer.tier` is withdrawn and
-    // `other.key` applies — poll past the 1 s debounce + resync latency.
+    // `other.key` applies. Each poll uses fresh markers so an early,
+    // still-stale ingest can't alias the check.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
-    loop {
-        let mut events = journey(0x41, 100);
-        events[0].attributes = serde_json::json!({"customer.tier": "v1", "other.key": "v2"})
-            .as_object()
-            .cloned();
+    for n in 0..30u64 {
+        let withdrawn = format!("c{n}");
+        let applied = format!("o{n}");
+        let mut events = journey(0x41, 100 + n * 10);
+        events[0].attributes = serde_json::json!({
+            "customer.tier": withdrawn,
+            "other.key": applied,
+        })
+        .as_object()
+        .cloned();
         let (status, body, _) = post_ingest(&s.base, Some(&key), batch(&events)).await;
         assert_eq!(status, 200, "{body}");
-        if stored_body_contains(&pool, "v2").await {
+        if stored_body_contains(&pool, &applied).await {
             assert!(
-                !stored_body_contains(&pool, "v1").await,
+                !stored_body_contains(&pool, &withdrawn).await,
                 "the withdrawn key kept applying — the second clear was dropped"
             );
             return;
@@ -637,6 +654,7 @@ async fn two_clears_half_a_second_apart_both_land(pool: PgPool) {
         );
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+    panic!("the deferred clear never landed — `other.key` never applied");
 }
 
 async fn stored_body_contains(pool: &PgPool, needle: &str) -> bool {
