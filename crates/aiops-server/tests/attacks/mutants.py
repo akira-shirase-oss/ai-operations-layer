@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[4]
 S = ROOT / "crates/aiops-server/src"
 T = ROOT / "crates/aiops-store/src"
+D = ROOT / "crates/aiops-domain/src"
 # File-level backups (.scratch is gitignored): restore copies bytes back, so a
 # mutant whose `new` is empty or ambiguous restores exactly, never by search.
 BACKUP = ROOT / ".scratch" / "mutants-backup"
@@ -446,6 +447,118 @@ MUTANTS = {
             )
         ],
         ["a_forged_business_key_never_reaches_the_authority"],
+    ),
+    # REDACTION-POLICY (docs/REDACTION-POLICY.md) attack classes — the typed
+    # field policy is the privacy boundary. Each mutant weakens exactly the
+    # rule its attack test asserts.
+    # The credential check must precede the opt-in list; moving it after
+    # means an opted-in credential key stores its value raw.
+    "opt-in-beats-credential": (
+        [
+            e(
+                D / "policy.rs",
+                """        if credential_key(key.as_bytes()) {
+            return KeyTreatment::Withheld;
+        }
+        if DEFAULT_ALLOWED_ATTRIBUTES.contains(&key) {
+            KeyTreatment::Default
+        } else if self.opt_in_keys.iter().any(|k| k == key) {
+            KeyTreatment::OptIn
+        } else {
+            KeyTreatment::Withheld
+        }""",
+                """        if DEFAULT_ALLOWED_ATTRIBUTES.contains(&key) {
+            KeyTreatment::Default
+        } else if self.opt_in_keys.iter().any(|k| k == key) {
+            KeyTreatment::OptIn
+        } else if credential_key(key.as_bytes()) {
+            KeyTreatment::Withheld
+        } else {
+            KeyTreatment::Withheld
+        }""",
+            )
+        ],
+        ["a_credential_key_is_withheld_even_when_opted_in"],
+    ),
+    # A credential key's value must die whatever its shape — the key's name
+    # decides. Answering OptIn instead puts the value through the free-text
+    # scanner, where a benign-shaped `hunter2` survives raw.
+    "credential-key-by-shape": (
+        [
+            e(
+                D / "policy.rs",
+                """        if credential_key(key.as_bytes()) {
+            return KeyTreatment::Withheld;
+        }""",
+                """        if credential_key(key.as_bytes()) {
+            return KeyTreatment::OptIn;
+        }""",
+            )
+        ],
+        ["a_credential_key_is_withheld_even_when_opted_in"],
+    ),
+    # An unknown attribute key is withheld by default; answering Default
+    # stores every unlisted key the caller invents.
+    "unknown-key-default-allowed": (
+        [
+            e(
+                D / "policy.rs",
+                """        } else if self.opt_in_keys.iter().any(|k| k == key) {
+            KeyTreatment::OptIn
+        } else {
+            KeyTreatment::Withheld
+        }""",
+                """        } else if self.opt_in_keys.iter().any(|k| k == key) {
+            KeyTreatment::OptIn
+        } else {
+            KeyTreatment::Default
+        }""",
+            )
+        ],
+        ["an_unknown_attribute_key_is_withheld"],
+    ),
+    # only() is what makes a field the event type does not carry a
+    # field_not_allowed refusal; never matching admits it silently.
+    "unclassified-field-admitted": (
+        [
+            e(
+                D / "validate.rs",
+                ".find(|f| field_present(w, f) && !allowed.contains(f))",
+                ".find(|f| field_present(w, f) && !allowed.contains(f) && false)",
+            )
+        ],
+        ["a_field_the_event_type_does_not_carry_is_refused"],
+    ),
+    # In free text, `key=value` under a credential name still loses the
+    # value — the keyed arm is what strips it; a `password=hunter2` inside
+    # an error_message otherwise stores `hunter2` raw.
+    "keyed-text-kept": (
+        [
+            e(
+                D / "policy.rs",
+                "            && credential_key(&rest[..key_len])",
+                "            && false && credential_key(&rest[..key_len])",
+            )
+        ],
+        ["keyed_text_inside_free_text_loses_the_value"],
+    ),
+    # An identifier field refuses credential-keyed `name:value` — its tail
+    # admits only state words and short digit pieces. Re-admitting plain
+    # alphanumeric tails stores `password:hunter2` as a service name.
+    "identifier-credential-stored": (
+        [
+            e(
+                D / "policy.rs",
+                """            .all(|p| {
+                STATE_WORDS.contains(&p)
+                    || (p.len() <= 5 && !p.is_empty() && p.iter().all(u8::is_ascii_digit))
+            })""",
+                """            .all(|p| {
+                STATE_WORDS.contains(&p) || p.iter().all(u8::is_ascii_alphanumeric)
+            })""",
+            )
+        ],
+        ["a_credential_shaped_identifier_is_refused_not_rewritten"],
     ),
 }
 
